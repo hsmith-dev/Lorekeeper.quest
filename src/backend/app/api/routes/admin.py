@@ -20,6 +20,8 @@ from app.schemas.admin import (
     PromoCodeRedemptionResponse,
     PromoCodeCreateRequest,
     PromoCodeUpdateRequest,
+    AppConfigResponse,
+    AppConfigUpdateRequest,
 )
 from app.api.deps import require_admin
 from app.services.email_service import send_admin_message_email
@@ -300,3 +302,38 @@ async def delete_promo_code(promo_id: uuid.UUID, db: AsyncSession = Depends(get_
     # keeping the history; delete is for genuinely removing a mistaken code.
     await db.delete(promo)
     await db.commit()
+
+
+# ── Platform config ──────────────────────────────────────────────────────────
+
+def _config_response(open_access_mode: bool) -> AppConfigResponse:
+    from app.core.config import get_settings
+    s = get_settings()
+    return AppConfigResponse(
+        open_access_mode=open_access_mode,
+        stripe_configured=bool(
+            s.stripe_secret_key and s.stripe_webhook_secret
+            and s.stripe_price_id_byok and s.stripe_price_id_hosted
+        ),
+    )
+
+
+@router.get("/config", response_model=AppConfigResponse)
+async def get_platform_config(db: AsyncSession = Depends(get_db)) -> AppConfigResponse:
+    """Current platform settings for the admin portal's Platform tab."""
+    from app.services.app_config_service import get_app_config
+    cfg = await get_app_config(db)
+    return _config_response(cfg.open_access_mode)
+
+
+@router.put("/config", response_model=AppConfigResponse)
+async def update_platform_config(body: AppConfigUpdateRequest, db: AsyncSession = Depends(get_db)) -> AppConfigResponse:
+    """Flip open-access mode live — no redeploy. Turning it OFF re-arms the
+    promo/subscription gates for accounts without access_granted; accounts
+    that already earned access (promo, subscription, or registered while
+    open) keep it."""
+    from app.services.app_config_service import get_app_config
+    cfg = await get_app_config(db)
+    cfg.open_access_mode = body.open_access_mode
+    await db.commit()
+    return _config_response(cfg.open_access_mode)

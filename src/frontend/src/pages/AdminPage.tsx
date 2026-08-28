@@ -16,6 +16,8 @@ import {
   useCreatePromoCode,
   useUpdatePromoCode,
   useDeletePromoCode,
+  useAdminConfig,
+  useUpdateAdminConfig,
 } from "../hooks/useAdmin";
 import type { FeedbackAdmin, FeedbackCategory, AdminUser, PromoCodeAdmin } from "../types";
 
@@ -30,6 +32,7 @@ const TABS = [
   { key: "users", label: "Users" },
   { key: "promo-codes", label: "Promo Codes" },
   { key: "feedback", label: "Feedback" },
+  { key: "platform", label: "Platform" },
 ] as const;
 type TabKey = (typeof TABS)[number]["key"];
 
@@ -544,6 +547,62 @@ function PromoCodesTab() {
 
 // ── Page ─────────────────────────────────────────────────────────────────────
 
+// ── Platform tab ─────────────────────────────────────────────────────────────
+
+function PlatformTab() {
+  const { data: config, isLoading } = useAdminConfig();
+  const update = useUpdateAdminConfig();
+
+  if (isLoading || !config) return <p className="text-sm text-muted-foreground">Loading platform settings…</p>;
+
+  return (
+    <div className="flex flex-col gap-4 max-w-2xl">
+      <div className="rounded-lg border border-border bg-card p-5">
+        <label className="flex items-start gap-3 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={config.open_access_mode}
+            disabled={update.isPending}
+            onChange={(e) => update.mutate({ open_access_mode: e.target.checked })}
+            className="mt-1 h-4 w-4 accent-primary"
+          />
+          <span>
+            <span className="font-semibold text-card-foreground block">Open access</span>
+            <span className="text-sm text-muted-foreground">
+              Anyone can sign up and use Lorekeeper — including the self-hosted AI model — with no
+              promo code, subscription, or billing. The right mode for self-hosting, provisioning
+              accounts for a team or company, or running a free community server. Applies
+              immediately, including to existing accounts that were still gated.
+            </span>
+          </span>
+        </label>
+        {!config.open_access_mode && (
+          <p className="mt-3 text-sm text-muted-foreground border-t border-border pt-3">
+            Gated mode is active: new accounts need a promo code (Promo Codes tab) or a paid
+            subscription to get access.
+          </p>
+        )}
+      </div>
+
+      <div className="rounded-lg border border-border bg-card p-5 text-sm">
+        <p className="font-semibold text-card-foreground mb-1">Stripe billing</p>
+        {config.stripe_configured ? (
+          <p className="text-muted-foreground">
+            <span className="text-green-600 dark:text-green-400">● Configured</span> — subscription
+            checkout works whenever open access is off.
+          </p>
+        ) : (
+          <p className="text-muted-foreground">
+            <span className="text-amber-600 dark:text-amber-400">● Not configured</span> — with open
+            access off, accounts can only get in via promo codes until the Stripe environment
+            variables are set (see docs/PAYMENT_PROCESSOR_SETUP.md).
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function AdminPage() {
   const [tab, setTab] = useState<TabKey>("users");
   // The backend already 403s every /api/admin/* route for non-admins (see
@@ -590,6 +649,7 @@ export function AdminPage() {
       {tab === "users" && <UsersTab />}
       {tab === "promo-codes" && <PromoCodesTab />}
       {tab === "feedback" && <FeedbackTab />}
+      {tab === "platform" && <PlatformTab />}
     </div>
   );
 }

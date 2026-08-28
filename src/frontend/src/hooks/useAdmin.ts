@@ -126,3 +126,18 @@ export function useDeletePromoCode() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["admin-promo-codes"] }),
   });
 }
+
+export function useAdminConfig() {
+  return useQuery<import("../types").AdminConfig>({
+    queryKey: ["admin-config"],
+    queryFn: async () => (await api.getAdminConfig()).data,
+  });
+}
+
+export function useUpdateAdminConfig() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (data: { open_access_mode: boolean }) => (await api.updateAdminConfig(data)).data,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["admin-config"] }),
+  });
+}

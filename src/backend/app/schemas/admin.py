@@ -90,3 +90,16 @@ class PromoCodeUpdateRequest(BaseModel):
     expires_at: datetime | None = None
     note: str | None = Field(None, max_length=_NOTE_MAX_LENGTH)
     grants_plan: PlanLiteral | None = None
+
+
+class AppConfigResponse(BaseModel):
+    open_access_mode: bool
+    # Read-only status for the admin UI: whether Stripe env config is
+    # complete enough for gated mode's billing to actually function.
+    stripe_configured: bool
+
+    model_config = {"from_attributes": True}
+
+
+class AppConfigUpdateRequest(BaseModel):
+    open_access_mode: bool

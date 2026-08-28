@@ -74,10 +74,12 @@ async def register(request: Request, body: UserCreate, db: AsyncSession = Depend
         user.access_granted = True
         user.access_source = "promo"
     else:
-        from app.core.config import get_settings
-        if get_settings().open_access_mode:
-            # Self-host / free-community deployments (OPEN_ACCESS_MODE=true):
-            # no promo or subscription needed — everyone gets in.
+        from app.services.app_config_service import is_open_access
+        if await is_open_access(db):
+            # Open-access mode (admin-portal checkbox): no promo or
+            # subscription needed — everyone gets in. Covers self-hosters,
+            # companies provisioning accounts for their users, and free
+            # community servers alike.
             user.access_granted = True
             user.access_source = "open"
     # else: account is created but gated — access_granted defaults to False.

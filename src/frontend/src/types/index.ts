@@ -393,3 +393,8 @@ export interface ModelEvaluation {
   error_count: number;
   created_at: string;
 }
+
+export interface AdminConfig {
+  open_access_mode: boolean;
+  stripe_configured: boolean;
+}

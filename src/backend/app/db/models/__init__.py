@@ -30,3 +30,4 @@ __all__ = [
     "Feedback", "FeedbackCategory", "PasswordResetToken", "AdminMessage", "ShorthandTerm",
     "CharacterSheetTemplate", "CharacterSheet",
 ]
+from app.db.models.app_config import AppConfig

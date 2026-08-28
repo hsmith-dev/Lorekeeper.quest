@@ -56,6 +56,14 @@ async def require_active_account(user: User = Depends(get_current_user)) -> User
     their own API key) — and not applied to share.py's public read endpoints,
     which take no user at all."""
     if not user.access_granted:
+        # Open-access mode (admin-portal checkbox, app_config row) waives the
+        # gate entirely — including for accounts created while gating was on,
+        # so flipping the box open immediately unrestricts everyone.
+        from app.db.session import AsyncSessionLocal
+        from app.services.app_config_service import is_open_access
+        async with AsyncSessionLocal() as gate_db:
+            if await is_open_access(gate_db):
+                return user
         # X-Gate-Reason distinguishes this from get_user_llm_config's 402s
         # below — the frontend's axios interceptor uses it to send the user
         # to the right place (/subscribe here; /settings for an LLM-config
@@ -182,14 +190,15 @@ async def get_user_llm_config(
             max_tokens=us.llm_max_tokens,
         )
 
-    # Self-host / free-community mode: the platform default (the operator's
-    # own Ollama) is available to every account, no subscription or metering.
-    # record_hosted_usage stays harmless if a route calls it anyway — it's a
-    # no-op for users with no subscription row.
-    from app.core.config import get_settings as _get_settings
-    if _get_settings().open_access_mode:
+    # Open-access mode (admin-portal checkbox, app_config row): the platform
+    # default (the operator's own Ollama) is available to every account, no
+    # subscription or metering. record_hosted_usage stays harmless if a route
+    # calls it anyway — it's a no-op for users with no subscription row.
+    from app.services.app_config_service import is_open_access
+    if await is_open_access(db):
         default_cfg = get_default_config()
         if us is not None and us.hosted_model_variant == "base":
+            from app.core.config import get_settings as _get_settings
             default_cfg.model = _get_settings().kobold_base_model
         return default_cfg
 

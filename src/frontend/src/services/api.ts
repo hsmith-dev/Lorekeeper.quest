@@ -448,3 +448,9 @@ export const updateAdminPromoCode = (
 ) => api.patch<import("../types").PromoCodeAdmin>(`/api/admin/promo-codes/${id}`, data);
 
 export const deleteAdminPromoCode = (id: string) => api.delete(`/api/admin/promo-codes/${id}`);
+
+// Admin — platform config
+export const getAdminConfig = () => api.get<import("../types").AdminConfig>("/api/admin/config");
+
+export const updateAdminConfig = (data: { open_access_mode: boolean }) =>
+  api.put<import("../types").AdminConfig>("/api/admin/config", data);

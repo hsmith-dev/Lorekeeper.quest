@@ -20,8 +20,7 @@ Requirements: Docker with Compose. ~8 GB free RAM (or an NVIDIA GPU — see belo
 git clone <this-repo> lorekeeper && cd lorekeeper
 cp .env.example .env
 # edit .env: set SECRET_KEY (openssl rand -hex 32) and POSTGRES_PASSWORD.
-# OPEN_ACCESS_MODE=true is already the example default — registration is open,
-# no billing anywhere.
+# Registration is open by default — no billing anywhere (see Access modes below).
 
 docker compose -f docker-compose.prod.yml up -d --build
 ```
@@ -76,8 +75,9 @@ then start with both files: `docker compose -f docker-compose.prod.yml -f docker
 
 ## Access modes
 
-- **`OPEN_ACCESS_MODE=true`** (the example default): free community / self-host mode. Anyone can register; the self-hosted model is available to every account. No billing anywhere.
-- **`OPEN_ACCESS_MODE=false`**: gated mode — accounts need a promo code (`scripts/create_promo_code.py`) or a Stripe subscription (`docs/PAYMENT_PROCESSOR_SETUP.md`). Only relevant if you're running this as a paid service.
+**Open access is the default**: anyone can register and use the app — including the self-hosted model — with no promo code, subscription, or billing. That covers self-hosting, a company provisioning accounts for its users, and free community servers.
+
+Running it as a paid service instead is a checkbox, not a redeploy: the **admin portal → Platform tab** has an "Open access" toggle. Untick it and new accounts need a promo code (mintable from the same portal) or a Stripe subscription (`docs/PAYMENT_PROCESSOR_SETUP.md`) — the full billing integration ships in the codebase, dormant until you turn gating on. The `OPEN_ACCESS_MODE` env var only seeds the initial value; the portal setting is authoritative after that.
 
 ## Architecture
 
