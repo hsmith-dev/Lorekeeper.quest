@@ -28,15 +28,26 @@ docker compose -f docker-compose.prod.yml up -d --build
 
 ### Add a model
 
-The stack serves models through [Ollama](https://ollama.com). The app looks for a model named `lorekeeper` (and optionally `lorekeeper-base` for the in-app model comparison). Any instruct model works — the quickest path:
+The stack serves models through [Ollama](https://ollama.com). The recommended model is **[Lorekeeper-Mistral-7B](https://huggingface.co/harrisonsmith/Lorekeeper-Mistral-7B-GGUF)** — the LoRA fine-tune of Mistral 7B this app was built around, trained on RPG session-journal data across 12 game systems:
+
+```bash
+# download into the models dir (mounted into the ollama container), ~4.4 GB
+curl -L -o src/ml/models/lorekeeper-7b-q4.gguf \
+  https://huggingface.co/harrisonsmith/Lorekeeper-Mistral-7B-GGUF/resolve/main/lorekeeper-7b-q4.gguf
+curl -L -o src/ml/models/lorekeeper-Modelfile \
+  https://huggingface.co/harrisonsmith/Lorekeeper-Mistral-7B-GGUF/resolve/main/lorekeeper-Modelfile
+
+docker compose -f docker-compose.prod.yml exec ollama ollama create lorekeeper -f /import-models/lorekeeper-Modelfile
+```
+
+Optionally add the base model too (enables the in-app fine-tuned-vs-base comparison in Settings):
 
 ```bash
 docker compose -f docker-compose.prod.yml exec ollama ollama pull mistral:7b-instruct-q4_0
-docker compose -f docker-compose.prod.yml exec ollama ollama cp mistral:7b-instruct-q4_0 lorekeeper
 docker compose -f docker-compose.prod.yml exec ollama ollama cp mistral:7b-instruct-q4_0 lorekeeper-base
 ```
 
-Have your own fine-tuned GGUF? Drop it in `src/ml/models/` with a Modelfile and `ollama create lorekeeper -f /import-models/your-Modelfile` instead. The training pipeline that produced the original fine-tune (LoRA on Mistral 7B over RPG session-journal data) lives in `src/ml/`.
+Prefer a different model? Any instruct GGUF works — drop it in `src/ml/models/` with a Modelfile and `ollama create lorekeeper -f /import-models/your-Modelfile`, or `ollama cp` any pulled Ollama model to the name `lorekeeper`. The training pipeline that produced the fine-tune lives in `src/ml/`.
 
 Then open **http://localhost** and register an account.
 
