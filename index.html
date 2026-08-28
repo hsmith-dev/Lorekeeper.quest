@@ -1,0 +1,440 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lorekeeper — the AI campaign companion that remembers your world</title>
+<meta name="description" content="Self-hosted AI campaign companion for tabletop RPGs. A fine-tuned local LLM plus retrieval over your own campaign journal — answers grounded in what actually happened at your table.">
+<meta property="og:title" content="Lorekeeper">
+<meta property="og:description" content="A fine-tuned local LLM + RAG over your own campaign journal. Self-hosted, no external AI APIs.">
+<meta property="og:type" content="website">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🗝️</text></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600;700&family=Alegreya+Sans:ital,wght@0,400;0,500;0,700;1,400&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+  :root {
+    --ink: #12141d;
+    --ink-deep: #0d0f16;
+    --surface: #1c1f2e;
+    --surface-2: #232741;
+    --parchment: #e9e3d3;
+    --dim: #8f8a9b;
+    --gold: #d9a441;
+    --gold-bright: #e8b95a;
+    --gold-soft: rgba(217, 164, 65, 0.14);
+    --line: rgba(233, 227, 211, 0.13);
+    --green: #7dba6f;
+    --amber-warn: #e0a935;
+    --display: "Cormorant Garamond", "Palatino Linotype", Georgia, serif;
+    --body: "Alegreya Sans", "Segoe UI", system-ui, sans-serif;
+    --mono: "IBM Plex Mono", Consolas, "Courier New", monospace;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+  body {
+    background: var(--ink);
+    color: var(--parchment);
+    font-family: var(--body);
+    font-size: clamp(16px, 1.1vw, 19px);
+    line-height: 1.6;
+    overflow-x: hidden;
+  }
+  a { color: var(--gold); }
+  a:focus-visible, button:focus-visible { outline: 2px solid var(--gold); outline-offset: 3px; }
+
+  .wrap { max-width: 68rem; margin: 0 auto; padding: 0 1.5rem; }
+
+  /* ── Header ─────────────────────────────────────────────── */
+  header {
+    position: sticky; top: 0; z-index: 10;
+    background: rgba(18, 20, 29, .88); backdrop-filter: blur(8px);
+    border-bottom: 1px solid var(--line);
+  }
+  .nav { display: flex; align-items: center; justify-content: space-between; padding: .9rem 1.5rem; max-width: 68rem; margin: 0 auto; }
+  .brand { font-family: var(--display); font-weight: 700; font-size: 1.35rem; color: var(--parchment); text-decoration: none; letter-spacing: .01em; }
+  .brand .key { color: var(--gold); }
+  .nav-links { display: flex; gap: 1.4rem; align-items: center; font-size: .88rem; }
+  .nav-links a { color: var(--dim); text-decoration: none; }
+  .nav-links a:hover { color: var(--gold); }
+  .nav-links a.btn-sm {
+    color: var(--ink); background: var(--gold); border-radius: 4px;
+    padding: .4em .9em; font-weight: 700;
+  }
+  .nav-links a.btn-sm:hover { background: var(--gold-bright); color: var(--ink); }
+  @media (max-width: 640px) { .nav-links a:not(.btn-sm) { display: none; } }
+
+  /* ── Hero ───────────────────────────────────────────────── */
+  .hero { padding: clamp(4rem, 10vh, 7rem) 0 clamp(3rem, 7vh, 5rem); position: relative; }
+  .hero::before {
+    content: ""; position: absolute; inset: 0; pointer-events: none;
+    background: radial-gradient(ellipse 60% 45% at 70% 20%, rgba(217,164,65,.07), transparent 70%);
+  }
+  .hero .wrap { display: grid; grid-template-columns: 1.1fr 1fr; gap: 3.5rem; align-items: center; position: relative; }
+  @media (max-width: 880px) { .hero .wrap { grid-template-columns: 1fr; } }
+  .eyebrow {
+    font-size: .74rem; text-transform: uppercase; letter-spacing: .22em;
+    color: var(--gold); font-weight: 700; margin-bottom: 1.1rem;
+  }
+  h1 {
+    font-family: var(--display); font-weight: 600; line-height: 1.05;
+    font-size: clamp(2.6rem, 5.5vw, 4.2rem); text-wrap: balance;
+  }
+  h1 em { color: var(--gold); font-style: normal; }
+  .hero p.lede { margin-top: 1.3rem; font-size: 1.12em; color: var(--dim); max-width: 32em; }
+  .hero p.lede strong { color: var(--parchment); font-weight: 500; }
+  .cta-row { display: flex; gap: .9rem; margin-top: 2rem; flex-wrap: wrap; }
+  .btn {
+    display: inline-flex; align-items: center; gap: .55em;
+    font-family: var(--body); font-weight: 700; font-size: .95rem;
+    text-decoration: none; border-radius: 5px; padding: .72em 1.35em;
+    border: 1px solid transparent; transition: transform .15s ease, background .15s ease;
+  }
+  .btn svg { width: 1.1em; height: 1.1em; fill: currentColor; }
+  .btn-gold { background: var(--gold); color: var(--ink); }
+  .btn-gold:hover { background: var(--gold-bright); transform: translateY(-1px); }
+  .btn-ghost { border-color: var(--line); color: var(--parchment); }
+  .btn-ghost:hover { border-color: var(--gold); color: var(--gold); transform: translateY(-1px); }
+  .hero-note { margin-top: 1.1rem; font-family: var(--mono); font-size: .72rem; color: var(--dim); }
+
+  /* hero chat card */
+  .chatcard {
+    background: var(--surface); border: 1px solid var(--line); border-radius: 10px;
+    box-shadow: 0 18px 50px rgba(0,0,0,.4);
+    overflow: hidden; font-size: .86rem;
+  }
+  .chatcard .bar {
+    display: flex; align-items: center; gap: .5rem;
+    background: var(--ink-deep); padding: .6rem .9rem;
+    border-bottom: 1px solid var(--line);
+    font-family: var(--mono); font-size: .68rem; color: var(--dim);
+  }
+  .chatcard .dot { width: .55em; height: .55em; border-radius: 50%; background: var(--line); }
+  .chatcard .dot:first-child { background: var(--gold); }
+  .chatcard .body { padding: 1.1rem; display: flex; flex-direction: column; gap: .85rem; }
+  .msg { max-width: 92%; padding: .65em .95em; border-radius: 8px; line-height: 1.5; }
+  .msg.user { align-self: flex-end; background: var(--gold-soft); border: 1px solid rgba(217,164,65,.3); }
+  .msg.ai { align-self: flex-start; background: var(--surface-2); border: 1px solid var(--line); }
+  .msg.ai .who { font-family: var(--mono); font-size: .62rem; letter-spacing: .18em; color: var(--gold); display: block; margin-bottom: .35em; }
+  .srcchip {
+    align-self: flex-start; font-family: var(--mono); font-size: .64rem;
+    background: var(--gold-soft); color: var(--gold);
+    border: 1px solid rgba(217,164,65,.35); border-radius: 3px; padding: .3em .7em;
+  }
+  .typed-caret { display: inline-block; width: .55em; border-bottom: 2px solid var(--gold); animation: blink 1s steps(1) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+  @media (prefers-reduced-motion: reduce) { .typed-caret { animation: none; } }
+
+  /* ── Sections ───────────────────────────────────────────── */
+  section { padding: clamp(3.5rem, 8vh, 6rem) 0; }
+  section.alt { background: var(--ink-deep); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+  h2 {
+    font-family: var(--display); font-weight: 600; line-height: 1.1;
+    font-size: clamp(1.9rem, 3.6vw, 2.9rem); text-wrap: balance; margin-bottom: .6rem;
+  }
+  .sec-intro { color: var(--dim); max-width: 38em; margin-bottom: 2.6rem; }
+  .sec-intro strong { color: var(--parchment); font-weight: 500; }
+
+  .reveal { opacity: 0; transform: translateY(1.2rem); transition: opacity .6s ease, transform .6s ease; }
+  .reveal.in { opacity: 1; transform: none; }
+  @media (prefers-reduced-motion: reduce) { .reveal { opacity: 1; transform: none; transition: none; } }
+
+  /* feature rows */
+  .feature { display: grid; grid-template-columns: 1fr 1.15fr; gap: 3rem; align-items: center; padding: 2.2rem 0; }
+  .feature:nth-child(even) { grid-template-columns: 1.15fr 1fr; }
+  .feature:nth-child(even) .feature-copy { order: 2; }
+  @media (max-width: 880px) {
+    .feature, .feature:nth-child(even) { grid-template-columns: 1fr; gap: 1.4rem; }
+    .feature:nth-child(even) .feature-copy { order: 0; }
+  }
+  .feature h3 { font-family: var(--display); font-size: 1.7rem; font-weight: 600; margin-bottom: .55rem; }
+  .feature .tag { font-family: var(--mono); font-size: .66rem; letter-spacing: .18em; text-transform: uppercase; color: var(--gold); display: block; margin-bottom: .8rem; }
+  .feature p { color: var(--dim); }
+  .feature p strong { color: var(--parchment); font-weight: 500; }
+
+  .demo-panel {
+    background: var(--surface); border: 1px solid var(--line); border-radius: 10px;
+    overflow: hidden; font-size: .84rem;
+    box-shadow: 0 12px 36px rgba(0,0,0,.35);
+  }
+  .demo-panel .bar {
+    background: var(--ink-deep); border-bottom: 1px solid var(--line);
+    padding: .55rem .9rem; font-family: var(--mono); font-size: .66rem; color: var(--dim);
+  }
+  .demo-panel .inner { padding: 1.1rem 1.2rem; }
+  .demo-label { font-family: var(--mono); font-size: .62rem; letter-spacing: .16em; text-transform: uppercase; color: var(--dim); display: block; margin-bottom: .5em; }
+  .demo-label.gold { color: var(--gold); }
+  .demo-in { font-family: var(--mono); font-size: .92em; line-height: 1.6; }
+  .demo-out { font-family: var(--display); font-size: 1.12em; line-height: 1.55; font-weight: 500; margin-top: .2em; }
+  .demo-out em { color: var(--gold); font-style: normal; }
+  .demo-panel hr { border: 0; border-top: 1px solid var(--line); margin: 1rem 0; }
+  .warnline { display: flex; gap: .5em; align-items: baseline; font-size: .8rem; color: var(--amber-warn); margin-top: .8rem; }
+  .planmono { font-family: var(--mono); font-size: .86em; line-height: 1.75; white-space: pre-line; }
+  .planmono b { color: var(--gold); font-weight: 500; }
+
+  /* pipeline */
+  .pipes { display: grid; grid-template-columns: 1fr 1fr; gap: 1.6rem; }
+  @media (max-width: 760px) { .pipes { grid-template-columns: 1fr; } }
+  .pipe { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 1.4rem 1.5rem; }
+  .pipe h4 { font-family: var(--mono); font-size: .68rem; letter-spacing: .18em; text-transform: uppercase; color: var(--gold); font-weight: 500; margin-bottom: 1rem; }
+  .pipe ol { list-style: none; font-family: var(--mono); font-size: .78rem; line-height: 1.7; }
+  .pipe ol li { padding-left: 1.4em; position: relative; margin-bottom: .45em; color: var(--parchment); }
+  .pipe ol li::before { content: "→"; position: absolute; left: 0; color: var(--gold); }
+  .pipe ol li:first-child::before { content: "◆"; font-size: .8em; }
+  .pipe ol li em { color: var(--gold); font-style: normal; }
+  .stackline { margin-top: 2rem; text-align: center; font-family: var(--mono); font-size: .74rem; color: var(--dim); letter-spacing: .04em; }
+
+  /* stats */
+  .statrow { display: flex; gap: 3rem; justify-content: center; flex-wrap: wrap; margin-top: 2.4rem; }
+  .stat { text-align: center; }
+  .stat .num { font-family: var(--display); font-size: 2.4rem; font-weight: 700; color: var(--gold); font-variant-numeric: tabular-nums; }
+  .stat .lbl { font-size: .72rem; text-transform: uppercase; letter-spacing: .14em; color: var(--dim); }
+
+  /* quickstart */
+  .codeblock {
+    background: var(--ink-deep); border: 1px solid var(--line); border-radius: 8px;
+    padding: 1.2rem 1.4rem; font-family: var(--mono); font-size: .8rem; line-height: 1.8;
+    overflow-x: auto; color: var(--parchment);
+  }
+  .codeblock .c { color: var(--dim); }
+  .codeblock .g { color: var(--gold); }
+
+  /* get-it cards */
+  .getit { display: grid; grid-template-columns: 1fr 1fr; gap: 1.6rem; margin-top: 2.4rem; }
+  @media (max-width: 700px) { .getit { grid-template-columns: 1fr; } }
+  .card {
+    display: block; text-decoration: none; color: var(--parchment);
+    background: var(--surface); border: 1px solid var(--line); border-radius: 10px;
+    padding: 1.5rem 1.6rem; transition: border-color .15s ease, transform .15s ease;
+  }
+  .card:hover { border-color: var(--gold); transform: translateY(-2px); }
+  .card .k { display: flex; align-items: center; gap: .6em; font-weight: 700; font-size: 1.05rem; margin-bottom: .4rem; }
+  .card .k svg { width: 1.2em; height: 1.2em; fill: var(--gold); }
+  .card p { color: var(--dim); font-size: .9rem; }
+  .card .url { display: block; margin-top: .8rem; font-family: var(--mono); font-size: .7rem; color: var(--gold); word-break: break-all; }
+
+  footer { border-top: 1px solid var(--line); padding: 2.5rem 0 3rem; }
+  footer .wrap { display: flex; justify-content: space-between; gap: 1.5rem; flex-wrap: wrap; font-size: .84rem; color: var(--dim); }
+  footer a { color: var(--dim); }
+  footer a:hover { color: var(--gold); }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="nav">
+    <a class="brand" href="#top">Lore<span class="key">keeper</span></a>
+    <nav class="nav-links">
+      <a href="#features">Features</a>
+      <a href="#how">How it works</a>
+      <a href="#selfhost">Self-host</a>
+      <a href="https://huggingface.co/harrisonsmith/Lorekeeper-Mistral-7B-GGUF">Model</a>
+      <a class="btn-sm" href="https://github.com/hsmith-dev/Lorekeeper.quest">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main id="top">
+
+  <!-- ── Hero ─────────────────────────────────────────────── -->
+  <div class="hero">
+    <div class="wrap">
+      <div>
+        <p class="eyebrow">Self-hosted · Open source · No AI API keys</p>
+        <h1>The AI campaign companion that <em>remembers your world</em>.</h1>
+        <p class="lede">A <strong>fine-tuned local LLM</strong> plus retrieval over <strong>your own campaign journal</strong> — so when you ask what happened at your table, the answer comes from your story, not a hallucination.</p>
+        <div class="cta-row">
+          <a class="btn btn-gold" href="https://github.com/hsmith-dev/Lorekeeper.quest">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+            View on GitHub
+          </a>
+          <a class="btn btn-ghost" href="https://huggingface.co/harrisonsmith/Lorekeeper-Mistral-7B-GGUF">🤗&nbsp; Get the model</a>
+        </div>
+        <p class="hero-note">docker compose up · runs on CPU or any ~5&nbsp;GB GPU · AGPL-3.0</p>
+      </div>
+
+      <div class="chatcard" aria-label="Example chat with Lorekeeper">
+        <div class="bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span>&nbsp; lorekeeper — campaign chat</div>
+        <div class="body">
+          <div class="msg user">What did Thorin find at the old mill?</div>
+          <div class="msg ai"><span class="who">LOREKEEPER</span><span id="typed">Amidst the ruins of the desecrated mill, Thorin unearthed a most enigmatic relic: a gleaming silver key…</span><span class="typed-caret" id="caret" hidden></span></div>
+          <div class="srcchip">✦ source: journal — “The once tranquil air around the ancient mill…”</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Features ─────────────────────────────────────────── -->
+  <section id="features">
+    <div class="wrap">
+      <h2 class="reveal">Three things it does that a chatbot can't.</h2>
+      <p class="sec-intro reveal">Every response below is a <strong>real, unedited output</strong> from the fine-tuned model running locally — not marketing copy.</p>
+
+      <div class="feature reveal">
+        <div class="feature-copy">
+          <span class="tag">01 · Fine-tuned generation</span>
+          <h3>Shorthand in. Story out.</h3>
+          <p>Jot terse notes during the session; Lorekeeper expands them into a narrative journal entry in your campaign's genre voice. The model is a <strong>LoRA fine-tune of Mistral 7B</strong> trained on session-journal data across 12 game systems — it keeps names, events, and order faithful to your notes, and <strong>you review every draft before it's saved</strong>.</p>
+        </div>
+        <div class="demo-panel">
+          <div class="bar">journal — quick entry</div>
+          <div class="inner">
+            <span class="demo-label">Your notes</span>
+            <p class="demo-in">Party defeated goblin chief Grukk at the old mill. Rescued the miller's daughter. Thorin found a mysterious silver key.</p>
+            <hr>
+            <span class="demo-label gold">Generated narrative</span>
+            <p class="demo-out">“The once tranquil air around the ancient mill now hung heavy with the stench of goblin filth… Goblin Chief Grukk, a hulking figure of malice and brutality, stood defiant amidst the wreckage — until our blades found their mark. In the quiet that followed, Thorin pried a <em>gleaming silver key</em> from the ruin's depths…”</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="feature reveal">
+        <div class="feature-copy">
+          <span class="tag">02 · Retrieval-augmented chat</span>
+          <h3>Ask your campaign anything — and see the receipts.</h3>
+          <p>Every journal entry is embedded into a vector index. Questions retrieve the <strong>actual record</strong> before the model answers, replies <strong>cite their sources</strong>, and retrieval is relevance-gated. And when the record is silent? <strong>The app says so</strong> — replies with no grounding are labeled instead of presenting invention as canon.</p>
+        </div>
+        <div class="demo-panel">
+          <div class="bar">campaign chat — grounding honesty</div>
+          <div class="inner">
+            <span class="demo-label">You ask about lore that never happened</span>
+            <p class="demo-in">Who is the queen of the elven court in our campaign?</p>
+            <hr>
+            <span class="demo-label gold">Lorekeeper</span>
+            <p class="demo-out">“The annals of my vast knowledge speak not of a reigning queen within the elven court of your current campaign…”</p>
+            <p class="warnline">⚠ <span>Not from your journal — no campaign records matched this question, so this is improvised.</span></p>
+          </div>
+        </div>
+      </div>
+
+      <div class="feature reveal">
+        <div class="feature-copy">
+          <span class="tag">03 · Session co-planner</span>
+          <h3>Next session, drafted from the record.</h3>
+          <p>One click assembles your recent journal entries, open quests, and NPC roster into a prompt and drafts a structured plan for the next session — <strong>grounded in what actually happened</strong>, instructed never to contradict logged events. The same grounding powers NPC bios, quest hooks, recaps, and note autocomplete.</p>
+        </div>
+        <div class="demo-panel">
+          <div class="bar">session plans — generate</div>
+          <div class="inner">
+            <span class="demo-label gold">Generated plan</span>
+            <p class="planmono"><b>RECAP:</b> The party has the Silver Key, which opens the gates of Karak Dun, but was ambushed en route by the Ashen Hand cultists seeking the key…
+
+<b>LIKELY OBJECTIVES:</b> Consult Aldric about the Silver Key and the Ashen Hand; plan the next move against the cult…
+
+<b>POTENTIAL ENCOUNTERS</b> · <b>NPCS TO FEATURE</b> · <b>COMPLICATIONS</b></p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── How it works ─────────────────────────────────────── -->
+  <section class="alt" id="how">
+    <div class="wrap">
+      <h2 class="reveal">Two AI pipelines, one self-hosted box.</h2>
+      <p class="sec-intro reveal">No OpenAI key, no data leaving your machine. The model and the retrieval index both live in one Docker Compose stack.</p>
+      <div class="pipes reveal">
+        <div class="pipe">
+          <h4>The model — making it speak the genre</h4>
+          <ol>
+            <li>Mistral 7B Instruct</li>
+            <li>LoRA fine-tune on session-journal data (12 game systems)</li>
+            <li>merged &amp; quantized to Q4 GGUF (~4 GB)</li>
+            <li>served locally by Ollama — CPU or GPU</li>
+          </ol>
+        </div>
+        <div class="pipe">
+          <h4>The grounding — making it tell the truth</h4>
+          <ol>
+            <li>journal entry saved</li>
+            <li>sentence-transformer embedding → pgvector</li>
+            <li>questions retrieve nearest entries, <em>relevance-gated</em></li>
+            <li>real record injected into the prompt, sources cited</li>
+            <li>nothing relevant? the reply is <em>labeled ungrounded</em></li>
+          </ol>
+        </div>
+      </div>
+      <p class="stackline reveal">FastAPI · React · PostgreSQL + pgvector · Redis · Ollama · nginx — one compose stack</p>
+      <div class="statrow reveal">
+        <div class="stat"><div class="num">7B</div><div class="lbl">params, runs locally</div></div>
+        <div class="stat"><div class="num">12</div><div class="lbl">game systems trained</div></div>
+        <div class="stat"><div class="num">$0</div><div class="lbl">per-token cost</div></div>
+        <div class="stat"><div class="num">0</div><div class="lbl">external AI APIs</div></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Self-host ────────────────────────────────────────── -->
+  <section id="selfhost">
+    <div class="wrap">
+      <h2 class="reveal">Run it tonight.</h2>
+      <p class="sec-intro reveal">Docker is the only requirement. Registration is open out of the box (<span style="font-family:var(--mono);font-size:.85em">OPEN_ACCESS_MODE=true</span>) — host it for yourself, your gaming group, or a whole community, free.</p>
+      <div class="codeblock reveal"><span class="c"># get the app</span>
+git clone https://github.com/hsmith-dev/Lorekeeper.quest.git lorekeeper
+cd lorekeeper &amp;&amp; cp .env.example .env   <span class="c"># set SECRET_KEY + POSTGRES_PASSWORD</span>
+docker compose -f docker-compose.prod.yml up -d --build
+
+<span class="c"># get the model (~4.4 GB)</span>
+curl -L -o src/ml/models/lorekeeper-7b-q4.gguf <span class="g">\
+  https://huggingface.co/harrisonsmith/Lorekeeper-Mistral-7B-GGUF/resolve/main/lorekeeper-7b-q4.gguf</span>
+curl -L -o src/ml/models/lorekeeper-Modelfile <span class="g">\
+  https://huggingface.co/harrisonsmith/Lorekeeper-Mistral-7B-GGUF/resolve/main/lorekeeper-Modelfile</span>
+docker compose -f docker-compose.prod.yml exec ollama \
+  ollama create lorekeeper -f /import-models/lorekeeper-Modelfile</div>
+
+      <div class="getit reveal">
+        <a class="card" href="https://github.com/hsmith-dev/Lorekeeper.quest">
+          <span class="k"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg> The application</span>
+          <p>Full source — backend, frontend, training pipeline, deployment docs. AGPL-3.0, with commercial licensing available.</p>
+          <span class="url">github.com/hsmith-dev/Lorekeeper.quest</span>
+        </a>
+        <a class="card" href="https://huggingface.co/harrisonsmith/Lorekeeper-Mistral-7B-GGUF">
+          <span class="k">🤗 The model</span>
+          <p>Q4 GGUF + Ollama Modelfile + the LoRA adapter for reproducing the fine-tune. Apache-2.0, works with any GGUF runtime.</p>
+          <span class="url">huggingface.co/harrisonsmith/Lorekeeper-Mistral-7B-GGUF</span>
+        </a>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>© 2026 Harrison Smith · <a href="https://github.com/hsmith-dev/Lorekeeper.quest/blob/main/LICENSE">AGPL-3.0</a> · <a href="https://github.com/hsmith-dev/Lorekeeper.quest/blob/main/COMMERCIAL-LICENSE.md">commercial licensing</a></span>
+    <span><a href="https://github.com/hsmith-dev/Lorekeeper.quest">GitHub</a> · <a href="https://huggingface.co/harrisonsmith/Lorekeeper-Mistral-7B-GGUF">Hugging Face</a></span>
+  </div>
+</footer>
+
+<script>
+  // Scroll reveal
+  const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (!reduce && "IntersectionObserver" in window) {
+    const io = new IntersectionObserver((entries) => {
+      for (const e of entries) if (e.isIntersecting) { e.target.classList.add("in"); io.unobserve(e.target); }
+    }, { threshold: 0.12 });
+    document.querySelectorAll(".reveal").forEach((el) => io.observe(el));
+  } else {
+    document.querySelectorAll(".reveal").forEach((el) => el.classList.add("in"));
+  }
+
+  // Hero: type out the reply once
+  const typed = document.getElementById("typed");
+  const caret = document.getElementById("caret");
+  if (!reduce && typed) {
+    const full = typed.textContent;
+    typed.textContent = "";
+    caret.hidden = false;
+    let i = 0;
+    const tick = () => {
+      typed.textContent = full.slice(0, ++i);
+      if (i < full.length) setTimeout(tick, 18 + Math.random() * 26);
+      else caret.hidden = true;
+    };
+    setTimeout(tick, 700);
+  }
+</script>
+
+</body>
+</html>
