@@ -18,6 +18,34 @@ class JournalSource(BaseModel):
     snippet: str
     session_date: str | None
     shorthand: str
+    # Retrieval provenance for the transparency panel: cosine distance from
+    # the dense retriever (None when only full-text matched) and which
+    # retriever(s) surfaced it — "semantic" | "keyword" | "both".
+    distance: float | None = None
+    method: str | None = None
+
+
+class RetrievalCandidate(BaseModel):
+    """One journal entry either retriever surfaced, kept or not — the raw
+    material of the 'how this answer was built' panel."""
+    id: str
+    shorthand: str
+    session_date: str | None
+    vector_distance: float | None
+    lexical_rank: int | None
+    rrf_score: float
+    passed_gate: bool
+    used: bool
+
+
+class RetrievalDebug(BaseModel):
+    """What actually happened between the user's question and the model's
+    prompt — so groundedness is inspectable, not asserted."""
+    query: str                      # the text retrieval actually ran with
+    rewritten_from: str | None      # original message, when a rewrite was applied
+    threshold: float                # vector-relevance gate in force
+    candidates: list[RetrievalCandidate]
+    system_prompt: str | None       # the exact system prompt the model saw
 
 
 class ChatResponse(BaseModel):
@@ -33,6 +61,9 @@ class ChatResponse(BaseModel):
     # ignores (verified live). True whenever grounding context existed OR no
     # campaign was selected (nothing claimed to be grounded in that case).
     grounded: bool = True
+    # Full retrieval trace for the transparency panel. Optional so older
+    # clients and non-campaign chats degrade cleanly.
+    retrieval: RetrievalDebug | None = None
 
 
 class ChatSessionSummary(BaseModel):

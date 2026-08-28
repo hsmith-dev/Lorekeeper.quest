@@ -41,16 +41,69 @@ async def check_kobold_health() -> bool:
         return False
 
 
-async def generate_chat_reply(
+_PRONOUN_RE = None  # compiled lazily in rewrite_search_query
+
+
+async def rewrite_search_query(
+    message: str,
+    history: list[dict],
+    config: LLMConfig | None = None,
+) -> str | None:
+    """Rewrite a context-dependent follow-up ("what did he find there?") into
+    a standalone retrieval query using the conversation history — pronouns
+    and ellipses carry no signal for either the embedding or the full-text
+    index, so retrieving with the raw follow-up text quietly returns junk.
+    Returns None when no rewrite is needed (no history, or the message
+    already looks self-contained) or when the rewrite call fails — the
+    caller then retrieves with the original message, so this can only ever
+    improve retrieval, never block it. The rewrite is used for RETRIEVAL
+    ONLY; the model still sees the user's actual message."""
+    import re
+    global _PRONOUN_RE
+    if not history:
+        return None
+    if _PRONOUN_RE is None:
+        _PRONOUN_RE = re.compile(
+            r"\b(he|she|it|they|him|her|them|his|hers|its|their|theirs|that|this|those|these|there|then|one|ones)\b",
+            re.IGNORECASE,
+        )
+    # Self-contained enough already? Long AND pronoun-free → skip the extra call.
+    if len(message.split()) > 12 and not _PRONOUN_RE.search(message):
+        return None
+
+    recent = "\n".join(f"{m['role']}: {m['content'][:300]}" for m in history[-4:])
+    messages = [
+        {"role": "system", "content": (
+            "Rewrite the user's latest message as a single standalone search query, "
+            "resolving pronouns and references using the conversation. Keep every "
+            "proper noun. Return ONLY the rewritten query text — no quotes, no explanation."
+        )},
+        {"role": "user", "content": f"Conversation:\n{recent}\n\nLatest message: {message}\n\nStandalone search query:"},
+    ]
+    try:
+        raw = await complete_messages(messages, config, max_tokens=60, temperature=0.0, timeout=20)
+        rewritten = raw.strip().strip('"').splitlines()[0].strip()
+        # Sanity: reject degenerate rewrites (empty, or absurdly long).
+        if rewritten and 2 <= len(rewritten) <= 300 and rewritten.lower() != message.lower():
+            return rewritten
+    except Exception:
+        pass
+    return None
+
+
+def build_chat_messages(
     message: str,
     history: list[dict],
     campaign_name: str | None,
     genre: str | None,
     journal_context: list[dict],
-    config: LLMConfig | None = None,
     canon_context: str | None = None,
     shorthand_glossary: list[dict] | None = None,
-) -> str:
+) -> list[dict]:
+    """Assemble the exact messages array a chat completion sees — shared by
+    the blocking and streaming chat endpoints, and returned to the client
+    (system prompt) by the transparency panel so 'grounded in your journal'
+    is inspectable rather than asserted."""
     system_parts = [_SYSTEM_PROMPT]
 
     if campaign_name:
@@ -107,7 +160,23 @@ async def generate_chat_reply(
     messages: list[dict] = [{"role": "system", "content": "\n".join(system_parts)}]
     messages.extend(history[-8:])
     messages.append({"role": "user", "content": user_content})
+    return messages
 
+
+async def generate_chat_reply(
+    message: str,
+    history: list[dict],
+    campaign_name: str | None,
+    genre: str | None,
+    journal_context: list[dict],
+    config: LLMConfig | None = None,
+    canon_context: str | None = None,
+    shorthand_glossary: list[dict] | None = None,
+) -> str:
+    messages = build_chat_messages(
+        message, history, campaign_name, genre, journal_context,
+        canon_context=canon_context, shorthand_glossary=shorthand_glossary,
+    )
     return await complete_messages(messages, config, max_tokens=600, timeout=settings.kobold_timeout_seconds)
 
 

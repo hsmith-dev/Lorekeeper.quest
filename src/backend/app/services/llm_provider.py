@@ -59,6 +59,77 @@ async def complete_messages(
     return await _openai_compat(messages, cfg, mt, temp, timeout)
 
 
+async def stream_messages(
+    messages: list[dict],
+    config: LLMConfig | None = None,
+    max_tokens: int | None = None,
+    temperature: float | None = None,
+    timeout: float = 120,
+):
+    """Async generator of completion-text deltas. True token streaming for
+    every OpenAI-compatible provider (the self-hosted Ollama default, OpenAI,
+    custom endpoints); Anthropic/Gemini fall back to yielding the complete
+    reply as one chunk — the streaming chat endpoint stays correct for every
+    provider, just progressively rendered only where the wire format is the
+    one we speak. Raises the same 503 HTTPException as complete_messages on
+    failure (before the first chunk; mid-stream errors end the stream)."""
+    cfg = config or get_default_config()
+    if cfg.provider not in ("kobold", "openai", "custom"):
+        yield await complete_messages(messages, cfg, max_tokens, temperature, timeout)
+        return
+
+    mt = max_tokens if max_tokens is not None else cfg.max_tokens
+    temp = temperature if temperature is not None else cfg.temperature
+
+    if cfg.provider == "openai":
+        base = "https://api.openai.com"
+        model = cfg.model or "gpt-4o-mini"
+    elif cfg.provider == "kobold":
+        base = (cfg.api_url or get_settings().kobold_url).rstrip("/")
+        model = cfg.model or get_settings().kobold_model
+    else:
+        base = (cfg.api_url or "http://localhost:5001").rstrip("/")
+        model = cfg.model or "local-model"
+
+    headers: dict[str, str] = {}
+    if cfg.api_key:
+        headers["Authorization"] = f"Bearer {cfg.api_key}"
+
+    payload = {
+        "model": model,
+        "messages": messages,
+        "max_tokens": mt,
+        "temperature": temp,
+        "stream": True,
+    }
+
+    import json as _json
+    got_any = False
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            async with client.stream("POST", f"{base}/v1/chat/completions", json=payload, headers=headers) as r:
+                r.raise_for_status()
+                async for line in r.aiter_lines():
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        break
+                    try:
+                        delta = _json.loads(data)["choices"][0]["delta"].get("content")
+                    except (KeyError, IndexError, ValueError):
+                        continue
+                    if delta:
+                        got_any = True
+                        yield delta
+        if not got_any:
+            raise ValueError("Empty response from model")
+    except (httpx.TimeoutException, httpx.HTTPStatusError, ValueError) as exc:
+        if got_any:
+            return  # partial reply already delivered — end quietly, don't 503 mid-stream
+        raise HTTPException(status_code=503, detail=f"AI model unavailable: {exc}") from exc
+
+
 # ---------------------------------------------------------------------------
 
 async def _openai_compat(

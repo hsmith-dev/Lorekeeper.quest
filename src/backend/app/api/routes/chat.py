@@ -17,9 +17,13 @@ from app.schemas.chat import (
     ChatSessionDetail,
     ChatMessage,
     JournalSource,
+    RetrievalCandidate,
+    RetrievalDebug,
 )
 from app.api.deps import get_current_user, get_user_llm_config, get_campaign_with_access
-from app.services.chat_service import generate_chat_reply, check_kobold_health
+from app.services.chat_service import build_chat_messages, rewrite_search_query, check_kobold_health, settings as chat_settings
+from app.services.llm_provider import complete_messages
+from app.services.retrieval_service import hybrid_search_journal, RAG_RELEVANCE_MAX_DISTANCE
 from app.services.embedding_service import embed
 from app.services.source_service import retrieve_canon_context
 from app.services.shorthand_service import get_glossary
@@ -28,11 +32,9 @@ from app.services import billing_service
 
 router = APIRouter()
 
-# Max cosine distance (0 = identical, 2 = opposite) for a journal entry or
-# canon chunk to count as relevant retrieval context. Shared with
-# source_service.retrieve_canon_context via its threshold parameter. See the
-# retrieval block in chat() below for why a cutoff exists at all.
-RAG_RELEVANCE_MAX_DISTANCE = 0.75
+# The relevance gate lives in retrieval_service.RAG_RELEVANCE_MAX_DISTANCE
+# now (imported above) — one constant shared by journal retrieval, canon
+# retrieval, and the transparency panel's reported threshold.
 
 
 @router.get("/health")
@@ -131,15 +133,41 @@ async def delete_session(
     await db.commit()
 
 
-@router.post("/", response_model=ChatResponse)
-@limiter.limit("20/minute")
-async def chat(
-    request: Request,
+class _ChatPrep:
+    """Everything the blocking and streaming chat endpoints share: resolved
+    campaign, rewritten retrieval query, hybrid-retrieval results, canon
+    context, the loaded-or-created session, and the exact messages array for
+    the completion. Built by _prepare_chat below."""
+    campaign_uuid: uuid.UUID | None
+    search_query: str
+    rewritten_from: str | None
+    journal_context: list[dict]
+    sources: list[JournalSource]
+    retrieval_candidates: list[RetrievalCandidate]
+    canon_sources: list[str]
+    session: ChatSession
+    history: list[dict]
+    chat_messages: list[dict]
+
+    def grounded(self) -> bool:
+        return not (self.campaign_uuid and not self.sources and not self.canon_sources)
+
+    def retrieval_debug(self) -> RetrievalDebug:
+        return RetrievalDebug(
+            query=self.search_query,
+            rewritten_from=self.rewritten_from,
+            threshold=RAG_RELEVANCE_MAX_DISTANCE,
+            candidates=self.retrieval_candidates,
+            system_prompt=self.chat_messages[0]["content"] if self.chat_messages else None,
+        )
+
+
+async def _prepare_chat(
     body: ChatRequest,
-    user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-    config: LLMConfig = Depends(get_user_llm_config),
-) -> ChatResponse:
+    user: User,
+    db: AsyncSession,
+    config: LLMConfig,
+) -> _ChatPrep:
     # --- Resolve campaign context ---
     campaign_name: str | None = None
     genre: str | None = None
@@ -159,48 +187,67 @@ async def chat(
         except HTTPException:
             campaign_uuid = None  # no access — fall back to the user's own history below
 
-    # --- RAG: vector similarity search over journal entries ---
+    # --- Query rewriting: follow-ups ("what did he find there?") carry no
+    # retrieval signal — resolve them against recent history into a
+    # standalone query first. Retrieval-only; the model still sees the
+    # user's actual message. See chat_service.rewrite_search_query.
+    history_for_rewrite: list[dict] = []
+    if body.session_id:
+        try:
+            sid_prev = uuid.UUID(body.session_id)
+            prev = await db.execute(
+                select(ChatSession).where(ChatSession.id == sid_prev, ChatSession.user_id == user.id)
+            )
+            prev_session = prev.scalar_one_or_none()
+            if prev_session is not None:
+                history_for_rewrite = list(prev_session.messages)
+        except (ValueError, Exception):
+            pass
+    search_query = body.message
+    rewritten_from: str | None = None
+    try:
+        rewritten = await rewrite_search_query(body.message, history_for_rewrite, config)
+        if rewritten:
+            search_query = rewritten
+            rewritten_from = body.message
+    except Exception:
+        pass  # a failed rewrite must never block retrieval
+
+    # --- RAG: hybrid (vector + full-text, RRF-fused) search over journal
+    # entries — see retrieval_service.py for why hybrid beats either alone.
     journal_context: list[dict] = []
     sources: list[JournalSource] = []
+    retrieval_candidates: list[RetrievalCandidate] = []
 
     try:
-        query_embedding = embed(body.message)
-        if campaign_uuid:
-            # A selected campaign is shared context — every member's entries count,
-            # not just the entries this particular user happened to write.
-            base_filter = JournalEntry.campaign_id == campaign_uuid
-        else:
-            base_filter = JournalEntry.user_id == user.id
-
-        # Relevance-gated, not just top-k: without the distance cutoff this
-        # always returned the 3 nearest entries no matter how unrelated the
-        # question was — off-topic questions got real journal entries stuffed
-        # into the prompt AND cited as confident "sources" in the UI, which is
-        # exactly the ungrounded behavior RAG is supposed to prevent. Cosine
-        # distance here is 0 (identical) to 2 (opposite); ~0.75 keeps
-        # clearly-related entries (paraphrases of logged events score well
-        # under it) while dropping the unrelated ones.
-        distance = JournalEntry.embedding.cosine_distance(query_embedding)
-        similar = await db.execute(
-            select(JournalEntry, distance.label("dist"))
-            .where(base_filter, JournalEntry.embedding.isnot(None))
-            .order_by(distance)
-            .limit(3)
+        results = await hybrid_search_journal(
+            db, search_query, campaign_id=campaign_uuid, user_id=user.id,
         )
-        for entry, dist in similar.all():
-            if dist is not None and dist > RAG_RELEVANCE_MAX_DISTANCE:
-                continue
-            journal_context.append({
-                "narrative": entry.narrative,
-                "shorthand": entry.shorthand,
-                "session_date": str(entry.session_date) if entry.session_date else None,
-            })
-            sources.append(JournalSource(
-                id=str(entry.id),
-                snippet=entry.narrative[:200],
-                session_date=str(entry.session_date) if entry.session_date else None,
-                shorthand=entry.shorthand,
+        for r in results:
+            retrieval_candidates.append(RetrievalCandidate(
+                id=str(r.entry.id),
+                shorthand=r.entry.shorthand[:120],
+                session_date=str(r.entry.session_date) if r.entry.session_date else None,
+                vector_distance=round(r.vector_distance, 4) if r.vector_distance is not None else None,
+                lexical_rank=r.lexical_rank,
+                rrf_score=round(r.rrf_score, 5),
+                passed_gate=r.passed_gate,
+                used=r.used,
             ))
+            if r.used:
+                journal_context.append({
+                    "narrative": r.entry.narrative,
+                    "shorthand": r.entry.shorthand,
+                    "session_date": str(r.entry.session_date) if r.entry.session_date else None,
+                })
+                sources.append(JournalSource(
+                    id=str(r.entry.id),
+                    snippet=r.entry.narrative[:200],
+                    session_date=str(r.entry.session_date) if r.entry.session_date else None,
+                    shorthand=r.entry.shorthand,
+                    distance=round(r.vector_distance, 4) if r.vector_distance is not None else None,
+                    method=r.method,
+                ))
     except Exception:
         pass  # RAG failure must not break chat
 
@@ -208,7 +255,7 @@ async def chat(
     canon_sources: list[str] = []
     try:
         canon_context, canon_sources = await retrieve_canon_context(
-            db, body.message, user.id, campaign_uuid
+            db, search_query, user.id, campaign_uuid
         )
     except Exception:
         pass  # RAG failure must not break chat
@@ -246,37 +293,113 @@ async def chat(
         db.add(session)
         await db.flush()
 
-    # --- Generate reply ---
     history = list(session.messages)
-    reply = await generate_chat_reply(
-        message=body.message,
-        history=history,
-        campaign_name=campaign_name,
-        genre=genre,
-        journal_context=journal_context,
-        config=config,
-        canon_context=canon_context,
-        shorthand_glossary=shorthand_glossary,
+    chat_messages = build_chat_messages(
+        body.message, history, campaign_name, genre, journal_context,
+        canon_context=canon_context, shorthand_glossary=shorthand_glossary,
     )
 
-    # --- Persist messages ---
-    session.messages = history + [
-        {"role": "user", "content": body.message},
+    prep = _ChatPrep()
+    prep.campaign_uuid = campaign_uuid
+    prep.search_query = search_query
+    prep.rewritten_from = rewritten_from
+    prep.journal_context = journal_context
+    prep.sources = sources
+    prep.retrieval_candidates = retrieval_candidates
+    prep.canon_sources = canon_sources
+    prep.session = session
+    prep.history = history
+    prep.chat_messages = chat_messages
+    return prep
+
+
+async def _persist_chat_turn(
+    db: AsyncSession, prep: _ChatPrep, user: User, config: LLMConfig, user_message: str, reply: str
+) -> None:
+    prep.session.messages = prep.history + [
+        {"role": "user", "content": user_message},
         {"role": "assistant", "content": reply},
     ]
-    session.message_count = len(session.messages)
-    flag_modified(session, "messages")
+    prep.session.message_count = len(prep.session.messages)
+    flag_modified(prep.session, "messages")
     await db.commit()
-
     if is_hosted_default(config):
-        await billing_service.record_hosted_usage(db, user, body.message, reply)
+        await billing_service.record_hosted_usage(db, user, user_message, reply)
 
+
+@router.post("/", response_model=ChatResponse)
+@limiter.limit("20/minute")
+async def chat(
+    request: Request,
+    body: ChatRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    config: LLMConfig = Depends(get_user_llm_config),
+) -> ChatResponse:
+    prep = await _prepare_chat(body, user, db, config)
+    reply = await complete_messages(
+        prep.chat_messages, config, max_tokens=600,
+        timeout=chat_settings.kobold_timeout_seconds,
+    )
+    await _persist_chat_turn(db, prep, user, config, body.message, reply)
     return ChatResponse(
         reply=reply,
-        session_id=str(session.id),
-        sources=sources,
-        canon_sources=canon_sources,
-        # See ChatResponse.grounded — only False when a campaign was selected
-        # yet nothing relevant was retrieved to ground the reply.
-        grounded=not (campaign_uuid and not sources and not canon_sources),
+        session_id=str(prep.session.id),
+        sources=prep.sources,
+        canon_sources=prep.canon_sources,
+        grounded=prep.grounded(),
+        retrieval=prep.retrieval_debug(),
+    )
+
+
+@router.post("/stream")
+@limiter.limit("20/minute")
+async def chat_stream(
+    request: Request,
+    body: ChatRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    config: LLMConfig = Depends(get_user_llm_config),
+):
+    """Server-sent-events version of POST / — same retrieval, same
+    persistence, but tokens render as they generate. Event order: one `meta`
+    event (session id, sources, grounded flag, retrieval trace — all known
+    before generation starts), then `delta` events, then `done` (or `error`
+    if the model was unreachable before any token arrived). The frontend
+    falls back to the blocking endpoint if this one fails."""
+    import json as _json
+    from fastapi.responses import StreamingResponse
+    from app.services.llm_provider import stream_messages
+
+    prep = await _prepare_chat(body, user, db, config)
+
+    async def event_stream():
+        meta = {
+            "session_id": str(prep.session.id),
+            "sources": [s.model_dump() for s in prep.sources],
+            "canon_sources": prep.canon_sources,
+            "grounded": prep.grounded(),
+            "retrieval": prep.retrieval_debug().model_dump(),
+        }
+        yield f"event: meta\ndata: {_json.dumps(meta)}\n\n"
+        parts: list[str] = []
+        try:
+            async for delta in stream_messages(
+                prep.chat_messages, config, max_tokens=600,
+                timeout=chat_settings.kobold_timeout_seconds,
+            ):
+                parts.append(delta)
+                yield f"event: delta\ndata: {_json.dumps({'text': delta})}\n\n"
+        except HTTPException as exc:
+            yield f"event: error\ndata: {_json.dumps({'detail': exc.detail})}\n\n"
+            return
+        reply = "".join(parts).strip()
+        if reply:
+            await _persist_chat_turn(db, prep, user, config, body.message, reply)
+        yield f"event: done\ndata: {_json.dumps({'reply': reply})}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

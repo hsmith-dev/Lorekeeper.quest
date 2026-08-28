@@ -106,9 +106,13 @@ async def create_journal_entry(
         junction = JournalTag(journal_id=entry.id, tag_id=tag.id)
         db.add(junction)
 
+    # Shorthand + narrative, matching what the embedding covers below — the
+    # narrative alone is first-person prose that often lacks the plain words
+    # of the notes themselves ("party", "mill"), leaving lexical retrieval
+    # blind to them (see migration a3e7c1f9d258).
     await db.execute(
-        text("UPDATE journal_entries SET narrative_tsv = to_tsvector('english', :narrative) WHERE id = :id"),
-        {"narrative": narrative, "id": str(entry.id)},
+        text("UPDATE journal_entries SET narrative_tsv = to_tsvector('english', :doc) WHERE id = :id"),
+        {"doc": f"{notes} {narrative}", "id": str(entry.id)},
     )
 
     # Generate and store embedding for RAG retrieval

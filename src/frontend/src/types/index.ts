@@ -151,6 +151,8 @@ export interface ChatRequest {
 }
 
 export interface JournalSource {
+  distance?: number | null;
+  method?: string | null;
   id: string;
   snippet: string;
   session_date: string | null;
@@ -165,6 +167,7 @@ export interface ChatResponse {
   // False when a campaign was selected but nothing relevant was retrieved —
   // the reply is model invention, not campaign record; the UI labels it.
   grounded: boolean;
+  retrieval?: RetrievalDebug | null;
 }
 
 export interface WeeklyCount {
@@ -389,6 +392,7 @@ export interface ModelEvaluation {
   sample_size: number;
   avg_length: number;
   avg_word_overlap: number;
+  avg_semantic_similarity: number | null;
   has_content_pct: number;
   error_count: number;
   created_at: string;
@@ -397,4 +401,23 @@ export interface ModelEvaluation {
 export interface AdminConfig {
   open_access_mode: boolean;
   stripe_configured: boolean;
+}
+
+export interface RetrievalCandidate {
+  id: string;
+  shorthand: string;
+  session_date: string | null;
+  vector_distance: number | null;
+  lexical_rank: number | null;
+  rrf_score: number;
+  passed_gate: boolean;
+  used: boolean;
+}
+
+export interface RetrievalDebug {
+  query: string;
+  rewritten_from: string | null;
+  threshold: number;
+  candidates: RetrievalCandidate[];
+  system_prompt: string | null;
 }

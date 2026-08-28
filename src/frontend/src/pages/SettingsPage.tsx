@@ -658,6 +658,7 @@ function EvaluationSection() {
                   <th className="py-2 pr-3 font-medium">Samples</th>
                   <th className="py-2 pr-3 font-medium">Avg Length</th>
                   <th className="py-2 pr-3 font-medium">Word Overlap</th>
+                  <th className="py-2 pr-3 font-medium">Semantic Sim.</th>
                   <th className="py-2 pr-3 font-medium">Has Content</th>
                   <th className="py-2 pr-3 font-medium">Errors</th>
                   <th className="py-2" />
@@ -670,6 +671,7 @@ function EvaluationSection() {
                     <td className="py-2 pr-3 text-muted-foreground">{e.sample_size}</td>
                     <td className="py-2 pr-3 text-muted-foreground">{Math.round(e.avg_length)} chars</td>
                     <td className="py-2 pr-3 text-muted-foreground">{(e.avg_word_overlap * 100).toFixed(1)}%</td>
+                    <td className="py-2 pr-3 text-muted-foreground">{e.avg_semantic_similarity != null ? `${(e.avg_semantic_similarity * 100).toFixed(1)}%` : "—"}</td>
                     <td className="py-2 pr-3 text-muted-foreground">{e.has_content_pct.toFixed(0)}%</td>
                     <td className="py-2 pr-3 text-muted-foreground">{e.error_count}</td>
                     <td className="py-2">

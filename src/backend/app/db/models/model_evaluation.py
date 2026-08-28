@@ -20,5 +20,9 @@ class ModelEvaluation(Base, TimestampMixin):
     sample_size: Mapped[int] = mapped_column(Integer, nullable=False)
     avg_length: Mapped[float] = mapped_column(Float, nullable=False)
     avg_word_overlap: Mapped[float] = mapped_column(Float, nullable=False)
+    # Cosine similarity of sentence-transformer embeddings between generation
+    # and reference — meaning-aware, unlike word overlap. Nullable: runs
+    # stored before this metric existed have no value for it.
+    avg_semantic_similarity: Mapped[float | None] = mapped_column(Float, nullable=True)
     has_content_pct: Mapped[float] = mapped_column(Float, nullable=False)
     error_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

@@ -44,7 +44,7 @@ async def retrieve_canon_context(
     user_id: uuid.UUID,
     campaign_id: uuid.UUID | None,
     limit: int = 3,
-    max_distance: float = 0.75,
+    max_distance: float = 0.65,  # matches retrieval_service.RAG_RELEVANCE_MAX_DISTANCE — see its comment
 ) -> tuple[str | None, list[str]]:
     """Return (canon_context_text, source_titles) for the top-k most relevant
     source chunks. Chunks are relevance-gated by cosine distance (0 =

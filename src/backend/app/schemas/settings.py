@@ -75,6 +75,8 @@ class EvaluationResponse(BaseModel):
     sample_size: int
     avg_length: float
     avg_word_overlap: float
+    # None on runs stored before the semantic metric existed.
+    avg_semantic_similarity: float | None = None
     has_content_pct: float
     error_count: int
     created_at: datetime

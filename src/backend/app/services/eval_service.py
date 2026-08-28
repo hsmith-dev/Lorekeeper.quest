@@ -27,9 +27,29 @@ def _score(reference: str, generated: str) -> dict:
     ref_words = set(reference.lower().split())
     gen_words = set(generated.lower().split())
     overlap = len(ref_words & gen_words) / max(len(ref_words), 1)
+    # Word overlap is kept for continuity with older stored runs, but it's a
+    # weak metric: it rewards verbosity (more words → more chance of overlap)
+    # and is blind to meaning ("the dragon slew the knight" vs "the knight
+    # slew the dragon" score identically). Semantic similarity — cosine
+    # similarity of sentence-transformer embeddings, the same encoder that
+    # powers RAG retrieval — measures whether the generation *means* what the
+    # reference means, which is what the fine-tune is actually for.
+    semantic = 0.0
+    try:
+        from app.services.embedding_service import embed
+        ref_vec = embed(reference)
+        gen_vec = embed(generated)
+        dot = sum(a * b for a, b in zip(ref_vec, gen_vec))
+        norm_r = sum(a * a for a in ref_vec) ** 0.5
+        norm_g = sum(b * b for b in gen_vec) ** 0.5
+        if norm_r and norm_g:
+            semantic = dot / (norm_r * norm_g)
+    except Exception:
+        pass  # scoring must not fail an eval run over an embedding hiccup
     return {
         "length": len(generated),
         "word_overlap": overlap,
+        "semantic_similarity": semantic,
         "has_content": len(generated) > 100,
     }
 
@@ -65,13 +85,14 @@ async def run_evaluation(config: LLMConfig, sample_size: int) -> dict:
     if not scores:
         return {
             "sample_size": len(sample), "avg_length": 0.0, "avg_word_overlap": 0.0,
-            "has_content_pct": 0.0, "error_count": errors,
+            "avg_semantic_similarity": 0.0, "has_content_pct": 0.0, "error_count": errors,
         }
 
     return {
         "sample_size": len(sample),
         "avg_length": sum(s["length"] for s in scores) / len(scores),
         "avg_word_overlap": sum(s["word_overlap"] for s in scores) / len(scores),
+        "avg_semantic_similarity": sum(s["semantic_similarity"] for s in scores) / len(scores),
         "has_content_pct": sum(1 for s in scores if s["has_content"]) / len(scores) * 100,
         "error_count": errors,
     }

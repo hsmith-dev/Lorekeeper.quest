@@ -3,7 +3,81 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { getCampaigns, getChatHealth, getChatSessions, deleteChatSession } from "../services/api";
 import { useDebounce } from "../hooks/useDebounce";
 import { useChat } from "../hooks/useChat";
-import type { Campaign, ChatSessionSummary, JournalSource } from "../types";
+import type { Campaign, ChatSessionSummary, JournalSource, RetrievalDebug } from "../types";
+
+const METHOD_LABEL: Record<string, string> = {
+  semantic: "semantic match",
+  keyword: "keyword match",
+  both: "semantic + keyword",
+};
+
+/** "How this answer was built" — the retrieval trace behind an assistant
+ *  reply: rewritten query, every candidate either retriever surfaced with
+ *  its scores and gate verdict, and the exact system prompt the model saw.
+ *  Groundedness as something you can inspect, not something we assert. */
+function RetrievalPanel({ retrieval }: { retrieval: RetrievalDebug }) {
+  const [open, setOpen] = useState(false);
+  const [showPrompt, setShowPrompt] = useState(false);
+  return (
+    <div className="max-w-[82%] mt-1">
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
+      >
+        <svg width="12" height="12" viewBox="0 0 20 20" fill="currentColor" className={`transition-transform ${open ? "rotate-90" : ""}`}>
+          <path fillRule="evenodd" clipRule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" />
+        </svg>
+        How this answer was built
+      </button>
+      {open && (
+        <div className="mt-1.5 rounded-md border border-border bg-muted/30 px-3 py-2.5 text-xs flex flex-col gap-2.5">
+          <div>
+            <p className="font-semibold text-foreground mb-0.5">Retrieval query</p>
+            <p className="text-muted-foreground font-mono">{retrieval.query}</p>
+            {retrieval.rewritten_from && (
+              <p className="text-muted-foreground mt-0.5">
+                rewritten from: <span className="italic">“{retrieval.rewritten_from}”</span>
+              </p>
+            )}
+          </div>
+          <div>
+            <p className="font-semibold text-foreground mb-1">
+              Candidates considered <span className="font-normal text-muted-foreground">(vector-relevance gate ≤ {retrieval.threshold})</span>
+            </p>
+            {retrieval.candidates.length === 0 ? (
+              <p className="text-muted-foreground italic">Neither retriever surfaced any journal entries.</p>
+            ) : (
+              <div className="flex flex-col gap-1">
+                {retrieval.candidates.map((c) => (
+                  <div key={c.id} className={`flex items-baseline gap-2 ${c.used ? "" : "opacity-55"}`}>
+                    <span className={`shrink-0 font-mono ${c.used ? "text-green-600 dark:text-green-400" : c.passed_gate ? "text-muted-foreground" : "text-amber-600 dark:text-amber-400"}`}>
+                      {c.used ? "✓ used" : c.passed_gate ? "· passed" : "✗ gated"}
+                    </span>
+                    <span className="truncate text-muted-foreground">{c.shorthand}</span>
+                    <span className="shrink-0 font-mono text-muted-foreground">
+                      {c.vector_distance != null ? `d=${c.vector_distance.toFixed(3)}` : "d=—"}
+                      {c.lexical_rank != null ? ` · fts#${c.lexical_rank}` : ""}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+          {retrieval.system_prompt && (
+            <div>
+              <button onClick={() => setShowPrompt((p) => !p)} className="font-semibold text-foreground hover:text-primary transition-colors">
+                {showPrompt ? "▾ Hide" : "▸ Show"} the exact prompt the model saw
+              </button>
+              {showPrompt && (
+                <pre className="mt-1 max-h-56 overflow-auto whitespace-pre-wrap rounded bg-background/60 border border-border p-2 font-mono text-[11px] leading-relaxed text-muted-foreground">{retrieval.system_prompt}</pre>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
 
 function SourcesPanel({ sources }: { sources: JournalSource[] }) {
   const [open, setOpen] = useState(false);
@@ -27,6 +101,12 @@ function SourcesPanel({ sources }: { sources: JournalSource[] }) {
               )}
               <p className="text-muted-foreground italic mb-1 truncate">Notes: {s.shorthand}</p>
               <p className="text-foreground leading-relaxed">{s.snippet}…</p>
+              {s.method && (
+                <p className="mt-1 font-mono text-[11px] text-muted-foreground">
+                  {METHOD_LABEL[s.method] ?? s.method}
+                  {s.distance != null ? ` · distance ${s.distance.toFixed(3)}` : ""}
+                </p>
+              )}
             </div>
           ))}
         </div>
@@ -98,7 +178,7 @@ export function ChatPage() {
   const [campaignId, setCampaignId] = useState<string>("");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sessionSearch, setSessionSearch] = useState("");
-  const { sessionId, messages, sources, ungrounded, isLoading, error, send, loadSession, newSession } = useChat();
+  const { sessionId, messages, isLoading, isStreaming, error, send, loadSession, newSession } = useChat();
   const [input, setInput] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
   const qc = useQueryClient();
@@ -291,21 +371,24 @@ export function ChatPage() {
                       LOREKEEPER
                     </p>
                   )}
-                  <p className="whitespace-pre-wrap">{msg.content}</p>
+                  <p className="whitespace-pre-wrap">{msg.content}{isStreaming && i === messages.length - 1 && msg.role === "assistant" ? "▍" : ""}</p>
                 </div>
-                {msg.role === "assistant" && sources[i]?.length > 0 && (
-                  <SourcesPanel sources={sources[i]} />
+                {msg.role === "assistant" && (msg.sources?.length ?? 0) > 0 && (
+                  <SourcesPanel sources={msg.sources!} />
                 )}
-                {msg.role === "assistant" && ungrounded[i] && (
+                {msg.role === "assistant" && msg.grounded === false && (
                   <p className="mt-1 text-xs text-amber-600 dark:text-amber-400 flex items-center gap-1">
                     <span aria-hidden="true">⚠</span>
                     Not from your journal — no campaign records matched this question, so this is improvised.
                   </p>
                 )}
+                {msg.role === "assistant" && msg.retrieval && (
+                  <RetrievalPanel retrieval={msg.retrieval} />
+                )}
               </div>
             ))}
 
-            {isLoading && (
+            {isLoading && !isStreaming && (
               <div className="flex justify-start">
                 <div className="bg-card border border-border rounded-lg px-4 py-3 text-sm text-muted-foreground italic">
                   <span className="animate-pulse">Consulting the ancient tomes…</span>
