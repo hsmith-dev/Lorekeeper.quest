@@ -224,7 +224,7 @@
 
 <header>
   <div class="nav">
-    <a class="brand" href="#top">Lore<span class="key">keeper</span></a>
+    <a class="brand" href="#top"><span aria-hidden="true">🗝️</span> Lore<span class="key">keeper</span></a>
     <nav class="nav-links">
       <a href="#features">Features</a>
       <a href="#how">How it works</a>
@@ -294,7 +294,7 @@
         <div class="feature-copy">
           <span class="tag">02 · Retrieval-augmented chat</span>
           <h3>Ask your campaign anything — and see the receipts.</h3>
-          <p>Every journal entry is embedded into a vector index. Questions retrieve the <strong>actual record</strong> before the model answers, replies <strong>cite their sources</strong>, and retrieval is relevance-gated. And when the record is silent? <strong>The app says so</strong> — replies with no grounding are labeled instead of presenting invention as canon.</p>
+          <p><strong>Hybrid retrieval</strong> — semantic vector search fused with keyword search — over your journal <em>and</em> your uploaded sourcebooks, so both paraphrases and rare names like “Dawnbreaker” find the right record. Replies <strong>cite their sources</strong> and carry a <strong>“How this answer was built”</strong> trace: every candidate considered, its scores, and the exact prompt the model saw. And when the record is silent? <strong>The app says so</strong> — the relevance gate is measured against a labeled evaluation set, and ungrounded replies are labeled instead of presenting invention as canon.</p>
         </div>
         <div class="demo-panel">
           <div class="bar">campaign chat — grounding honesty</div>
@@ -348,10 +348,10 @@
         <div class="pipe">
           <h4>The grounding — making it tell the truth</h4>
           <ol>
-            <li>journal entry saved</li>
-            <li>sentence-transformer embedding → pgvector</li>
-            <li>questions retrieve nearest entries, <em>relevance-gated</em></li>
-            <li>real record injected into the prompt, sources cited</li>
+            <li>journal + sourcebooks → embeddings (pgvector) + full-text index</li>
+            <li><em>hybrid</em> retrieval — semantic ∥ keyword, fused by RRF</li>
+            <li>relevance gate, threshold <em>measured</em> on a labeled eval set</li>
+            <li>record injected into the prompt — sources cited, trace shown</li>
             <li>nothing relevant? the reply is <em>labeled ungrounded</em></li>
           </ol>
         </div>
