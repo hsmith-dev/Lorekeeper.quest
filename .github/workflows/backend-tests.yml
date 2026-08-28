@@ -1,0 +1,74 @@
+name: Backend tests
+
+# Runs the pytest suite in src/backend against a real pgvector-enabled
+# Postgres service container — nothing was running these on push before this
+# workflow existed. Scoped to paths that can actually affect the backend so
+# a frontend-only or docs-only change doesn't wait on a multi-minute spacy/
+# torch install for nothing.
+on:
+  push:
+    branches: [master]
+    paths:
+      - "src/backend/**"
+      - ".github/workflows/backend-tests.yml"
+  pull_request:
+    paths:
+      - "src/backend/**"
+      - ".github/workflows/backend-tests.yml"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        # Same image used in local dev (docker-compose.yml) and prod — a
+        # plain `postgres` image doesn't have the `vector` extension
+        # conftest.py's setup_test_db fixture needs (CREATE EXTENSION
+        # IF NOT EXISTS vector).
+        image: pgvector/pgvector:pg16
+        env:
+          # Must match tests/conftest.py's hardcoded TEST_DB_URL exactly —
+          # that file connects to postgresql+asyncpg://lorekeeper:changeme@
+          # localhost:5432/lorekeeper_test with no override mechanism, so
+          # these three values aren't arbitrary.
+          POSTGRES_USER: lorekeeper
+          POSTGRES_PASSWORD: changeme
+          POSTGRES_DB: lorekeeper_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: |
+            src/backend/requirements.txt
+            src/backend/requirements-dev.txt
+
+      - name: Install dependencies
+        working-directory: src/backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Download spaCy model
+        # tests/test_nlp.py loads this directly (see its load_model fixture)
+        # — same model app/services/nlp_service.py uses in production.
+        working-directory: src/backend
+        run: python -m spacy download en_core_web_trf
+
+      - name: Run tests
+        working-directory: src/backend
+        env:
+          DATABASE_URL: postgresql+asyncpg://lorekeeper:changeme@localhost:5432/lorekeeper_test
+          POSTGRES_PASSWORD: changeme
+          SECRET_KEY: ci-test-secret-key-not-used-anywhere-real
+        run: python -m pytest -v

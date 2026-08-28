@@ -1,0 +1,30 @@
+import type { Theme } from "../types/theme";
+
+export const highSeasTheme: Theme = {
+  id: "highseas",
+  name: "High Seas",
+  description: "Navy and weathered gold — a pirate captain's logbook.",
+  radius: "0.3rem",
+  fonts: { heading: "'Palatino Linotype', Palatino, serif", body: "Georgia, serif" },
+  colors: {
+    background:             "210 35% 8%",
+    foreground:             "45 40% 88%",
+    card:                   "210 30% 12%",
+    "card-foreground":      "45 40% 88%",
+    popover:                "210 30% 12%",
+    "popover-foreground":   "45 40% 88%",
+    primary:                "45 65% 48%",
+    "primary-foreground":   "210 35% 8%",
+    secondary:              "200 40% 22%",
+    "secondary-foreground": "45 40% 88%",
+    muted:                  "210 22% 17%",
+    "muted-foreground":     "45 22% 55%",
+    accent:                 "200 45% 32%",
+    "accent-foreground":    "45 40% 88%",
+    destructive:            "0 55% 35%",
+    "destructive-foreground": "45 40% 88%",
+    border:                 "45 28% 22%",
+    input:                  "210 30% 14%",
+    ring:                   "45 65% 48%",
+  },
+};

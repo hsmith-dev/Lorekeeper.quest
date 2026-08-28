@@ -1,0 +1,30 @@
+import type { Theme } from "../types/theme";
+
+export const forestTheme: Theme = {
+  id: "forest",
+  name: "Enchanted Forest",
+  description: "Deep greens and earthy browns — a druid's grove at dusk.",
+  radius: "0.4rem",
+  fonts: { heading: "Georgia, serif", body: "Georgia, serif" },
+  colors: {
+    background:             "140 20% 7%",
+    foreground:             "80 30% 88%",
+    card:                   "140 18% 11%",
+    "card-foreground":      "80 30% 88%",
+    popover:                "140 18% 11%",
+    "popover-foreground":   "80 30% 88%",
+    primary:                "130 50% 42%",
+    "primary-foreground":   "140 20% 7%",
+    secondary:              "30 40% 22%",
+    "secondary-foreground": "80 30% 88%",
+    muted:                  "140 14% 16%",
+    "muted-foreground":     "80 18% 55%",
+    accent:                 "30 45% 32%",
+    "accent-foreground":    "80 30% 88%",
+    destructive:            "0 55% 35%",
+    "destructive-foreground": "80 30% 88%",
+    border:                 "130 22% 20%",
+    input:                  "140 18% 13%",
+    ring:                   "130 50% 42%",
+  },
+};

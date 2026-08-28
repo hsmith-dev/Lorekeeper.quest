@@ -1,0 +1,39 @@
+FROM python:3.11-slim
+WORKDIR /app
+
+# System deps for spaCy/asyncpg. build-essential (not just gcc) — on x86_64
+# pip finds prebuilt manylinux wheels for spaCy's C extensions and never
+# compiles anything, so bare gcc went unnoticed; on ARM64 no prebuilt wheel
+# exists for this spaCy version, pip falls back to a source build, and that
+# needs full libc headers (stdlib.h etc.) that gcc alone doesn't pull in —
+# confirmed by an actual `docker buildx build --platform linux/arm64` run
+# failing with "fatal error: stdlib.h: No such file or directory" before this
+# fix.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# spaCy model — downloaded at build time so it's baked into the image
+RUN python -m spacy download en_core_web_trf
+
+COPY . .
+
+# Non-root user for security
+RUN useradd -m appuser && chown -R appuser /app
+USER appuser
+
+EXPOSE 8000
+
+# 4 workers; tune -w based on CPU cores (2 × cores + 1 is a common rule)
+CMD ["gunicorn", "app.main:app", \
+     "-w", "4", \
+     "-k", "uvicorn.workers.UvicornWorker", \
+     "--bind", "0.0.0.0:8000", \
+     "--timeout", "180", \
+     "--graceful-timeout", "30", \
+     "--keep-alive", "5", \
+     "--access-logfile", "-", \
+     "--error-logfile", "-"]

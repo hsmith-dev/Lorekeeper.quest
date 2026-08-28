@@ -1,0 +1,35 @@
+# Dev-only compose: runs postgres + redis locally so you can run backend/frontend directly.
+# Usage: docker-compose -f docker-compose.dev.yml up -d
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: lorekeeper
+      POSTGRES_PASSWORD: changeme
+      POSTGRES_DB: lorekeeper
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_dev_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lorekeeper"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_dev_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  postgres_dev_data:
+  redis_dev_data:

@@ -1,0 +1,6 @@
+--model /home/smith/Documents/Capstone/src/ml/models/mistral-7b-instruct-v0.2.Q4_0.gguf
+--port 5001
+--contextsize 4096
+--gpulayers 32
+--threads 8
+--blasbatchsize 512

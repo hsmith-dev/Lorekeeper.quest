@@ -1,0 +1,70 @@
+# Environment
+.env
+.env.local
+.env.*.local
+*.env
+.env.dev.bak
+docker-compose.override.yml
+.local-certs/
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+*.egg
+.venv/
+venv/
+env/
+
+# Alembic (migration files are intentionally tracked)
+
+# Node
+node_modules/
+dist/
+.cache/
+*.local
+
+# Models (large binary files)
+src/ml/models/
+*.gguf
+*.bin
+*.safetensors
+src/ml/scripts/unsloth_compiled_cache/
+
+# KoboldCpp (compiled inference server — checked out separately, not tracked)
+koboldcpp/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Docker
+.docker/
+
+# pytest
+.pytest_cache/
+htmlcov/
+.coverage
+
+# Database backups (scripts/backup-db.sh) — never belong in git, contain
+# real user data. See docs/DATABASE_BACKUPS.md.
+backups/
+.claude/settings.local.json
+**/.claude/settings.local.json

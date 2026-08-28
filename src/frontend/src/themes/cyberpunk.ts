@@ -1,0 +1,30 @@
+import type { Theme } from "../types/theme";
+
+export const cyberpunkTheme: Theme = {
+  id: "cyberpunk",
+  name: "Cyberpunk",
+  description: "Neon cyan and magenta on near-black — the streets of Night City.",
+  radius: "0rem",
+  fonts: { heading: "'Courier New', monospace", body: "'Courier New', monospace" },
+  colors: {
+    background:             "220 20% 5%",
+    foreground:             "180 100% 85%",
+    card:                   "220 18% 9%",
+    "card-foreground":      "180 100% 85%",
+    popover:                "220 18% 9%",
+    "popover-foreground":   "180 100% 85%",
+    primary:                "180 100% 50%",
+    "primary-foreground":   "220 20% 5%",
+    secondary:              "300 80% 28%",
+    "secondary-foreground": "180 100% 85%",
+    muted:                  "220 15% 14%",
+    "muted-foreground":     "180 40% 55%",
+    accent:                 "300 85% 50%",
+    "accent-foreground":    "220 20% 5%",
+    destructive:            "0 90% 50%",
+    "destructive-foreground": "180 100% 85%",
+    border:                 "180 60% 20%",
+    input:                  "220 18% 11%",
+    ring:                   "180 100% 50%",
+  },
+};

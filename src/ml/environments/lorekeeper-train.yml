@@ -1,0 +1,20 @@
+name: lorekeeper-train
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - pytorch
+  - pytorch-cuda=12.1
+  - pip
+  - pip:
+      - unsloth[colab-new]
+      - transformers
+      - datasets
+      - trl
+      - peft
+      - accelerate
+      - bitsandbytes
+      - sentencepiece

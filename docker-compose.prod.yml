@@ -1,0 +1,218 @@
+# =============================================================================
+# Lorekeeper — Production Docker Compose
+#
+# Usage:
+#   docker compose -f docker-compose.prod.yml up -d --build
+#
+# Before starting:
+#   1. Copy .env.example → .env and fill in all values
+#   2. Set ENVIRONMENT=production in .env
+#   3. Set CORS_ORIGINS to your actual domain, e.g. ["https://yourdomain.com"]
+#   4. Pick an LLM path:
+#      a) GPU host running KoboldCpp on the HOST — point KOBOLD_URL at the
+#         host gateway: KOBOLD_URL=http://host.docker.internal:5001
+#         (needs `extra_hosts: - "host.docker.internal:host-gateway"` added
+#         to the backend service below on Linux)
+#      b) No GPU (e.g. Oracle Cloud's Always Free Ampere A1 tier) — use the
+#         `ollama` service below instead, reachable internally at
+#         http://ollama:11434. See scripts/deploy-oci.sh for the one-time
+#         model import step. Point Settings' provider URL at it per-account,
+#         or set it as the default in .env.
+#
+# For HTTPS: nginx.conf's HTTPS server block expects Let's Encrypt's own
+#   layout at /etc/letsencrypt/live/<domain>/{fullchain,privkey}.pem — get a
+#   cert with `certbot certonly --standalone` (stop the nginx container
+#   first to free port 80; see docs/OCI_DEPLOYMENT.md's TLS section and
+#   scripts/certbot-{pre,post}-hook.sh for renewal), the nginx service below
+#   already mounts /etc/letsencrypt and publishes port 443.
+# =============================================================================
+
+services:
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    # Not exposed to host — only backend can reach it
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    # Resource ceilings on every service below (see the same note on
+    # `backend`) — respected by plain `docker compose up` on this Compose
+    # version, no swarm needed. postgres idles under 50MB; this is pure
+    # headroom, not a reflection of expected steady-state usage.
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 3g
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --save 60 1 --loglevel warning
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512m
+
+  # Optional: CPU-served LLM for GPU-less hosts (e.g. OCI Always Free Ampere
+  # A1). Not exposed to the host — only reachable from other containers on
+  # this network at http://ollama:11434. Point a user's Settings provider URL
+  # (or the app-wide default in .env) there to use it. First run needs a
+  # one-time `docker compose -f docker-compose.prod.yml exec ollama ollama
+  # create lorekeeper -f /import-models/lorekeeper-Modelfile` — see
+  # scripts/deploy-oci.sh, which does this automatically.
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    environment:
+      # Two models now live here (see scripts/deploy-oci.sh's import step) —
+      # "lorekeeper" (fine-tuned) and "lorekeeper-base", for Settings' AI
+      # Provider toggle and Model Evaluation's quick-compare buttons.
+      # Without this, Ollama's default keeps only one loaded at a time, so
+      # every switch between them pays a ~60s cold-load penalty on this
+      # CPU-only ARM host (confirmed live — see llama_server.go's "waiting
+      # for llama-server to become available" in this container's logs).
+      # Two Q4 7B models (~4GB each) comfortably fit in the instance's 24GB
+      # RAM alongside everything else, so keep both resident.
+      OLLAMA_MAX_LOADED_MODELS: "2"
+      OLLAMA_KEEP_ALIVE: "60m"
+    volumes:
+      - ollama_data:/root/.ollama
+      - ./src/ml/models:/import-models:ro
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    # Measured live: two Q4 7B models loaded simultaneously (OLLAMA_MAX_LOADED_
+    # MODELS=2 above) run ~9GB combined; 14GB leaves real headroom for context/
+    # KV-cache growth during generation without letting a leak or a third
+    # model somehow loading eat the whole box. Most of the instance's CPU
+    # budget goes here on purpose — this is the actual compute-heavy service.
+    deploy:
+      resources:
+        limits:
+          cpus: "3.0"
+          memory: 14g
+
+  backend:
+    build:
+      context: ./src/backend
+      dockerfile: Dockerfile.prod
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      ENVIRONMENT: production
+    # eval_service.py resolves the validation set at /ml/data/processed/... —
+    # correct relative to a full repo checkout, but the backend image's build
+    # context is only ./src/backend, so nothing under src/ml ever made it in.
+    # Model Evaluation (and its quick-compare buttons) 404'd on this in
+    # production with no earlier symptom, since local dev runs against a full
+    # checkout where the path just happens to resolve. Mounted read-only —
+    # small (~2MB) static training/eval data, never written to at runtime.
+    volumes:
+      - ./src/ml/data:/ml/data:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # Run migrations on startup before serving. Deliberately a single line —
+    # a folded (`>`) multi-line YAML scalar only folds line breaks to spaces
+    # for lines at the *same* indentation as the first content line; any
+    # more-indented continuation (as this used to have) is instead kept
+    # literal, so `sh -c` received real embedded newlines and every flag
+    # after `gunicorn app.main:app` ran as its own bogus one-word command
+    # (`sh: -w: not found`, etc.). One line sidesteps the whole footgun.
+    # --forwarded-allow-ips="*" is safe here specifically because the backend
+    # isn't exposed to the host (see the comment below) — nginx is the only
+    # thing that can ever reach it, so there's no untrusted peer that could
+    # spoof X-Forwarded-For. Without this, gunicorn/UvicornWorker only trusts
+    # forwarded headers from a peer at 127.0.0.1 (its own default), so on the
+    # compose network every request's "real" IP was actually nginx's
+    # container IP — identical for every user. That silently broke: (1) the
+    # per-IP @limiter.limit(...) decorators in auth.py, which all bucketed
+    # every client together under one shared quota instead of limiting each
+    # attacker individually, and (2) any IP that ends up in logs.
+    command: sh -c "python -m alembic upgrade head && gunicorn app.main:app -w 4 -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:8000 --forwarded-allow-ips='*' --timeout 180 --graceful-timeout 30 --access-logfile - --error-logfile -"
+    # Not exposed to host — nginx is the only entry point
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    # Measured live via `docker stats`: 4 gunicorn workers idle at ~6.4GB
+    # RAM combined — each worker independently loads its own copy of the
+    # spaCy transformer, sentence-transformers, and Whisper models at
+    # startup (load_nlp_model/load_embedding_model run per-process, not
+    # shared).
+    #
+    # This was originally capped at 10g on that idle number alone, which
+    # was wrong: it only covers steady state, not the concurrent *loading*
+    # burst all 4 workers do at once on every container start/redeploy.
+    # Confirmed live via cgroup memory.peak with the cap raised out of the
+    # way: real unconstrained startup peak is ~11.86GiB, ~1.86GB over the
+    # old 10g ceiling. Every redeploy was hitting that ceiling and having
+    # gunicorn workers cgroup-OOM-killed mid-boot ("Worker was sent
+    # SIGKILL! Perhaps out of memory?" in the logs) — gunicorn's master
+    # auto-respawned them so the container still reached `healthy`
+    # eventually and this went unnoticed, but real requests landing on a
+    # worker during that flapping window would fail. 14g leaves ~2GB of
+    # real headroom above the measured peak, not the idle number.
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 14g
+
+  nginx:
+    build:
+      context: .
+      dockerfile: nginx/Dockerfile
+      args:
+        # Leave empty (default) — nginx on this server proxies /api to backend.
+        # Set VITE_API_URL=https://your-backend.com only for split-host deploys.
+        VITE_API_URL: ${VITE_API_URL:-}
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      backend:
+        condition: service_healthy
+    volumes:
+      - nginx_logs:/var/log/nginx
+      # Mount the whole letsencrypt dir, not just live/lorekeeper.quest — the
+      # entries under live/ are symlinks into archive/, so archive needs to
+      # be present too or the symlinks dangle inside the container.
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256m
+
+volumes:
+  postgres_data:
+  redis_data:
+  nginx_logs:
+  ollama_data:

@@ -1,0 +1,36 @@
+model_name: "mistralai/Mistral-7B-Instruct-v0.3"
+max_seq_length: 2048
+load_in_4bit: true
+
+lora:
+  r: 16
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
+  lora_alpha: 16
+  lora_dropout: 0.0
+  bias: none
+
+training:
+  dataset_path: "../data/processed/training_set.jsonl"
+  output_dir: "../models/lorekeeper-lora"
+  per_device_train_batch_size: 2
+  gradient_accumulation_steps: 4
+  warmup_steps: 10
+  num_train_epochs: 3
+  learning_rate: 2.0e-4
+  fp16: false
+  bf16: true
+  logging_steps: 10
+  save_steps: 100
+  eval_steps: 100
+  evaluation_strategy: steps
+
+export:
+  gguf_output: "../models/lorekeeper-7b-q4.gguf"
+  quantization: "q4_k_m"
