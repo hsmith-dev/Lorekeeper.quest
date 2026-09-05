@@ -122,6 +122,22 @@ export function FeedbackPage() {
           </button>
         </form>
       )}
+
+      <p className="text-xs text-muted-foreground">
+        Feedback submitted here goes to this server's admin inbox. Self-hosting and want to reach
+        the developer directly — a bug in Lorekeeper itself, a feature idea? Email{" "}
+        <a href="mailto:hello@harrisonsmith.ai" className="underline">hello@harrisonsmith.ai</a> or
+        open a{" "}
+        <a
+          href="https://github.com/hsmith-dev/Lorekeeper.quest/issues/new"
+          target="_blank"
+          rel="noreferrer"
+          className="underline"
+        >
+          GitHub issue
+        </a>
+        {" "}(admins can attach the support bundle from Admin → System).
+      </p>
     </div>
   );
 }

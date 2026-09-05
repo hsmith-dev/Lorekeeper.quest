@@ -48,6 +48,10 @@ class ModelStatusResponse(BaseModel):
     model_installed: bool
     model_name: str
 
+    # "model_" is a pydantic protected namespace by default; these are just
+    # LLM-model fields, silence the false-positive warning.
+    model_config = {"protected_namespaces": ()}
+
 
 class TestConnectionRequest(BaseModel):
     llm_provider: str

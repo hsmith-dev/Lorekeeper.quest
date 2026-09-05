@@ -824,17 +824,21 @@ function SystemTab() {
         <div className="border-t border-border pt-3 text-sm text-muted-foreground">
           <p className="font-medium text-card-foreground mb-1">Something broken?</p>
           <p>
-            Download the support bundle above, then{" "}
+            Download the support bundle above and send it to the developer at{" "}
+            <a href="mailto:hello@harrisonsmith.ai" className="underline text-foreground">
+              hello@harrisonsmith.ai
+            </a>{" "}
+            (or attach it to a{" "}
             <a
               href="https://github.com/hsmith-dev/Lorekeeper.quest/issues/new"
               target="_blank"
               rel="noreferrer"
               className="underline text-foreground"
             >
-              open an issue on GitHub
-            </a>{" "}
-            and attach it — it contains everything needed to diagnose most problems (recent logs +
-            service status, no passwords or keys). You can unzip and read exactly what's in it first.
+              GitHub issue
+            </a>
+            ) — it contains everything needed to diagnose most problems (recent logs + service
+            status, no passwords or keys). You can unzip and read exactly what's in it first.
           </p>
         </div>
       </div>

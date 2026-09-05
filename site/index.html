@@ -375,12 +375,12 @@
 git clone https://github.com/hsmith-dev/Lorekeeper.quest.git lorekeeper
 cd lorekeeper &amp;&amp; cp .env.example .env
 
-<span class="c"># 2 · edit .env — three values: SECRET_KEY (openssl rand -hex 32),</span>
-<span class="c">#     POSTGRES_PASSWORD, and ADMIN_EMAIL (the email you'll register with)</span>
+<span class="c"># 2 · edit .env — two values: SECRET_KEY (openssl rand -hex 32)</span>
+<span class="c">#     and POSTGRES_PASSWORD</span>
 
 <span class="c"># 3 · launch</span>
 docker compose -f docker-compose.prod.yml up -d --build</div>
-      <p class="sec-intro reveal">Then open <strong>https://localhost</strong> (accept the one-time self-signed-certificate warning), register with your admin email, and install the fine-tuned model with one click under <strong>Admin&nbsp;→&nbsp;System&nbsp;→&nbsp;Model&nbsp;Library</strong> — it downloads straight from Hugging&nbsp;Face into the stack, no shell required. Something not working? The same System tab has the logs and a one-click support bundle for bug reports.</p>
+      <p class="sec-intro reveal">Then open <strong>https://localhost</strong> (accept the one-time self-signed-certificate warning) and register — <strong>the first account becomes the admin</strong>. Install the fine-tuned model with one click under <strong>Admin&nbsp;→&nbsp;System&nbsp;→&nbsp;Model&nbsp;Library</strong> — it downloads straight from Hugging&nbsp;Face into the stack, no shell required. Something not working? The same System tab has the logs and a one-click support bundle to send to <strong>hello@harrisonsmith.ai</strong>.</p>
 
       <div class="getit reveal">
         <a class="card" href="https://github.com/hsmith-dev/Lorekeeper.quest">

@@ -70,6 +70,19 @@ async def register(request: Request, body: UserCreate, db: AsyncSession = Depend
         hashed_password=hash_password(body.password),
         display_name=body.display_name,
     )
+    # First-run bootstrap: the very first account on a fresh deployment
+    # becomes the admin — same pattern as Grafana/Portainer — so a
+    # self-hoster never needs the ADMIN_EMAIL env var to reach the admin
+    # portal (where the model install lives). Deliberately keyed on "no
+    # users exist at all", NOT "no admin exists": on an established open
+    # instance that somehow lost its admins, silently crowning the next
+    # random registrant would be privilege escalation, not convenience.
+    # ADMIN_EMAIL (see deps.is_admin_user) still works as an override.
+    any_user = (await db.execute(select(User.id).limit(1))).scalar_one_or_none()
+    if any_user is None:
+        user.is_admin = True
+        user.access_granted = True
+        user.access_source = user.access_source or "grandfathered"
     if promo is not None:
         user.access_granted = True
         user.access_source = "promo"

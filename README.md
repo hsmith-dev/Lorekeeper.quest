@@ -21,9 +21,8 @@ Requirements: Docker with Compose. ~8 GB free RAM (or an NVIDIA GPU — see belo
 git clone <this-repo> lorekeeper && cd lorekeeper
 cp .env.example .env
 
-# 2 · edit .env — three values (the file walks you through it):
-#     SECRET_KEY (openssl rand -hex 32), POSTGRES_PASSWORD,
-#     and ADMIN_EMAIL (the email you'll register with)
+# 2 · edit .env — two values (the file walks you through it):
+#     SECRET_KEY (openssl rand -hex 32) and POSTGRES_PASSWORD
 
 # 3 · launch
 docker compose -f docker-compose.prod.yml up -d --build
@@ -32,7 +31,7 @@ docker compose -f docker-compose.prod.yml up -d --build
 Then:
 
 1. Open **https://localhost** — accept the browser's one-time warning about the self-signed certificate (the stack generates one automatically; see TLS below for real certs).
-2. **Register** an account using the exact email you set as `ADMIN_EMAIL`. Registration is open by default — no billing anywhere (see Access modes below).
+2. **Register** — the first account created on a fresh deployment automatically becomes the admin, so register yourself before sharing the URL. Registration is open by default — no billing anywhere (see Access modes below).
 3. Go to **Admin → System → Model Library** and click **Download & install** on the fine-tuned model. It pulls **[Lorekeeper-Mistral-7B](https://huggingface.co/harrisonsmith/Lorekeeper-Mistral-7B-GGUF)** (~4.4 GB) straight from Hugging Face into the stack's Ollama, with live progress — no shell needed. Optionally install the base model too (enables the in-app fine-tuned-vs-base comparison in Settings).
 
 That's the whole setup. Verify with **Settings → AI Provider → Test Connection**.
@@ -55,7 +54,7 @@ Prefer a different model entirely? Any instruct GGUF works — `ollama cp` any p
 
 ### Troubleshooting
 
-- **Admin → System** shows whether the model server is reachable and which models are installed, has a live view of recent backend logs, and a **Download support bundle** button — a zip of recent logs plus a sanitized snapshot of the deployment's state (no secrets). Attach that zip when [opening an issue](../../issues).
+- **Admin → System** shows whether the model server is reachable and which models are installed, has a live view of recent backend logs, and a **Download support bundle** button — a zip of recent logs plus a sanitized snapshot of the deployment's state (no secrets). Send that zip to **hello@harrisonsmith.ai** or attach it when [opening an issue](../../issues).
 - "AI model unavailable" or chat errors while Test Connection looks fine usually means no model is installed under the expected name — the Model Library shows this at a glance, and Test Connection will now tell you exactly that.
 - Raw container logs: `docker compose -f docker-compose.prod.yml logs backend --tail 200` (also `nginx`, `ollama`, `postgres`).
 
