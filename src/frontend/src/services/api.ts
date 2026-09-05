@@ -455,6 +455,9 @@ export const getAdminConfig = () => api.get<import("../types").AdminConfig>("/ap
 export const updateAdminConfig = (data: { open_access_mode: boolean }) =>
   api.put<import("../types").AdminConfig>("/api/admin/config", data);
 
+// Model readiness (any signed-in user — powers the dashboard install banner)
+export const getModelStatus = () => api.get<import("../types").ModelStatus>("/api/settings/model-status");
+
 // Admin — system (model library, logs, support bundle)
 export const getAdminModels = () => api.get<import("../types").ModelLibrary>("/api/admin/models");
 

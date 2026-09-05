@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { JournalInput } from "../components/JournalInput";
+import { ModelReadyBanner } from "../components/ModelReadyBanner";
 import { JournalList } from "../components/JournalList";
 import { CampaignSelector } from "../components/CampaignSelector";
 import { TagFilter } from "../components/TagFilter";
@@ -143,6 +144,7 @@ export function DashboardPage() {
 
   return (
     <div className="max-w-5xl mx-auto px-4 py-6 md:py-10">
+      <ModelReadyBanner />
       <div className="grid grid-cols-1 md:grid-cols-[280px_1fr] gap-6 items-start">
 
         {/* Sidebar */}

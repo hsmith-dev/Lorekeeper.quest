@@ -21,8 +21,13 @@ RUN python -m spacy download en_core_web_trf
 
 COPY . .
 
-# Non-root user for security
-RUN useradd -m appuser && chown -R appuser /app
+# Non-root user for security. /var/log/lorekeeper must exist and be owned by
+# appuser IN THE IMAGE: a fresh named volume mounted there (backend_logs in
+# docker-compose.prod.yml) copies this ownership on first use — without it
+# the volume comes up root-owned and the LOG_FILE handler silently can't
+# write (the admin log viewer then falls back to per-worker memory buffers).
+RUN useradd -m appuser && chown -R appuser /app \
+    && mkdir -p /var/log/lorekeeper && chown appuser /var/log/lorekeeper
 USER appuser
 
 EXPOSE 8000

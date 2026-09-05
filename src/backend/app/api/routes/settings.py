@@ -12,6 +12,7 @@ from app.schemas.settings import (
     LLMSettingsUpdate,
     TestConnectionRequest,
     TestConnectionResponse,
+    ModelStatusResponse,
     EvaluationRequest,
     EvaluationResponse,
 )
@@ -100,6 +101,51 @@ async def update_llm_settings(
     await db.commit()
     await db.refresh(us)
     return _to_response(us)
+
+
+@router.get("/model-status", response_model=ModelStatusResponse)
+async def model_status(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> ModelStatusResponse:
+    """Is this user's effective model backend actually ready to generate?
+
+    Deliberately available to every signed-in account (not admin-gated):
+    on a fresh self-hosted deployment the answer is "no — nothing installed
+    yet", and the dashboard uses this to say so up front (with an install
+    link for admins) instead of letting the first generation fail with a
+    generic 503."""
+    from app.services.ollama_service import ollama_status, model_installed
+
+    s = get_settings()
+    result = await db.execute(select(UserSettings).where(UserSettings.user_id == user.id))
+    us = result.scalar_one_or_none()
+
+    uses_local_default = us is None or (us.llm_provider == "kobold" and not us.llm_api_url)
+    variant = us.hosted_model_variant if us else "finetuned"
+    expected = s.kobold_base_model if variant == "base" else s.kobold_model
+
+    if not uses_local_default:
+        return ModelStatusResponse(
+            uses_local_default=False, server_reachable=True, model_installed=True, model_name=expected
+        )
+
+    status = await ollama_status()
+    if not status["reachable"]:
+        # KOBOLD_URL may point at real KoboldCpp, which has no /api/tags but
+        # always serves whatever model it was launched with — don't flash a
+        # false "nothing installed" banner at those deployments.
+        from app.services.chat_service import check_kobold_health
+        if await check_kobold_health():
+            return ModelStatusResponse(
+                uses_local_default=True, server_reachable=True, model_installed=True, model_name=expected
+            )
+    return ModelStatusResponse(
+        uses_local_default=True,
+        server_reachable=status["reachable"],
+        model_installed=model_installed(expected, status["models"]),
+        model_name=expected,
+    )
 
 
 @router.post("/test", response_model=TestConnectionResponse)

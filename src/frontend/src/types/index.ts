@@ -418,6 +418,13 @@ export interface ModelLibrary {
   base: ManagedModelStatus;
 }
 
+export interface ModelStatus {
+  uses_local_default: boolean;
+  server_reachable: boolean;
+  model_installed: boolean;
+  model_name: string;
+}
+
 export interface AdminLogs {
   source: "file" | "memory";
   lines: string[];

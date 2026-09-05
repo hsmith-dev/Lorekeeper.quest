@@ -36,6 +36,19 @@ class LLMSettingsUpdate(BaseModel):
     hosted_model_variant: HostedModelVariant | None = None
 
 
+class ModelStatusResponse(BaseModel):
+    """Whether this user's EFFECTIVE model backend is ready — powers the
+    dashboard's "no model installed yet" banner on fresh self-hosted
+    deployments, so the fix is offered by default instead of buried in the
+    admin portal."""
+    # False when the user configured their own provider (OpenAI key, custom
+    # URL, …) — the platform's local model state is then irrelevant to them.
+    uses_local_default: bool
+    server_reachable: bool
+    model_installed: bool
+    model_name: str
+
+
 class TestConnectionRequest(BaseModel):
     llm_provider: str
     llm_api_url: str | None = None

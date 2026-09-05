@@ -1,0 +1,4 @@
+# Shell scripts must stay LF everywhere — a CRLF checkout (git autocrlf on
+# Windows) breaks their shebang inside Linux containers with a misleading
+# "not found", which crash-looped nginx's cert entrypoint on a Windows clone.
+*.sh text eol=lf

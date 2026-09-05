@@ -821,13 +821,34 @@ function SystemTab() {
             )}
           </div>
         )}
+        <div className="border-t border-border pt-3 text-sm text-muted-foreground">
+          <p className="font-medium text-card-foreground mb-1">Something broken?</p>
+          <p>
+            Download the support bundle above, then{" "}
+            <a
+              href="https://github.com/hsmith-dev/Lorekeeper.quest/issues/new"
+              target="_blank"
+              rel="noreferrer"
+              className="underline text-foreground"
+            >
+              open an issue on GitHub
+            </a>{" "}
+            and attach it — it contains everything needed to diagnose most problems (recent logs +
+            service status, no passwords or keys). You can unzip and read exactly what's in it first.
+          </p>
+        </div>
       </div>
     </div>
   );
 }
 
 export function AdminPage() {
-  const [tab, setTab] = useState<TabKey>("users");
+  // ?tab=<key> deep-links straight to a tab — the dashboard's "no model
+  // installed" banner points at /admin?tab=system.
+  const [tab, setTab] = useState<TabKey>(() => {
+    const wanted = new URLSearchParams(window.location.search).get("tab");
+    return TABS.some((t) => t.key === wanted) ? (wanted as TabKey) : "users";
+  });
   // The backend already 403s every /api/admin/* route for non-admins (see
   // app/api/deps.py::require_admin) — this is purely so a non-admin who
   // navigates here directly sees a clean message instead of raw failed

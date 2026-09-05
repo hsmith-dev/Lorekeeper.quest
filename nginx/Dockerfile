@@ -20,6 +20,10 @@ COPY nginx/nginx.conf /etc/nginx/nginx.conf
 COPY nginx/locations.conf /etc/nginx/locations.conf
 COPY nginx/proxy_common.conf /etc/nginx/proxy_common.conf
 COPY nginx/ensure-certs.sh /docker-entrypoint.d/40-ensure-certs.sh
-RUN chmod +x /docker-entrypoint.d/40-ensure-certs.sh
+# sed strips CRLF: a clone on Windows (git autocrlf) checks the script out
+# with \r\n, and busybox sh then fails the shebang with a misleading
+# "not found" — normalize here so the image works from any checkout.
+RUN sed -i 's/\r$//' /docker-entrypoint.d/40-ensure-certs.sh \
+    && chmod +x /docker-entrypoint.d/40-ensure-certs.sh
 COPY --from=builder /app/dist /usr/share/nginx/html
 EXPOSE 80 443
