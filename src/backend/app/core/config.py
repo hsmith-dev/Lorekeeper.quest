@@ -61,6 +61,12 @@ class Settings(BaseSettings):
     environment: str = "development"
     cors_origins: list[str] = ["http://localhost:5173"]
     log_level: str = "INFO"
+    # When set, every worker also appends JSON log lines here (rotated at
+    # ~10MB) — what the admin portal's log viewer and support bundle read.
+    # docker-compose.prod.yml points it at a named volume so logs survive
+    # container recreation; unset (local dev) falls back to stdout plus an
+    # in-memory ring buffer.
+    log_file: str | None = None
     # Self-host / free-community mode: registration grants full access
     # immediately (no promo code, no subscription), and the platform-default
     # LLM (your own Ollama) is available to every account with no billing

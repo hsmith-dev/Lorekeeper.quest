@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
-    configure_logging(settings.log_level)
+    configure_logging(settings.log_level, settings.log_file)
     logger.info("Starting Lorekeeper API", extra={"env": settings.environment})
     await init_redis()
     load_nlp_model()

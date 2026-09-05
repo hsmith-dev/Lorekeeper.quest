@@ -1,9 +1,11 @@
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { getMe } from "../services/api";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { getMe, getSupportBundle } from "../services/api";
 import { PageHeader } from "../components/PageHeader";
 import { useFeedbackList, useFeedbackContext } from "../hooks/useFeedback";
 import {
+  useAdminModels,
+  useAdminLogs,
   useAdminUsers,
   useSuspendUser,
   useUnsuspendUser,
@@ -33,6 +35,7 @@ const TABS = [
   { key: "promo-codes", label: "Promo Codes" },
   { key: "feedback", label: "Feedback" },
   { key: "platform", label: "Platform" },
+  { key: "system", label: "System" },
 ] as const;
 type TabKey = (typeof TABS)[number]["key"];
 
@@ -603,6 +606,226 @@ function PlatformTab() {
   );
 }
 
+// ── System tab ───────────────────────────────────────────────────────────────
+
+function formatGB(bytes: number) {
+  return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
+}
+
+type InstallProgress = { variant: "finetuned" | "base"; status: string; pct: number | null; detail: string };
+
+function SystemTab() {
+  const qc = useQueryClient();
+  const { data: models, isLoading, isError } = useAdminModels();
+  const [installing, setInstalling] = useState<InstallProgress | null>(null);
+  const [installError, setInstallError] = useState<string | null>(null);
+  const [showLogs, setShowLogs] = useState(false);
+  const logs = useAdminLogs(showLogs);
+  const [bundleBusy, setBundleBusy] = useState(false);
+
+  const install = async (variant: "finetuned" | "base") => {
+    setInstallError(null);
+    setInstalling({ variant, status: "Starting download…", pct: null, detail: "" });
+    try {
+      const token = localStorage.getItem("lk_token");
+      const resp = await fetch("/api/admin/models/install", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+        body: JSON.stringify({ variant }),
+      });
+      if (!resp.ok || !resp.body) throw new Error(`install request failed (HTTP ${resp.status})`);
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let finished = false;
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const events = buffer.split("\n\n");
+        buffer = events.pop() ?? "";
+        for (const raw of events) {
+          const dataLine = raw.split("\n").find((l) => l.startsWith("data:"));
+          if (!dataLine) continue;
+          let ev: { status?: string; total?: number; completed?: number; done?: boolean; error?: string };
+          try {
+            ev = JSON.parse(dataLine.slice(5));
+          } catch {
+            continue;
+          }
+          if (ev.error) throw new Error(ev.error);
+          if (ev.done) {
+            finished = true;
+            continue;
+          }
+          setInstalling({
+            variant,
+            status: ev.status ?? "",
+            pct: ev.total ? Math.round(((ev.completed ?? 0) / ev.total) * 100) : null,
+            detail: ev.total ? `${formatGB(ev.completed ?? 0)} of ${formatGB(ev.total)}` : "",
+          });
+        }
+      }
+      if (!finished) throw new Error("The install stream ended before completing — check the logs below.");
+    } catch (e) {
+      setInstallError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setInstalling(null);
+      qc.invalidateQueries({ queryKey: ["admin-models"] });
+    }
+  };
+
+  const downloadBundle = async () => {
+    setBundleBusy(true);
+    try {
+      const resp = await getSupportBundle();
+      const url = URL.createObjectURL(resp.data);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `lorekeeper-support-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.zip`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } finally {
+      setBundleBusy(false);
+    }
+  };
+
+  const modelRow = (slot: { name: string; installed: boolean; source: string }, variant: "finetuned" | "base", label: string, blurb: string) => (
+    <div className="flex flex-col gap-2 rounded-md border border-border p-4">
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div>
+          <p className="font-medium text-card-foreground">
+            {label} <span className="text-xs text-muted-foreground font-mono">({slot.name})</span>
+          </p>
+          <p className="text-xs text-muted-foreground">{blurb}</p>
+          <p className="text-xs text-muted-foreground mt-0.5">Source: {slot.source}</p>
+        </div>
+        {slot.installed ? (
+          <span className="text-sm text-green-600 dark:text-green-400 whitespace-nowrap">● Installed</span>
+        ) : (
+          <button
+            onClick={() => install(variant)}
+            disabled={installing !== null || !models?.ollama_reachable}
+            className="px-3 py-1.5 rounded-md text-sm bg-primary text-primary-foreground disabled:opacity-50"
+          >
+            Download &amp; install
+          </button>
+        )}
+      </div>
+      {installing?.variant === variant && (
+        <div className="flex flex-col gap-1">
+          <div className="h-2 rounded bg-muted overflow-hidden">
+            <div
+              className={`h-full bg-primary transition-all ${installing.pct === null ? "w-1/4 animate-pulse" : ""}`}
+              style={installing.pct !== null ? { width: `${installing.pct}%` } : undefined}
+            />
+          </div>
+          <p className="text-xs text-muted-foreground">
+            {installing.status}
+            {installing.detail && ` — ${installing.detail}`}
+            {installing.pct !== null && ` (${installing.pct}%)`}
+          </p>
+          <p className="text-xs text-muted-foreground">
+            Keep this tab open — a 4&nbsp;GB download can take a while on slower connections.
+          </p>
+        </div>
+      )}
+    </div>
+  );
+
+  return (
+    <div className="flex flex-col gap-4 max-w-2xl">
+      {/* ── Model library ── */}
+      <div className="rounded-lg border border-border bg-card p-5 flex flex-col gap-3">
+        <div>
+          <p className="font-semibold text-card-foreground">Model Library</p>
+          <p className="text-sm text-muted-foreground">
+            The AI models this deployment serves locally. Nothing ships with the app itself — install
+            them here once and they're stored in the model server's volume.
+          </p>
+        </div>
+
+        {isLoading && <p className="text-sm text-muted-foreground">Checking the model server…</p>}
+        {(isError || (models && !models.ollama_reachable)) && (
+          <p className="text-sm text-destructive">
+            Model server unreachable at <span className="font-mono">{models?.ollama_url ?? "?"}</span>
+            {models?.ollama_error ? ` — ${models.ollama_error}` : ""}. Is the <span className="font-mono">ollama</span>{" "}
+            container running? (<span className="font-mono">docker compose ps</span>)
+          </p>
+        )}
+
+        {models?.ollama_reachable && (
+          <>
+            {modelRow(
+              models.finetuned,
+              "finetuned",
+              "Lorekeeper (fine-tuned)",
+              "The recommended model — Mistral 7B fine-tuned on RPG session journals. ~4.4 GB.",
+            )}
+            {modelRow(
+              models.base,
+              "base",
+              "Base model",
+              "Un-fine-tuned Mistral 7B Instruct — enables the fine-tuned vs. base comparison in Settings. Optional. ~4.1 GB.",
+            )}
+            {installError && <p className="text-sm text-destructive">Install failed: {installError}</p>}
+            {models.installed_models.length > 0 && (
+              <p className="text-xs text-muted-foreground">
+                All installed models: {models.installed_models.join(", ")}
+              </p>
+            )}
+          </>
+        )}
+      </div>
+
+      {/* ── Troubleshooting ── */}
+      <div className="rounded-lg border border-border bg-card p-5 flex flex-col gap-3">
+        <div>
+          <p className="font-semibold text-card-foreground">Troubleshooting</p>
+          <p className="text-sm text-muted-foreground">
+            The support bundle is a zip of recent backend logs plus a sanitized snapshot of this
+            deployment's state (service reachability, versions, configuration flags — no secrets).
+            Attach it when reporting a problem.
+          </p>
+        </div>
+        <div className="flex gap-2 flex-wrap">
+          <button
+            onClick={downloadBundle}
+            disabled={bundleBusy}
+            className="px-3 py-1.5 rounded-md text-sm bg-primary text-primary-foreground disabled:opacity-50"
+          >
+            {bundleBusy ? "Building…" : "Download support bundle"}
+          </button>
+          <button
+            onClick={() => (showLogs ? logs.refetch() : setShowLogs(true))}
+            className="px-3 py-1.5 rounded-md text-sm border border-border text-foreground hover:bg-muted"
+          >
+            {showLogs ? "Refresh logs" : "View recent logs"}
+          </button>
+        </div>
+        {showLogs && (
+          <div className="flex flex-col gap-1">
+            {logs.isLoading && <p className="text-xs text-muted-foreground">Loading logs…</p>}
+            {logs.data && (
+              <>
+                <p className="text-xs text-muted-foreground">
+                  Last {logs.data.lines.length} lines
+                  {logs.data.source === "memory" && " (this worker's in-memory buffer — no log file configured)"}
+                  :
+                </p>
+                <pre className="text-[11px] leading-4 bg-muted/40 rounded-md p-3 max-h-80 overflow-auto whitespace-pre-wrap break-all">
+                  {logs.data.lines.join("\n") || "(no log lines yet)"}
+                </pre>
+              </>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function AdminPage() {
   const [tab, setTab] = useState<TabKey>("users");
   // The backend already 403s every /api/admin/* route for non-admins (see
@@ -650,6 +873,7 @@ export function AdminPage() {
       {tab === "promo-codes" && <PromoCodesTab />}
       {tab === "feedback" && <FeedbackTab />}
       {tab === "platform" && <PlatformTab />}
+      {tab === "system" && <SystemTab />}
     </div>
   );
 }

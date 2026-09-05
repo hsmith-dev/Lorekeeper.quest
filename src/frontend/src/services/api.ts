@@ -454,3 +454,12 @@ export const getAdminConfig = () => api.get<import("../types").AdminConfig>("/ap
 
 export const updateAdminConfig = (data: { open_access_mode: boolean }) =>
   api.put<import("../types").AdminConfig>("/api/admin/config", data);
+
+// Admin — system (model library, logs, support bundle)
+export const getAdminModels = () => api.get<import("../types").ModelLibrary>("/api/admin/models");
+
+export const getAdminLogs = (lines = 200) =>
+  api.get<import("../types").AdminLogs>("/api/admin/logs", { params: { lines } });
+
+export const getSupportBundle = () =>
+  api.get<Blob>("/api/admin/support-bundle", { responseType: "blob" });

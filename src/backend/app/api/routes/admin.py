@@ -22,6 +22,10 @@ from app.schemas.admin import (
     PromoCodeUpdateRequest,
     AppConfigResponse,
     AppConfigUpdateRequest,
+    ManagedModelStatus,
+    ModelLibraryResponse,
+    ModelInstallRequest,
+    LogsResponse,
 )
 from app.api.deps import require_admin
 from app.services.email_service import send_admin_message_email
@@ -337,3 +341,163 @@ async def update_platform_config(body: AppConfigUpdateRequest, db: AsyncSession 
     cfg.open_access_mode = body.open_access_mode
     await db.commit()
     return _config_response(cfg.open_access_mode)
+
+
+# ── System: model library ────────────────────────────────────────────────────
+# Self-host quality-of-life: the stack ships with an EMPTY Ollama — the 4.4GB
+# fine-tune isn't in the git repo — and "docker exec ... ollama create" is
+# exactly the step new self-hosters skip, then hit "AI model unavailable" on
+# their first chat while Test Connection's green light (which only proves the
+# server answers) gaslights them. These routes make model install a button.
+
+@router.get("/models", response_model=ModelLibraryResponse)
+async def model_library() -> ModelLibraryResponse:
+    from app.core.config import get_settings
+    from app.services import ollama_service
+
+    s = get_settings()
+    status = await ollama_service.ollama_status()
+    return ModelLibraryResponse(
+        ollama_url=s.kobold_url,
+        ollama_reachable=status["reachable"],
+        ollama_error=status["error"],
+        installed_models=status["models"],
+        finetuned=ManagedModelStatus(
+            name=s.kobold_model,
+            installed=ollama_service.model_installed(s.kobold_model, status["models"]),
+            source=f"Hugging Face · {ollama_service.HF_FINETUNED_REF}",
+        ),
+        base=ManagedModelStatus(
+            name=s.kobold_base_model,
+            installed=ollama_service.model_installed(s.kobold_base_model, status["models"]),
+            source=f"Ollama library · {ollama_service.BASE_LIBRARY_REF}",
+        ),
+    )
+
+
+@router.post("/models/install")
+async def install_model(body: ModelInstallRequest):
+    """SSE stream of install progress — pull from the public registry, then
+    register under the name the app expects. The X-Accel-Buffering header is
+    what makes the progress bar live through nginx without a dedicated
+    proxy_buffering-off location block."""
+    import json as _json
+    from fastapi.responses import StreamingResponse
+    from app.services import ollama_service
+
+    async def gen():
+        async for event in ollama_service.install_model_events(body.variant):
+            yield f"data: {_json.dumps(event)}\n\n"
+
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+# ── System: logs & support bundle ────────────────────────────────────────────
+
+def _read_log_tail(max_lines: int = 500, max_bytes: int = 2 * 1024 * 1024) -> tuple[str, list[str]]:
+    """Last `max_lines` log lines: the shared LOG_FILE if configured and
+    present (covers all workers), else this worker's in-memory ring buffer."""
+    from pathlib import Path
+    from app.core.config import get_settings
+    from app.core.logging import RECENT_LOGS
+
+    log_file = get_settings().log_file
+    if log_file and Path(log_file).is_file():
+        try:
+            with open(log_file, "rb") as f:
+                f.seek(0, 2)
+                size = f.tell()
+                f.seek(max(0, size - max_bytes))
+                text_tail = f.read().decode("utf-8", errors="replace")
+            lines = text_tail.splitlines()
+            if size > max_bytes and lines:
+                lines = lines[1:]  # first line is almost certainly truncated
+            return "file", lines[-max_lines:]
+        except OSError:
+            pass
+    return "memory", list(RECENT_LOGS)[-max_lines:]
+
+
+@router.get("/logs", response_model=LogsResponse)
+async def recent_logs(lines: int = 200) -> LogsResponse:
+    source, tail = _read_log_tail(max_lines=max(1, min(lines, 2000)))
+    return LogsResponse(source=source, lines=tail)
+
+
+@router.get("/support-bundle")
+async def support_bundle(db: AsyncSession = Depends(get_db)):
+    """One-click diagnostics zip a self-hoster can attach when asking for
+    help: recent logs + a sanitized snapshot of environment/service state.
+    Deliberately contains NO secrets — settings are reported as set/unset
+    booleans or non-sensitive values only."""
+    import io
+    import json as _json
+    import platform as _platform
+    import sys as _sys
+    import zipfile
+    from datetime import datetime as _dt, timezone as _tz
+    from fastapi.responses import StreamingResponse
+    from sqlalchemy import text as _text
+    from app.core.config import get_settings
+    from app.services import ollama_service
+
+    s = get_settings()
+
+    db_ok, alembic_version = False, None
+    try:
+        db_ok = (await db.execute(_text("SELECT 1"))).scalar() == 1
+        alembic_version = (await db.execute(_text("SELECT version_num FROM alembic_version"))).scalar()
+    except Exception:
+        pass
+
+    open_access = None
+    try:
+        from app.services.app_config_service import get_app_config
+        open_access = (await get_app_config(db)).open_access_mode
+    except Exception:
+        pass
+
+    ollama = await ollama_service.ollama_status()
+
+    diagnostics = {
+        "generated_at": _dt.now(_tz.utc).isoformat(),
+        "app_version": "0.1.0",
+        "python": _sys.version,
+        "platform": _platform.platform(),
+        "environment": s.environment,
+        "log_level": s.log_level,
+        "log_file_configured": bool(s.log_file),
+        "open_access_mode": open_access,
+        "database": {"reachable": db_ok, "alembic_version": alembic_version},
+        "model_server": {
+            "kobold_url": s.kobold_url,
+            "expected_models": {"finetuned": s.kobold_model, "base": s.kobold_base_model},
+            "ollama": ollama,
+            "timeout_seconds": s.kobold_timeout_seconds,
+        },
+        "integrations": {
+            "stripe_configured": bool(s.stripe_secret_key and s.stripe_webhook_secret),
+            "email_configured": bool(s.resend_api_key),
+            "admin_email_set": bool(s.admin_email),
+        },
+        "cors_origins": s.cors_origins,
+    }
+
+    source, log_lines = _read_log_tail(max_lines=2000)
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("diagnostics.json", _json.dumps(diagnostics, indent=2, default=str))
+        zf.writestr(f"backend-logs-{source}.log", "\n".join(log_lines))
+    buf.seek(0)
+
+    stamp = _dt.now(_tz.utc).strftime("%Y%m%d-%H%M%S")
+    return StreamingResponse(
+        buf,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="lorekeeper-support-{stamp}.zip"'},
+    )

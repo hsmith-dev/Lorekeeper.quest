@@ -17,42 +17,51 @@ Everything runs on your own machine. No OpenAI/Anthropic key needed (though brin
 Requirements: Docker with Compose. ~8 GB free RAM (or an NVIDIA GPU — see below).
 
 ```bash
+# 1 · get the app
 git clone <this-repo> lorekeeper && cd lorekeeper
 cp .env.example .env
-# edit .env: set SECRET_KEY (openssl rand -hex 32) and POSTGRES_PASSWORD.
-# Registration is open by default — no billing anywhere (see Access modes below).
 
+# 2 · edit .env — three values (the file walks you through it):
+#     SECRET_KEY (openssl rand -hex 32), POSTGRES_PASSWORD,
+#     and ADMIN_EMAIL (the email you'll register with)
+
+# 3 · launch
 docker compose -f docker-compose.prod.yml up -d --build
 ```
 
-### Add a model
+Then:
 
-The stack serves models through [Ollama](https://ollama.com). The recommended model is **[Lorekeeper-Mistral-7B](https://huggingface.co/harrisonsmith/Lorekeeper-Mistral-7B-GGUF)** — the LoRA fine-tune of Mistral 7B this app was built around, trained on RPG session-journal data across 12 game systems:
+1. Open **https://localhost** — accept the browser's one-time warning about the self-signed certificate (the stack generates one automatically; see TLS below for real certs).
+2. **Register** an account using the exact email you set as `ADMIN_EMAIL`. Registration is open by default — no billing anywhere (see Access modes below).
+3. Go to **Admin → System → Model Library** and click **Download & install** on the fine-tuned model. It pulls **[Lorekeeper-Mistral-7B](https://huggingface.co/harrisonsmith/Lorekeeper-Mistral-7B-GGUF)** (~4.4 GB) straight from Hugging Face into the stack's Ollama, with live progress — no shell needed. Optionally install the base model too (enables the in-app fine-tuned-vs-base comparison in Settings).
 
-```bash
-# download into the models dir (mounted into the ollama container), ~4.4 GB
-curl -L -o src/ml/models/lorekeeper-7b-q4.gguf \
-  https://huggingface.co/harrisonsmith/Lorekeeper-Mistral-7B-GGUF/resolve/main/lorekeeper-7b-q4.gguf
-curl -L -o src/ml/models/lorekeeper-Modelfile \
-  https://huggingface.co/harrisonsmith/Lorekeeper-Mistral-7B-GGUF/resolve/main/lorekeeper-Modelfile
+That's the whole setup. Verify with **Settings → AI Provider → Test Connection**.
 
-docker compose -f docker-compose.prod.yml exec ollama ollama create lorekeeper -f /import-models/lorekeeper-Modelfile
-```
-
-Optionally add the base model too (enables the in-app fine-tuned-vs-base comparison in Settings):
+<details>
+<summary>Prefer to install models from the CLI instead?</summary>
 
 ```bash
+# fine-tuned model, straight from Hugging Face
+docker compose -f docker-compose.prod.yml exec ollama ollama pull hf.co/harrisonsmith/Lorekeeper-Mistral-7B-GGUF
+docker compose -f docker-compose.prod.yml exec ollama ollama cp hf.co/harrisonsmith/Lorekeeper-Mistral-7B-GGUF lorekeeper
+
+# optional base model
 docker compose -f docker-compose.prod.yml exec ollama ollama pull mistral:7b-instruct-q4_0
 docker compose -f docker-compose.prod.yml exec ollama ollama cp mistral:7b-instruct-q4_0 lorekeeper-base
 ```
 
-Prefer a different model? Any instruct GGUF works — drop it in `src/ml/models/` with a Modelfile and `ollama create lorekeeper -f /import-models/your-Modelfile`, or `ollama cp` any pulled Ollama model to the name `lorekeeper`. The training pipeline that produced the fine-tune lives in `src/ml/`.
+Prefer a different model entirely? Any instruct GGUF works — `ollama cp` any pulled Ollama model to the name `lorekeeper`, or drop a GGUF in `src/ml/models/` with a Modelfile and `ollama create lorekeeper -f /import-models/your-Modelfile`. The training pipeline that produced the fine-tune lives in `src/ml/`.
+</details>
 
-Then open **http://localhost** and register an account.
+### Troubleshooting
+
+- **Admin → System** shows whether the model server is reachable and which models are installed, has a live view of recent backend logs, and a **Download support bundle** button — a zip of recent logs plus a sanitized snapshot of the deployment's state (no secrets). Attach that zip when [opening an issue](../../issues).
+- "AI model unavailable" or chat errors while Test Connection looks fine usually means no model is installed under the expected name — the Model Library shows this at a glance, and Test Connection will now tell you exactly that.
+- Raw container logs: `docker compose -f docker-compose.prod.yml logs backend --tail 200` (also `nginx`, `ollama`, `postgres`).
 
 ### TLS
 
-`nginx/nginx.conf` expects Let's Encrypt certs at `/etc/letsencrypt/live/<your-domain>/`. For local use, mount a self-signed cert over `/etc/letsencrypt` via a compose override; for a real deployment see the TLS section of `docs/OCI_DEPLOYMENT.md`.
+Out of the box the stack generates a **self-signed certificate** at startup (browsers warn once; fine for local/LAN use). For a real domain, get a Let's Encrypt cert onto the host (`certbot certonly --standalone`) — the nginx container mounts `/etc/letsencrypt` and automatically prefers a real cert found there. See the TLS section of `docs/OCI_DEPLOYMENT.md`.
 
 ### GPU (optional, big speedup)
 

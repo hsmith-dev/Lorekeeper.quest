@@ -19,12 +19,15 @@
 #         model import step. Point Settings' provider URL at it per-account,
 #         or set it as the default in .env.
 #
-# For HTTPS: nginx.conf's HTTPS server block expects Let's Encrypt's own
-#   layout at /etc/letsencrypt/live/<domain>/{fullchain,privkey}.pem — get a
-#   cert with `certbot certonly --standalone` (stop the nginx container
-#   first to free port 80; see docs/OCI_DEPLOYMENT.md's TLS section and
-#   scripts/certbot-{pre,post}-hook.sh for renewal), the nginx service below
-#   already mounts /etc/letsencrypt and publishes port 443.
+# HTTPS works out of the box: if no certificate is mounted, the nginx
+#   container generates a self-signed one at startup (see
+#   nginx/ensure-certs.sh) — browsers show a one-time warning, fine for
+#   local/LAN use. For a real domain, get a Let's Encrypt cert with
+#   `certbot certonly --standalone` (stop the nginx container first to free
+#   port 80; see docs/OCI_DEPLOYMENT.md's TLS section and
+#   scripts/certbot-{pre,post}-hook.sh for renewal) — the nginx service
+#   below already mounts /etc/letsencrypt and prefers a real cert when one
+#   exists there.
 # =============================================================================
 
 services:
@@ -121,6 +124,11 @@ services:
     env_file: .env
     environment:
       ENVIRONMENT: production
+      # Shared JSON log file all gunicorn workers append to — what the admin
+      # portal's System tab (log viewer / support bundle) reads. On a named
+      # volume so logs survive container recreation; stdout (docker logs)
+      # still gets everything too.
+      LOG_FILE: /var/log/lorekeeper/backend.log
     # eval_service.py resolves the validation set at /ml/data/processed/... —
     # correct relative to a full repo checkout, but the backend image's build
     # context is only ./src/backend, so nothing under src/ml ever made it in.
@@ -130,6 +138,7 @@ services:
     # small (~2MB) static training/eval data, never written to at runtime.
     volumes:
       - ./src/ml/data:/ml/data:ro
+      - backend_logs:/var/log/lorekeeper
     depends_on:
       postgres:
         condition: service_healthy
@@ -216,3 +225,4 @@ volumes:
   redis_data:
   nginx_logs:
   ollama_data:
+  backend_logs:

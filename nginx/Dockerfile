@@ -13,8 +13,13 @@ RUN npm run build
 
 # Stage 2 — nginx with built assets
 FROM nginx:1.27-alpine
+# openssl: the entrypoint script generates a self-signed cert when no real
+# one is mounted, so the stack boots on any machine with zero TLS setup.
+RUN apk add --no-cache openssl
 COPY nginx/nginx.conf /etc/nginx/nginx.conf
 COPY nginx/locations.conf /etc/nginx/locations.conf
 COPY nginx/proxy_common.conf /etc/nginx/proxy_common.conf
+COPY nginx/ensure-certs.sh /docker-entrypoint.d/40-ensure-certs.sh
+RUN chmod +x /docker-entrypoint.d/40-ensure-certs.sh
 COPY --from=builder /app/dist /usr/share/nginx/html
 EXPOSE 80 443

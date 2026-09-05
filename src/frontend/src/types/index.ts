@@ -403,6 +403,26 @@ export interface AdminConfig {
   stripe_configured: boolean;
 }
 
+export interface ManagedModelStatus {
+  name: string;
+  installed: boolean;
+  source: string;
+}
+
+export interface ModelLibrary {
+  ollama_url: string;
+  ollama_reachable: boolean;
+  ollama_error: string | null;
+  installed_models: string[];
+  finetuned: ManagedModelStatus;
+  base: ManagedModelStatus;
+}
+
+export interface AdminLogs {
+  source: "file" | "memory";
+  lines: string[];
+}
+
 export interface RetrievalCandidate {
   id: string;
   shorthand: string;

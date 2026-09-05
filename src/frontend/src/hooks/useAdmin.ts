@@ -134,6 +134,22 @@ export function useAdminConfig() {
   });
 }
 
+export function useAdminModels() {
+  return useQuery<import("../types").ModelLibrary>({
+    queryKey: ["admin-models"],
+    queryFn: async () => (await api.getAdminModels()).data,
+  });
+}
+
+export function useAdminLogs(enabled: boolean) {
+  return useQuery<import("../types").AdminLogs>({
+    queryKey: ["admin-logs"],
+    queryFn: async () => (await api.getAdminLogs(200)).data,
+    enabled,
+    refetchOnWindowFocus: false,
+  });
+}
+
 export function useUpdateAdminConfig() {
   const qc = useQueryClient();
   return useMutation({

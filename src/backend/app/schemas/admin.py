@@ -103,3 +103,32 @@ class AppConfigResponse(BaseModel):
 
 class AppConfigUpdateRequest(BaseModel):
     open_access_mode: bool
+
+
+class ManagedModelStatus(BaseModel):
+    # Which Ollama name this slot should exist under (settings.kobold_model /
+    # kobold_base_model) and whether something is installed under it.
+    name: str
+    installed: bool
+    # Where the System tab's install button gets it from.
+    source: str
+
+
+class ModelLibraryResponse(BaseModel):
+    ollama_url: str
+    ollama_reachable: bool
+    ollama_error: str | None
+    installed_models: list[str]
+    finetuned: ManagedModelStatus
+    base: ManagedModelStatus
+
+
+class ModelInstallRequest(BaseModel):
+    variant: Literal["finetuned", "base"] = "finetuned"
+
+
+class LogsResponse(BaseModel):
+    # Where these lines came from — "file" (the shared LOG_FILE all workers
+    # append to) or "memory" (this worker's ring buffer, dev fallback).
+    source: Literal["file", "memory"]
+    lines: list[str]

@@ -132,6 +132,27 @@ async def test_connection(
     if body.llm_provider == "kobold" and not api_url and body.hosted_model_variant == "base":
         cfg.model = get_settings().kobold_base_model
 
+    # For the local-server provider, distinguish "server down" from "server up
+    # but the model was never installed" BEFORE the generation attempt — the
+    # raw 404 the latter produces reads like a generic outage, and a green
+    # "server reachable" style check elsewhere makes it genuinely confusing.
+    # Best-effort: /api/tags only exists on Ollama; a real KoboldCpp server
+    # just falls through to the normal test below.
+    if cfg.provider == "kobold":
+        from app.services.ollama_service import ollama_status, model_installed
+        expected = cfg.model or get_settings().kobold_model
+        status = await ollama_status(cfg.api_url)
+        if status["reachable"] and not model_installed(expected, status["models"]):
+            installed = ", ".join(status["models"]) or "none"
+            return TestConnectionResponse(
+                success=False,
+                message=(
+                    f"The model server is running, but no model named '{expected}' is installed "
+                    f"(installed: {installed}). An admin can install it in one click under "
+                    "Admin → System → Model Library."
+                ),
+            )
+
     try:
         text = await test_provider_connection(cfg)
         return TestConnectionResponse(success=True, message=f"Connected! Model replied: {text[:80]}")
