@@ -811,7 +811,7 @@ function BillingSection() {
 
         {!status.stripe_configured && (
           <p className="text-xs text-muted-foreground bg-muted/50 rounded-md px-3 py-2">
-            Billing isn't configured on this server yet — see docs/PAYMENT_PROCESSOR_SETUP.md.
+            Billing isn't configured on this server yet — ask this server's admin.
           </p>
         )}
       </div>

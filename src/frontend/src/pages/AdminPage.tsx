@@ -581,27 +581,25 @@ function PlatformTab() {
         </label>
         {!config.open_access_mode && (
           <p className="mt-3 text-sm text-muted-foreground border-t border-border pt-3">
-            Gated mode is active: new accounts need a promo code (Promo Codes tab) or a paid
-            subscription to get access.
+            Gated mode is active: new accounts need a promo code (Promo Codes tab)
+            {config.stripe_configured ? " or a paid subscription" : ""} to get access.
+            {!config.stripe_configured &&
+              " Running Lorekeeper as a paid service requires a commercial license — contact hello@harrisonsmith.ai."}
           </p>
         )}
       </div>
 
-      <div className="rounded-lg border border-border bg-card p-5 text-sm">
-        <p className="font-semibold text-card-foreground mb-1">Stripe billing</p>
-        {config.stripe_configured ? (
+      {/* Only surfaces when Stripe is actually wired up (commercial deployments) —
+          self-hosters never see a billing section at all. */}
+      {config.stripe_configured && (
+        <div className="rounded-lg border border-border bg-card p-5 text-sm">
+          <p className="font-semibold text-card-foreground mb-1">Stripe billing</p>
           <p className="text-muted-foreground">
             <span className="text-green-600 dark:text-green-400">● Configured</span> — subscription
             checkout works whenever open access is off.
           </p>
-        ) : (
-          <p className="text-muted-foreground">
-            <span className="text-amber-600 dark:text-amber-400">● Not configured</span> — with open
-            access off, accounts can only get in via promo codes until the Stripe environment
-            variables are set (see docs/PAYMENT_PROCESSOR_SETUP.md).
-          </p>
-        )}
-      </div>
+        </div>
+      )}
     </div>
   );
 }

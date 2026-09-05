@@ -38,7 +38,8 @@ def _require_stripe_configured() -> None:
     if not s.stripe_secret_key or not s.stripe_price_id_byok or not s.stripe_price_id_hosted:
         raise BillingNotConfigured(
             "Stripe isn't configured on this server yet — set STRIPE_SECRET_KEY, "
-            "STRIPE_PRICE_ID_BYOK, and STRIPE_PRICE_ID_HOSTED (see docs/PAYMENT_PROCESSOR_SETUP.md)."
+            "STRIPE_PRICE_ID_BYOK, and STRIPE_PRICE_ID_HOSTED. Running Lorekeeper as a "
+            "paid service requires a commercial license: hello@harrisonsmith.ai."
         )
     stripe.api_key = s.stripe_secret_key
     stripe.api_version = _STRIPE_API_VERSION

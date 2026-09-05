@@ -12,29 +12,50 @@
 
 Everything runs on your own machine. No OpenAI/Anthropic key needed (though bring-your-own-key is supported per-user in Settings if you want a cloud model instead).
 
-## Quickstart (Docker)
+## Setup (Docker)
 
-Requirements: Docker with Compose. ~8 GB free RAM (or an NVIDIA GPU — see below).
+**Requirements:** [Docker](https://docs.docker.com/get-docker/) with Compose (Docker Desktop on Windows/macOS, docker engine + compose plugin on Linux) · ~8 GB free RAM · ~15 GB free disk (images + one model). An NVIDIA GPU is optional but makes generation much faster — see [GPU](#gpu-optional-big-speedup) below.
+
+### 1 · Clone and configure
 
 ```bash
-# 1 · get the app
-git clone <this-repo> lorekeeper && cd lorekeeper
-cp .env.example .env
+git clone https://github.com/hsmith-dev/Lorekeeper.quest.git lorekeeper
+cd lorekeeper
+cp .env.example .env      # Windows (PowerShell): copy .env.example .env
+```
 
-# 2 · edit .env — two values (the file walks you through it):
-#     SECRET_KEY (openssl rand -hex 32) and POSTGRES_PASSWORD
+Open `.env` in any editor. Only **two values** need changing (the file walks you through everything else):
 
-# 3 · launch
+| Variable | Set it to |
+|---|---|
+| `SECRET_KEY` | any long random string — generate one with `openssl rand -hex 32` |
+| `POSTGRES_PASSWORD` | any strong password — **also replace `changeme` inside `DATABASE_URL`, two lines up, with the same password** |
+
+### 2 · Launch
+
+```bash
 docker compose -f docker-compose.prod.yml up -d --build
 ```
 
-Then:
+The first build takes a few minutes (downloads base images, builds the frontend, installs Python deps). When it finishes, `docker compose -f docker-compose.prod.yml ps` should show every service `Up`, with postgres/redis/ollama/backend `(healthy)`.
 
-1. Open **https://localhost** — accept the browser's one-time warning about the self-signed certificate (the stack generates one automatically; see TLS below for real certs).
-2. **Register** — the first account created on a fresh deployment automatically becomes the admin, so register yourself before sharing the URL. Registration is open by default — no billing anywhere (see Access modes below).
-3. Go to **Admin → System → Model Library** and click **Download & install** on the fine-tuned model. It pulls **[Lorekeeper-Mistral-7B](https://huggingface.co/harrisonsmith/Lorekeeper-Mistral-7B-GGUF)** (~4.4 GB) straight from Hugging Face into the stack's Ollama, with live progress — no shell needed. Optionally install the base model too (enables the in-app fine-tuned-vs-base comparison in Settings).
+### 3 · Create your admin account
 
-That's the whole setup. Verify with **Settings → AI Provider → Test Connection**.
+Open **https://localhost** in a browser. You'll hit a one-time warning about a self-signed certificate — that's expected (the stack generates its own; see [TLS](#tls) for real certs), click through it.
+
+Click **Register**. **The first account created on a fresh deployment automatically becomes the admin** — so register yourself before sharing the URL with anyone. Everyone after that is a regular user (registration is open by default, no billing anywhere — see [Access modes](#access-modes)).
+
+### 4 · Install the AI model
+
+The app will tell you itself — a banner on the dashboard says no model is installed yet. Follow its link (or go to **Admin → System → Model Library**) and click **Download & install** on **Lorekeeper (fine-tuned)**. That pulls [Lorekeeper-Mistral-7B](https://huggingface.co/harrisonsmith/Lorekeeper-Mistral-7B-GGUF) (~4.4 GB) straight from Hugging Face into the stack with a live progress bar — no shell needed. Keep the tab open until it finishes.
+
+Optionally install the **base model** too — it enables the fine-tuned-vs-base comparison in Settings → Model Evaluation.
+
+### 5 · Verify
+
+**Settings → AI Provider → Test Connection** should reply with a model response within a few seconds (up to ~a minute on CPU for the very first request while the model loads). Then make a campaign and write your first journal entry.
+
+That's the whole setup.
 
 <details>
 <summary>Prefer to install models from the CLI instead?</summary>
@@ -85,7 +106,9 @@ then start with both files: `docker compose -f docker-compose.prod.yml -f docker
 
 **Open access is the default**: anyone can register and use the app — including the self-hosted model — with no promo code, subscription, or billing. That covers self-hosting, a company provisioning accounts for its users, and free community servers.
 
-Running it as a paid service instead is a checkbox, not a redeploy: the **admin portal → Platform tab** has an "Open access" toggle. Untick it and new accounts need a promo code (mintable from the same portal) or a Stripe subscription (`docs/PAYMENT_PROCESSOR_SETUP.md`) — the full billing integration ships in the codebase, dormant until you turn gating on. The `OPEN_ACCESS_MODE` env var only seeds the initial value; the portal setting is authoritative after that.
+Restricting who gets in is a checkbox, not a redeploy: the **admin portal → Platform tab** has an "Open access" toggle. Untick it and new accounts need a promo code, mintable from the same portal — handy for invite-only servers. The `OPEN_ACCESS_MODE` env var only seeds the initial value; the portal setting is authoritative after that.
+
+Running Lorekeeper as a **paid service** (Stripe subscriptions — the integration ships in the codebase, dormant) requires a commercial license: contact **hello@harrisonsmith.ai** for the license and setup guide. See [License](#license).
 
 ## Architecture
 

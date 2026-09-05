@@ -137,14 +137,13 @@ path:
    block in `nginx/nginx.conf`, mount the certs (there's a commented volume
    line in `docker-compose.prod.yml` for exactly this), and restart nginx.
 
-## 6. Payment processor
+## 6. Payment processor (commercial deployments only)
 
-Separate doc: [`PAYMENT_PROCESSOR_SETUP.md`](./PAYMENT_PROCESSOR_SETUP.md) —
-covers both tiers (Bring Your Own Key $5/mo, Hosted Model $15/mo). Do this
-before announcing subscriptions are available — until `STRIPE_SECRET_KEY`/
-`STRIPE_PRICE_ID_BYOK`/`STRIPE_PRICE_ID_HOSTED` are all set,
-`/api/billing/checkout` returns a 503 and the frontend shows "Billing isn't
-configured yet."
+Running Lorekeeper as a gated paid service requires a commercial license —
+contact **hello@harrisonsmith.ai** for the license and the Stripe setup
+guide. Until `STRIPE_SECRET_KEY`/`STRIPE_PRICE_ID_BYOK`/
+`STRIPE_PRICE_ID_HOSTED` are all set, `/api/billing/checkout` returns a 503
+and the frontend shows "Billing isn't configured yet."
 
 ## 7. Promo codes
 
