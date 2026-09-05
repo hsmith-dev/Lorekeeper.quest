@@ -371,18 +371,16 @@
     <div class="wrap">
       <h2 class="reveal">Run it tonight.</h2>
       <p class="sec-intro reveal">Docker is the only requirement. Registration is open out of the box — host it for yourself, your gaming group, your company, or a whole community, free. (Running it as a gated, paid service instead is one checkbox in the admin portal.)</p>
-      <div class="codeblock reveal"><span class="c"># get the app</span>
+      <div class="codeblock reveal"><span class="c"># 1 · get the app</span>
 git clone https://github.com/hsmith-dev/Lorekeeper.quest.git lorekeeper
-cd lorekeeper &amp;&amp; cp .env.example .env   <span class="c"># set SECRET_KEY + POSTGRES_PASSWORD</span>
-docker compose -f docker-compose.prod.yml up -d --build
+cd lorekeeper &amp;&amp; cp .env.example .env
 
-<span class="c"># get the model (~4.4 GB)</span>
-curl -L -o src/ml/models/lorekeeper-7b-q4.gguf <span class="g">\
-  https://huggingface.co/harrisonsmith/Lorekeeper-Mistral-7B-GGUF/resolve/main/lorekeeper-7b-q4.gguf</span>
-curl -L -o src/ml/models/lorekeeper-Modelfile <span class="g">\
-  https://huggingface.co/harrisonsmith/Lorekeeper-Mistral-7B-GGUF/resolve/main/lorekeeper-Modelfile</span>
-docker compose -f docker-compose.prod.yml exec ollama \
-  ollama create lorekeeper -f /import-models/lorekeeper-Modelfile</div>
+<span class="c"># 2 · edit .env — three values: SECRET_KEY (openssl rand -hex 32),</span>
+<span class="c">#     POSTGRES_PASSWORD, and ADMIN_EMAIL (the email you'll register with)</span>
+
+<span class="c"># 3 · launch</span>
+docker compose -f docker-compose.prod.yml up -d --build</div>
+      <p class="sec-intro reveal">Then open <strong>https://localhost</strong> (accept the one-time self-signed-certificate warning), register with your admin email, and install the fine-tuned model with one click under <strong>Admin&nbsp;→&nbsp;System&nbsp;→&nbsp;Model&nbsp;Library</strong> — it downloads straight from Hugging&nbsp;Face into the stack, no shell required. Something not working? The same System tab has the logs and a one-click support bundle for bug reports.</p>
 
       <div class="getit reveal">
         <a class="card" href="https://github.com/hsmith-dev/Lorekeeper.quest">
