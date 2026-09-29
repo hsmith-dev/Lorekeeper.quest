@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Page not found: Lorekeeper</title>
+<meta name="robots" content="noindex">
+<!-- GitHub Pages serves this file for any missing path, at any depth. On a
+     project site (user.github.io/Lorekeeper.quest/) the site lives under the
+     repo name, so point relative URLs there; on a custom domain it's the root. -->
+<script>
+  (function () {
+    var seg = location.pathname.split("/")[1];
+    var project = seg && (location.hostname.endsWith(".github.io") || seg === "Lorekeeper.quest");
+    var base = project ? "/" + seg + "/" : "/";
+    document.write('<base href="' + base + '">');
+  })();
+</script>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><rect width=%22100%22 height=%22100%22 rx=%2218%22 fill=%22%2312141d%22/><text x=%2250%22 y=%2273%22 font-family=%22Georgia,'Times New Roman',serif%22 font-size=%2268%22 font-weight=%22700%22 text-anchor=%22middle%22 fill=%22%23d9a441%22>L</text></svg>">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<main class="lost">
+  <div class="astrolabe" aria-hidden="true"></div>
+  <div class="wrap">
+    <a class="brand" href="./">Lore<span>keeper</span></a>
+    <h1>This page isn't in the <em class="foil">record</em>.</h1>
+    <p>The link may be out of date, or the page never existed. Everything about Lorekeeper lives on the home page.</p>
+    <a class="btn gilded" href="./">Back to the home page <span class="ic" aria-hidden="true">←</span></a>
+  </div>
+</main>
+</body>
+</html>
