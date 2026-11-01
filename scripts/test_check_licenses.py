@@ -586,6 +586,17 @@ def test_unregistered_dynamic_system_lib_resolves_to_the_allowlist(tmp_path, edi
     assert len(failures) == 1
 
 
+def test_scanned_license_pin_classifies_the_reviewed_licence(tmp_path):
+    raw = "BSD-2-clause AND Custom-pg_dump AND PostgreSQL"  # "Custom" alone would classify as bad
+    reg = make_register(tmp_path, [entry("libpq5", kind="apt", license="PostgreSQL AND BSD-2-Clause",
+                                         scanned_license=raw)])
+    failures, _, _, _ = scan(reg, [("libpq5", "17", raw)], eco="apt")
+    assert failures == []
+    # the pin still catches drift in the scan
+    failures, _, _, _ = scan(reg, [("libpq5", "18", raw + " AND GPL-3+")], eco="apt")
+    assert len(failures) == 1 and "register says" in failures[0][3]
+
+
 # ---- E0-QA.8: [[pending]] ------------------------------------------------------
 
 CUDA = [("nvidia-cublas-cu12", "12.4", "LicenseRef-NVIDIA-Proprietary"),
