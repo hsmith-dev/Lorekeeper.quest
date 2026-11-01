@@ -2,7 +2,8 @@ import uuid
 from sqlalchemy import String, ForeignKey
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-from app.db.base import Base, TimestampMixin
+from app.db.base import Base, TimestampMixin, VISIBILITY_ENUM
+from app.domain.enums import Visibility
 
 
 class CharacterSheetTemplate(Base, TimestampMixin):
@@ -52,6 +53,10 @@ class CharacterSheet(Base, TimestampMixin):
     # isn't schema-validated server-side per-type, same trust level as any
     # other free-form JSON blob in this app (e.g. ChatSession.messages).
     data: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    # No FK yet: F3-world (E0-WorldCore.2) adds it.
+    pc_entity_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    visibility: Mapped[Visibility] = mapped_column(
+        VISIBILITY_ENUM, nullable=False, default=Visibility.PARTY, server_default=Visibility.PARTY.value)
 
     campaign: Mapped["Campaign"] = relationship()
     template: Mapped["CharacterSheetTemplate"] = relationship()

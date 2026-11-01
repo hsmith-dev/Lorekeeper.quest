@@ -8,9 +8,12 @@ reads the CHECK's values from pg_constraint on the migrated test database and
 fails if they differ from the enum's members (a member added to the enum
 without a migration, or the reverse).
 
+The two PG enums are registered in PG_ENUMS (StrEnum, type name); the test
+compares each StrEnum with the type's pg_enum labels, in order.
+
 Every StrEnum defined in app/domain/enums.py must be accounted for: either
-registered in ENUM_CHECKS, or listed in ENUM_CHECKS_PENDING with the story
-that adds its CHECK column. When that story lands, its author moves the enum
+registered in ENUM_CHECKS or PG_ENUMS, or listed in ENUM_CHECKS_PENDING with
+the story that adds its CHECK column. When that story lands, its author moves the enum
 from ENUM_CHECKS_PENDING to ENUM_CHECKS and nothing else changes. The reader
 is also exercised by a self-test on a temporary table, and
 tests/domain/test_enums.py round-trips every enum's check_sql through it.
@@ -26,17 +29,29 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain import enums as domain_enums
 from app.domain.enums import (
+    CampaignRole,
     CharacterKind,
     EntityChangeOp,
     EntityType,
+    EntryKind,
     MentionOrigin,
     MentionSourceField,
     TagSourceField,
+    Visibility,
 )
 
 # (StrEnum class, table, column), added in the PR that creates the column, e.g.
 #   (EntityType, "entities", "type"),
-ENUM_CHECKS: list[tuple[type[StrEnum], str, str]] = []
+ENUM_CHECKS: list[tuple[type[StrEnum], str, str]] = [
+    (TagSourceField, "journal_tags", "source_field"),  # E0-Access.1
+    (EntryKind, "journal_entries", "kind"),            # E0-Access.1
+]
+
+# (StrEnum class, Postgres enum type name) for the AD-12 PG enums.
+PG_ENUMS: list[tuple[type[StrEnum], str]] = [
+    (Visibility, "visibility"),       # E0-Access.1
+    (CampaignRole, "campaign_role"),  # E0-Access.1
+]
 
 # StrEnums in app/domain/enums.py whose CHECK column does not exist yet, with
 # the story that adds it. Move an entry to ENUM_CHECKS in that story's PR.
@@ -46,7 +61,6 @@ ENUM_CHECKS_PENDING: dict[type[StrEnum], str] = {
     EntityChangeOp: "E0-WorldCore.2",      # entity_changes.op
     MentionOrigin: "E0-WorldCore.2",       # entity_mentions.origin
     MentionSourceField: "E0-WorldCore.2",  # entity_mentions.source_field
-    TagSourceField: "E0-Access.1",         # journal_tags.source_field
 }
 
 
@@ -89,6 +103,23 @@ async def check_values(db: AsyncSession, table: str, column: str) -> set[str]:
     return parse_check_values(rows[0].definition)
 
 
+_PG_ENUM_LABELS = sa.text(
+    """
+    SELECT e.enumlabel
+    FROM pg_enum e JOIN pg_type t ON t.oid = e.enumtypid
+    WHERE t.typname = :name AND t.typnamespace = to_regnamespace(current_schema())
+    ORDER BY e.enumsortorder
+    """
+)
+
+
+async def pg_enum_labels(db: AsyncSession, name: str) -> list[str]:
+    """The labels of Postgres enum type `name`, in sort order."""
+    labels = list((await db.execute(_PG_ENUM_LABELS, {"name": name})).scalars())
+    assert labels, f"no Postgres enum type {name!r}; create it in a migration (AD-12)"
+    return labels
+
+
 def compare(enum_cls: type[StrEnum], table: str, column: str, allowed: set[str]) -> str | None:
     """None when they match, else a message listing the missing and extra values."""
     members = {m.value for m in enum_cls}
@@ -112,18 +143,22 @@ def test_registry_entries_are_strenums():
         assert issubclass(enum_cls, StrEnum), f"{enum_cls!r} for {table}.{column} is not a StrEnum"
     pairs = [(t, c) for _, t, c in ENUM_CHECKS]
     assert len(pairs) == len(set(pairs)), "a (table, column) is registered twice in ENUM_CHECKS"
+    for enum_cls, type_name in PG_ENUMS:
+        assert issubclass(enum_cls, StrEnum), f"{enum_cls!r} for PG enum {type_name} is not a StrEnum"
+    names = [n for _, n in PG_ENUMS]
+    assert len(names) == len(set(names)), "a PG enum type is registered twice in PG_ENUMS"
 
 
 def test_every_domain_enum_is_registered():
-    registered = [enum_cls for enum_cls, _, _ in ENUM_CHECKS]
+    registered = [enum_cls for enum_cls, _, _ in ENUM_CHECKS] + [enum_cls for enum_cls, _ in PG_ENUMS]
     defined = domain_strenums()
     assert defined, "found no StrEnum in app.domain.enums"
     unaccounted = [e.__name__ for e in defined
                    if e not in registered and e not in ENUM_CHECKS_PENDING]
     assert not unaccounted, (
         f"StrEnums in app/domain/enums.py with no CI-10 entry: {unaccounted}. Register each in "
-        "ENUM_CHECKS with the column its CHECK lives on, or in ENUM_CHECKS_PENDING with the story "
-        "that adds that column (AD-9)")
+        "ENUM_CHECKS with the column its CHECK lives on, in PG_ENUMS with its Postgres enum type, "
+        "or in ENUM_CHECKS_PENDING with the story that adds that column (AD-9)")
     both = [e.__name__ for e in registered if e in ENUM_CHECKS_PENDING]
     assert not both, f"in both ENUM_CHECKS and ENUM_CHECKS_PENDING (remove the pending entry): {both}"
     stray = [e.__name__ for e in ENUM_CHECKS_PENDING if e not in defined]
@@ -139,6 +174,18 @@ async def test_enum_checks_match(db: AsyncSession):
         problem = compare(enum_cls, table, column, await check_values(db, table, column))
         if problem:
             problems.append(problem)
+    assert not problems, "\n".join(problems)
+
+
+async def test_pg_enums_match(db: AsyncSession):
+    problems = []
+    for enum_cls, type_name in PG_ENUMS:
+        labels = await pg_enum_labels(db, type_name)
+        members = [m.value for m in enum_cls]
+        if labels != members:
+            problems.append(
+                f"PG enum {type_name} has labels {labels}, but {enum_cls.__module__}."
+                f"{enum_cls.__name__} has {members}. Write a migration (ALTER TYPE) or fix the enum (AD-12).")
     assert not problems, "\n".join(problems)
 
 

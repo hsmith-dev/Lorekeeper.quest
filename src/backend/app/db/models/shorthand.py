@@ -2,7 +2,8 @@ import uuid
 from sqlalchemy import String, Text, ForeignKey
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.dialects.postgresql import UUID
-from app.db.base import Base, TimestampMixin
+from app.db.base import Base, TimestampMixin, VISIBILITY_ENUM
+from app.domain.enums import Visibility
 
 
 class ShorthandTerm(Base, TimestampMixin):
@@ -23,6 +24,8 @@ class ShorthandTerm(Base, TimestampMixin):
     term: Mapped[str] = mapped_column(String(50), nullable=False)
     meaning: Mapped[str] = mapped_column(Text, nullable=False)
     usage: Mapped[str | None] = mapped_column(Text, nullable=True)
+    visibility: Mapped[Visibility] = mapped_column(
+        VISIBILITY_ENUM, nullable=False, default=Visibility.GM, server_default=Visibility.GM.value)
 
     user: Mapped["User"] = relationship()
     campaign: Mapped["Campaign"] = relationship()

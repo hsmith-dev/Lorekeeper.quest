@@ -15,13 +15,25 @@ Where each CHECK lives:
 - MentionOrigin      -> entity_mentions.origin           (E0-WorldCore.2)
 - MentionSourceField -> entity_mentions.source_field     (E0-WorldCore.2)
 - TagSourceField     -> journal_tags.source_field        (E0-Access.1)
+- EntryKind          -> journal_entries.kind             (E0-Access.1)
+
+Two StrEnums mirror Postgres enum types instead of a CHECK (AD-12). The
+F1-core revision (c95acb56c595) creates the types; models bind them with
+postgresql.ENUM(create_type=False), and CI-10 compares each StrEnum with the
+type's pg_enum labels:
+
+- Visibility   -> PG enum `visibility`: journal_entries, character_sheets,
+                  session_plans, source_documents, shorthand_terms,
+                  tag_categories (E0-Access.1)
+- CampaignRole -> PG enum `campaign_role`: campaign_members.role,
+                  campaign_share_tokens.role (E0-Access.1)
 
 RC-12: the two `source_field` enums keep distinct names and classes.
 MentionSourceField says which part of a journal entry a Mention came from;
 TagSourceField says how a journal tag was added. The planning (RC-12) put
-the `journal_tags.source_field` enum in app/access/enums.py; it is defined
-here instead, and F1-core (E0-Access.1) imports it from here when it adds
-journal_tags.source_field. Nothing else defines it.
+the `journal_tags.source_field` enum, and `kind`, in app/access/enums.py;
+they are defined here instead, because the models (app.db) import them and
+app.domain is the only layer below app.db (AD-1). Nothing else defines them.
 
 Entity statuses are not an enum: they are plain text, checked per type by
 app.domain.entity_types.validate_status.
@@ -95,6 +107,29 @@ class TagSourceField(StrEnum):
     SHORTHAND = "shorthand"
     NARRATIVE = "narrative"
     MANUAL = "manual"
+
+
+class EntryKind(StrEnum):
+    """Who wrote a journal entry (journal_entries.kind)."""
+
+    GM = "gm"
+    PLAYER = "player"
+
+
+class Visibility(StrEnum):
+    """Mirror of the Postgres enum `visibility` (AD-12)."""
+
+    PARTY = "party"
+    GM = "gm"
+    PRIVATE = "private"
+
+
+class CampaignRole(StrEnum):
+    """Mirror of the Postgres enum `campaign_role` (AD-12). The Owner has no
+    campaign_members row, so `owner` is not a stored Role."""
+
+    CO_GM = "co_gm"
+    PLAYER = "player"
 
 
 def _literal(value: str) -> str:

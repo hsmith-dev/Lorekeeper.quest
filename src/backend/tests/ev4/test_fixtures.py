@@ -11,7 +11,7 @@ import sqlalchemy as sa
 from tests.ev4 import report
 from tests.ev4.families import assert_no_canary
 from tests.ev4.fixtures import (
-    CANARIES, CANARY_RE, create_user, find_canaries, load_seed, roles_available, seed_canary_campaign,
+    CANARIES, CANARY_RE, create_user, find_canaries, load_seed, seed_canary_campaign,
     validate_seed,
 )
 from tests.ev4.report import EV4Leak
@@ -147,43 +147,50 @@ async def test_unknown_actor_name_fails(ev4):
 
 # ── Roles ──────────────────────────────────────────────────────────────────
 
-async def test_make_member_follows_role_availability(ev4, db):
-    if not await roles_available(db):
-        with pytest.raises(pytest.skip.Exception, match="roles not yet available"):
-            await ev4.make_member(role="player")
-        return
-    user = await ev4.make_member(role="player")
-    role = await db.scalar(sa.text(
+async def _stored_role(db, campaign_id, user_id) -> str | None:
+    return await db.scalar(sa.text(
         "SELECT role::text FROM campaign_members WHERE campaign_id = :c AND user_id = :u"
-    ), {"c": ev4.a.campaign_id, "u": user.id})
-    assert role == "player"
+    ), {"c": campaign_id, "u": user_id})
 
 
-@pytest.mark.parametrize("name", ["player", "player_2", "co_gm", "cross_gm_player"])
-async def test_role_actors_resolve_lazily(ev4, db, name):
-    if not await roles_available(db):
-        with pytest.raises(pytest.skip.Exception, match="roles not yet available"):
-            await ev4.actor(name)
-        return
+async def test_make_member_writes_role(ev4, db):
+    user = await ev4.make_member(role="player")
+    assert await _stored_role(db, ev4.a.campaign_id, user.id) == "player"
+
+
+@pytest.mark.parametrize("role", ["gm", "co_gm"])
+async def test_make_member_gm_is_stored_as_co_gm(ev4, db, role):
+    user = await ev4.make_member(role=role)
+    assert await _stored_role(db, ev4.a.campaign_id, user.id) == "co_gm"
+
+
+async def test_make_member_rejects_unknown_role(ev4):
+    with pytest.raises(ValueError, match="unknown role 'owner'"):
+        await ev4.make_member(role="owner")
+
+
+@pytest.mark.parametrize("name, stored", [
+    ("player", "player"), ("player_2", "player"), ("co_gm", "co_gm"), ("cross_gm_player", "player"),
+])
+async def test_role_actors_resolve_lazily(ev4, db, name, stored):
     actor = await ev4.actor(name)
     a = ev4.a.campaign_id
     assert actor.grants[a] == ("gm" if name == "co_gm" else "player")
+    assert await _stored_role(db, a, actor.user_id) == stored
     if name == "cross_gm_player":
         assert actor.may_see(ev4.b.canary("NPCNOTES"))
         assert not actor.may_see(ev4.a.canary("NPCNOTES"))
+        # Owns Campaign B, so no member row there (the Owner never has one).
+        assert await _stored_role(db, ev4.b.campaign_id, actor.user_id) is None
 
 
 async def test_module_level_make_member(ev4, db):
     # E0-Access.13 calls tests.ev4.fixtures.make_member(db, role=..., campaign_id=...).
     from tests.ev4.fixtures import make_member
 
-    if not await roles_available(db):
-        with pytest.raises(pytest.skip.Exception, match="roles not yet available"):
-            await make_member(db, role="player", campaign_id=ev4.a.campaign_id)
-        return
     user = await make_member(db, role="gm", campaign_id=ev4.a.campaign_id)
     row = (await db.execute(sa.text(
-        "SELECT role::text, created_at IS NOT NULL, updated_at IS NOT NULL FROM campaign_members "
-        "WHERE campaign_id = :c AND user_id = :u"
+        "SELECT role::text, access_epoch, created_at IS NOT NULL, updated_at IS NOT NULL "
+        "FROM campaign_members WHERE campaign_id = :c AND user_id = :u"
     ), {"c": ev4.a.campaign_id, "u": user.id})).one()
-    assert row[0] in ("co_gm", "gm") and row[1] and row[2]
+    assert tuple(row) == ("co_gm", 0, True, True)

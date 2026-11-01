@@ -2,7 +2,8 @@ import uuid
 from sqlalchemy import String, Text, ForeignKey
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.dialects.postgresql import UUID
-from app.db.base import Base, TimestampMixin
+from app.db.base import Base, TimestampMixin, VISIBILITY_ENUM
+from app.domain.enums import Visibility
 
 
 class SessionPlan(Base, TimestampMixin):
@@ -19,6 +20,8 @@ class SessionPlan(Base, TimestampMixin):
     campaign_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("campaigns.id", ondelete="CASCADE"))
     title: Mapped[str] = mapped_column(String(200), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
+    visibility: Mapped[Visibility] = mapped_column(
+        VISIBILITY_ENUM, nullable=False, default=Visibility.GM, server_default=Visibility.GM.value)
 
     user: Mapped["User"] = relationship()
     campaign: Mapped["Campaign"] = relationship()
