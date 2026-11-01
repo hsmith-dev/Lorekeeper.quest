@@ -165,7 +165,7 @@ function NavMenu({ isAdmin }: { isAdmin: boolean }) {
                   to={to}
                   aria-current={current?.to === to ? "page" : undefined}
                   className={`block px-4 py-2 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring ${
-                    isActivePath(location.pathname, to)
+                    current?.to === to
                       ? "bg-muted text-foreground font-medium"
                       : "text-muted-foreground hover:text-foreground hover:bg-muted/60"
                   }`}

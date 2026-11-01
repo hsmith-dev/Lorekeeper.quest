@@ -49,7 +49,7 @@ export interface NavGroup {
   links: NavLink[];
 }
 
-export interface LegacyRedirect {
+export interface LegacyRedirectRule {
   from: string;
   to: string;
   /** Only active once this path is registered. */
@@ -146,7 +146,7 @@ export const PLAYER_NAV: readonly NavLink[] = [
 ];
 
 /** Old URLs. Query strings and hashes are kept; redirects use `replace`. */
-export const LEGACY_REDIRECTS: readonly LegacyRedirect[] = [
+export const LEGACY_REDIRECTS: readonly LegacyRedirectRule[] = [
   { from: "/analytics", to: "/stats" },
   { from: "/record", to: "/live?mode=record" },
   { from: "/characters", to: "/world?type=character", whenRegistered: "/world" },
@@ -213,7 +213,7 @@ export function navAudience({ hasCampaign, isGm }: { hasCampaign: boolean; isGm:
 }
 
 /** Redirects in force for this registry (gated ones wait on their target). */
-export function activeRedirects(routes: readonly PageRoute[] = PAGE_ROUTES): LegacyRedirect[] {
+export function activeRedirects(routes: readonly PageRoute[] = PAGE_ROUTES): LegacyRedirectRule[] {
   return LEGACY_REDIRECTS.filter((r) => !r.whenRegistered || isRouteRegistered(r.whenRegistered, routes));
 }
 

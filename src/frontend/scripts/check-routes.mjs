@@ -23,7 +23,7 @@ import { build } from "esbuild";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createElement as h } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, Navigate, Route, Routes, createRoutesFromChildren, matchRoutes } from "react-router-dom";
 
 const frontendDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const srcDir = join(frontendDir, "src");
@@ -67,6 +67,8 @@ await build({
     navbar: join(srcDir, "components/NavBar.tsx"),
     "current-campaign": join(srcDir, "hooks/useCurrentCampaign.ts"),
     preview: join(srcDir, "lib/preview.ts"),
+    app: join(srcDir, "App.tsx"),
+    entry: join(srcDir, "pages/EntryDetailPage.tsx"),
   },
   outdir: outDir,
   outExtension: { ".js": ".mjs" },
@@ -89,6 +91,9 @@ const { NotFound, NotFoundPage, notFoundHome } = await load("notfound");
 const { NavBar } = await load("navbar");
 const cc = await load("current-campaign");
 const store = await load("preview");
+const { AppRoutes } = await load("app");
+const { EntryDetailPage, isNotFoundError, retryEntry } = await load("entry");
+const { LegacyRedirect } = await load("gate");
 
 const decode = (s) =>
   s
@@ -127,13 +132,15 @@ beforeEach(() => {
 
 // Server render inside the real provider. `stored` picks the current campaign:
 // "a" (owned → GM), "b" (shared → Player); campaigns null = still loading.
-function renderShell(child, { path = "/", stored, campaigns = [OWNED, SHARED], loggedIn = true, isAdmin = false } = {}) {
+function renderShell(child, { path = "/", stored, campaigns = [OWNED, SHARED], loggedIn = true, isAdmin = false, seed } = {}) {
   if (loggedIn) {
     local.setItem("lk_token", "t");
     local.setItem("lk_user", JSON.stringify({ id: "u1", display_name: "U" }));
   }
   if (stored !== undefined) local.setItem(cc.currentCampaignKey("u1"), stored);
-  const client = new QueryClient();
+  // retryOnMount off: a seeded error state renders as-is (no optimistic refetch).
+  const client = new QueryClient({ defaultOptions: { queries: { retryOnMount: false } } });
+  seed?.(client);
   if (campaigns && loggedIn) client.setQueryData(["campaigns"], campaigns);
   client.setQueryData(["me"], { display_name: "U", email: "u@example.com", is_admin: isAdmin });
   return renderToStaticMarkup(
@@ -476,5 +483,95 @@ describe("NavBar (server render)", () => {
 
   test("logged out: no nav", () => {
     assert.equal(renderShell(h(NavBar), { loggedIn: false }), "");
+  });
+});
+
+describe("AppRoutes wiring", () => {
+  const appRoutes = () => createRoutesFromChildren(AppRoutes().props.children);
+  const matched = (path) => matchRoutes(appRoutes(), path).at(-1).route;
+
+  test("redirects first, redirected page routes dropped, `*` last", () => {
+    const routes = appRoutes();
+    const redirects = R.activeRedirects();
+    assert.deepEqual(
+      routes.slice(0, redirects.length).map((r) => r.path),
+      redirects.map((r) => r.from),
+    );
+    assert.equal(routes.at(-1).path, "*");
+    assert.equal(routes.filter((r) => r.path === "*").length, 1);
+    for (const from of ["/analytics", "/record"]) assert.equal(routes.filter((r) => r.path === from).length, 1, from);
+  });
+
+  test("/analytics is LegacyRedirect -> /stats, keeping query and hash, with replace", () => {
+    const route = matched("/analytics");
+    assert.equal(route.element.type, LegacyRedirect);
+    assert.equal(route.element.props.to, "/stats");
+    let el;
+    const Probe = () => {
+      el = LegacyRedirect({ to: route.element.props.to });
+      return null;
+    };
+    renderShell(h(Probe), { stored: "a", path: "/analytics?range=30#top" });
+    assert.equal(el.type, Navigate);
+    assert.equal(el.props.to, "/stats?range=30#top");
+    assert.equal(el.props.replace, true);
+    assert.equal(matched("/record").element.props.to, "/live?mode=record");
+  });
+
+  test("/characters is its page route, not a redirect", () => {
+    const route = matched("/characters");
+    assert.equal(route.element.type, RoutePage);
+    assert.equal(route.element.props.route.path, "/characters");
+    const html = renderShell(h(AppRoutes), { stored: "a", path: "/characters" });
+    assert.match(html, /data-route-loading/, "lazy page behind its Suspense fallback");
+  });
+
+  test("/nope renders the not-found copy", () => {
+    assert.equal(matched("/nope").path, "*");
+    assert.ok(text(renderShell(h(AppRoutes), { stored: "a", path: "/nope" })).includes(COPY));
+  });
+
+  test("while the role settles, `*` waits exactly like a gated route", () => {
+    const missing = renderShell(h(AppRoutes), { campaigns: null, path: "/nope" });
+    const gated = renderShell(h(AppRoutes), { campaigns: null, path: "/sources" });
+    assert.match(missing, /data-route-loading/);
+    assert.equal(missing, gated);
+    // Logged out: nothing to settle.
+    local.clear();
+    assert.ok(text(renderShell(h(AppRoutes), { loggedIn: false, path: "/nope" })).includes(COPY));
+  });
+});
+
+describe("EntryDetailPage errors", () => {
+  const withError = (error) => (client) =>
+    client
+      .getQueryCache()
+      .build(client, { queryKey: ["journal", "x"] })
+      .setState({ status: "error", error, fetchStatus: "idle", data: undefined });
+  const entryPage = h(Routes, null, h(Route, { path: "/journal/:id", element: h(EntryDetailPage) }));
+
+  test("404 and 422 render NotFound", () => {
+    for (const status of [404, 422]) {
+      const html = renderShell(entryPage, { stored: "a", path: "/journal/x", seed: withError({ response: { status } }) });
+      assert.ok(text(html).includes(COPY), `${status}: ${text(html)}`);
+    }
+  });
+
+  test("500 renders InlineError with Retry, no not-found copy", () => {
+    const html = renderShell(entryPage, { stored: "a", path: "/journal/x", seed: withError({ response: { status: 500 } }) });
+    assert.ok(text(html).includes("Could not load this entry."), text(html));
+    assert.match(text(html), /Retry/);
+    assert.ok(!text(html).includes(COPY));
+  });
+
+  test("retry predicate: never on 404/422, once otherwise", () => {
+    assert.equal(isNotFoundError({ response: { status: 404 } }), true);
+    assert.equal(isNotFoundError({ response: { status: 422 } }), true);
+    assert.equal(isNotFoundError({ response: { status: 500 } }), false);
+    assert.equal(isNotFoundError(new Error("network")), false);
+    assert.equal(retryEntry(0, { response: { status: 404 } }), false);
+    assert.equal(retryEntry(0, { response: { status: 422 } }), false);
+    assert.equal(retryEntry(0, { response: { status: 500 } }), true);
+    assert.equal(retryEntry(1, { response: { status: 500 } }), false);
   });
 });

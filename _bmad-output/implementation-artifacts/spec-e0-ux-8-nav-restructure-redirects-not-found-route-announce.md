@@ -2,13 +2,27 @@
 title: 'E0-UX.8 Nav restructure, route redirects, unified not-found and route announcements'
 type: 'feature'
 created: '2026-11-01'
-status: 'in-review'
+status: 'done'
 baseline_revision: '2b74d89798a9d9ed3e96c125eeec0a4897d39df8'
 review_loop_iteration: 0
-followup_review_recommended: false
+followup_review_recommended: true
 context: []
 warnings: ['oversized']
-deferred: []
+deferred:
+  - summary: >-
+      RouteAnnouncer's live-region text, first-load silence and h1 focus move have no CI check; only a throwaway Playwright run covers them.
+    evidence: |-
+      check-routes.mjs tests the pure helpers and the title store only. The repo has no DOM test runner and the story adds none, so timing and focus need a committed browser harness.
+    location: >-
+      src/frontend/src/components/shell/RouteAnnouncer.tsx
+    severity: medium
+  - summary: >-
+      LegacyRedirectRule cannot express a role-conditional redirect, which E7.1's /dashboard -> /portal (Players only) will need.
+    evidence: |-
+      App.tsx mounts every active redirect for everyone and drops the redirected page route. The story says E7.1 adds this redirect "through the same table", so E7.1 has to add an audience field and an element that redirects only for that audience.
+    location: >-
+      src/frontend/src/lib/routes.ts (LEGACY_REDIRECTS), src/frontend/src/App.tsx (AppRoutes)
+    severity: medium
 ---
 
 <intent-contract>
@@ -103,6 +117,49 @@ deferred: []
 
 ## Review Triage Log
 
+### 2026-11-01 — Review pass
+- verdicts: 35 findings — high 0, medium 13, low 16, false 6, maybe-false 0
+- findings:
+  - Blind Hunter
+    - `[medium]` `[patch]` A query-only or hash-only change re-announces the page and moves focus to the h1. Fixed: the announcer keys on pathname, using a last-settled-pathname ref.
+    - `[false]` `[reject]` Players now see only Chronicler. The AC says the dropdown shows only Portal, World, My Journal, Chronicler and Recaps, each only when registered.
+    - `[false]` `[reject]` A 403 on an entry shows an error. `app/api/routes/journals.py:153,165` returns 404 for both missing and unshared entries.
+    - `[low]` `[reject]` /live ignores `mode`, and RecordSessionPage's heading wasn't renamed. The AC says /live renders today's RecordSessionPage, and E4 adds the mode branch.
+    - `[false]` `[reject]` No skip link targets `main#main`. `tabIndex=-1` is the announcer's focus fallback, not a skip-link target, and a skip link is not in this story.
+    - `[medium]` `[patch]` On pages with their own loading state, the route default is announced and focus lands on main; an API 404's not-found title is never announced. Fixed: EntryDetailPage's skeleton has `data-route-loading` so the announcer waits for it.
+    - `[low]` `[reject]` The previous title stays while a GM-only route waits for campaigns. The wait is brief, and a neutral title adds a state branch.
+    - `[low]` `[patch]` Menu inconsistencies. Fixed: link highlight now uses the same longest match as aria-current. Not fixed: null relatedTarget on blur (mirrors CampaignSwitcher; pointerdown covers clicks) and the profile dropdown's mousedown (pre-existing).
+    - `[medium]` `[patch]` Tests skip the App route table, LegacyRedirect, the EntryDetailPage split and the announcer. Grouped with the Verification Gap rows below.
+    - `[false]` `[reject]` navGroup only feeds the GM nav. The Player set is a fixed five-link list in the story, so it is listed, not appended.
+    - `[low]` `[patch]` The interface and the component are both named LegacyRedirect. Fixed: the interface is renamed `LegacyRedirectRule`.
+    - `[low]` `[reject]` The outer Suspense is redundant. It is a harmless safety net for any non-RoutePage element that suspends.
+  - Verification Gap
+    - `[medium]` `[patch]` App route wiring and LegacyRedirect are never rendered. Fixed: `AppRoutes` is exported and check-routes covers redirect order, the last `*` route, the /analytics replace redirect keeping query and hash, /characters served, and /nope not found.
+    - `[medium]` `[patch]` The EntryDetailPage 404-vs-error split and its retry rule are untested. Fixed: SSR cases for 404, 422 and 500, plus `retryEntry` and `isNotFoundError` asserted directly.
+    - `[medium]` `[defer]` Announcer timing and focus have only the manual harness. A DOM runner is out of scope, so this is deferred (see frontmatter).
+    - `[medium]` `[patch]` An API 404 is announced as "Journal entry" and the not-found h1 is never focused. Same root cause as the Blind Hunter loading-state row.
+  - Intent Alignment
+    - `[medium]` `[patch]` R2 surfaces (redirect navigation, the open dropdown, announcements) are tested only at the pure/SSR level. Same entries as the Verification Gap rows: wiring is now tested, announcer behaviour is deferred.
+    - `[medium]` `[patch]` A gated route showed "Loading…" while an unknown path rendered not-found immediately, which is a timing hint. Fixed: a shared `useRoleSettling` hold applies to both GM-only routes and the `*` route; check-routes asserts identical markup during the wait.
+    - `[medium]` `[defer]` The redirect table cannot express E7.1's Player-only /dashboard → /portal. The story assigns that redirect to E7.1, so it is deferred with the shape it needs.
+    - `[false]` `[reject]` /live is already registered. The AC requires /live to render RecordSessionPage now, and E4 changes that one line.
+    - `[low]` `[reject]` Only EntryDetailPage was converted to `<NotFound />`. It is the only authenticated single-record page; the share and join token pages are public and have their own flows.
+    - `[low]` `[reject]` /admin is open to Players. Admin is a platform role, not a campaign role, and AdminPage self-guards. The nav hides it from the Player set as the AC requires.
+    - `[low]` `[reject]` AnalyticsPage's heading was renamed to "Stats". This applies the owner-approved rename so the h1 matches the route title and announcement; nothing else on the page changed.
+  - Edge Case Hunter
+    - `[low]` `[patch]` A previous user's cached list leaves `current` null, so the audience is gm and a GM-only chunk loads. Fixed: the hold now uses `!ready` from useCurrentCampaign (via `useRoleSettling`).
+    - `[medium]` `[patch]` Query-only change re-announces. Same as the Blind Hunter row.
+    - `[medium]` `[patch]` An in-page loading state is announced too early. Same as the Blind Hunter row.
+    - `[low]` `[reject]` A navigation within 150 ms of first load is not announced. A human click that fast is unlikely.
+    - `[low]` `[reject]` /journal/a → /journal/b from a link in main keeps focus on the old link. No page links entry to entry today.
+    - `[low]` `[patch]` A malformed id returns 422 and shows an error box. Fixed: 422 is treated as not-found and not retried.
+    - `[low]` `[patch]` A failed background refetch replaces a loaded entry. Fixed: InlineError shows only when there is no entry.
+    - `[low]` `[reject]` The Player nav is filtered by registration, not roles. Every registered Player link today is open to both roles; the epics registering /world, /portal and /keepsakes set their roles.
+    - `[low]` `[reject]` Re-serialising through URLSearchParams changes the encoding. No reader depends on exact encoding, and parsed values are preserved.
+    - `[false]` `[reject]` Blur with a null relatedTarget leaves the menu open. Clicks outside are handled by pointerdown, and focus leaving the window does not need to close it (same pattern as CampaignSwitcher).
+    - `[medium]` `[patch]` Claim: focus is on the h1 after navigation. Same root cause as the loading-state row; pages without their own loading state focus the h1 (Playwright verified).
+    - `[low]` `[patch]` Claim: the gated page never loads. Same root cause as the stale-list row.
+
 ## Design Notes
 
 - **Nav audience with no campaign.** `useEffectiveRole()` stubs `player` when there is no current campaign. A brand-new user (or campaigns still loading) has no Role anywhere, so treating that as Player would hide almost the whole app and flicker on every load. `navAudience` therefore returns `player` only when a current campaign exists and the effective role is not GM; the same audience drives route gating.
@@ -118,3 +175,55 @@ deferred: []
 
 **Manual checks (if no CLI):**
 - Throwaway Playwright run (scratchpad, headless Chromium against `vite preview` with routed API mocks): each redirect incl. query and Back, not-found for unknown path and for a Player on `/sources`, live region text + `document.title` + focused `h1` after a nav click, keyboard through the nav menu, 375 px no horizontal scroll.
+
+## Auto Run Result
+
+Status: done
+
+**Summary:** Route registry in `lib/routes.ts`: pages `{path, title, page, navGroup?, roles, auth?}`, `NAV_GROUPS`, `PLAYER_NAV`, `LEGACY_REDIRECTS`, `isRouteRegistered` and pure helpers. `App.tsx` builds its routes from it through `AppRoutes`, with redirects first and a `*` not-found route last.
+- **Redirects:** `/analytics` → `/stats` (AnalyticsPage) and `/record` → `/live?mode=record` (RecordSessionPage) are live, using replace and keeping the query and hash. `/characters` and `/quests` → `/world?type=…` wait for `/world` to be registered; until then they serve their pages and the nav keeps Characters and Quests.
+- **Nav:** the GM groups and the Player set come from the registry; today a Player sees only Chronicler. The menu is a keyboard disclosure: arrows, Home/End, Esc returns focus, `aria-expanded`/`aria-controls`.
+- **Not found:** one `NotFound` is used for unknown paths, GM-only routes (Live Session, Session Plans, Sources, Shorthand) opened by a Player, and journal-entry 404/422. Copy, title and wait are the same in every case.
+- **Announcer:** `RouteAnnouncer` sets "{title} · Lorekeeper" (the `(n)` badge is re-applied via `setTitleBadge`), announces politely on a path change, and focuses the page h1. `usePageTitle(title, detail)` gives "World, 214 entities".
+
+**Files:**
+- `src/frontend/src/lib/routes.ts`: registry, nav sets, redirect table, helpers (new)
+- `src/frontend/src/components/shell/RouteAnnouncer.tsx`: title store, `usePageTitle`, announcer (new)
+- `src/frontend/src/components/shell/RouteGate.tsx`: `RoutePage` (login, role gate, title, hold) and `LegacyRedirect` (new)
+- `src/frontend/src/components/shell/RouteLoading.tsx`: route loading fallback with `data-route-loading` (new)
+- `src/frontend/src/hooks/useNavAudience.ts`: `useNavAudience`, `useRoleSettling`, `isLoggedIn` (new)
+- `src/frontend/src/pages/NotFoundPage.tsx`: `NotFound`, `NotFoundPage`, `notFoundHome` (new)
+- `src/frontend/src/App.tsx`: `AppRoutes` from the registry; announcer mounted; `main#main` focus fallback
+- `src/frontend/src/components/NavBar.tsx`: registry-driven menu, keyboard disclosure; mobile panel anchored to the gutter
+- `src/frontend/src/pages/EntryDetailPage.tsx`: 404/422 → `NotFound`; other errors → InlineError with Retry
+- `src/frontend/src/pages/AnalyticsPage.tsx`: heading "Stats"
+- `src/frontend/src/index.css`: no outline on the focused route h1/main
+- `src/frontend/scripts/check-routes.mjs` and `.github/workflows/frontend-ci.yml`: new check (45 tests) and CI step
+
+**Review:** 35 findings. 20 rows patched, grouped into 11 entries. 2 deferred: announcer behaviour has no CI DOM check, and the redirect table has no role-conditional rule for E7.1. 13 rejected; reasons are in the triage log. Patched entries by verdict: medium 5 (query-only re-announce, in-page loading announce/focus, route-wiring tests, EntryDetail tests, gated-vs-missing timing), low 6.
+
+**Follow-up review recommended:** true. Five medium entries were patched. Unverified risks:
+- The pathname-keyed announcer and the `useRoleSettling` hold are checked only by SSR and the throwaway browser harness.
+- The `*` route now waits for the campaign list when logged in, so if `/api/campaigns` hangs, an unknown URL shows "Loading…" until the request settles.
+
+**Verification:**
+- `npm run build` ok.
+- `lint:tokens` 114/114; token self-test ok; semantic-fallback ok; ui-primitives 25/25; focus-trap ok; spoiler-safety 24/24; check-campaign-switcher 39/39; check-routes 45/45.
+- Throwaway Playwright harness against `vite preview` with a mocked API (headless Chromium), 42/42 after the patches. It covered:
+  - `/analytics?range=30#top` → `/stats?range=30#top`, and Back skips it.
+  - `/record?x=1` → `/live?x=1&mode=record`, and the target overrides `mode`.
+  - `/characters` and `/quests` are served.
+  - `/nope` and journal 404 show not-found with the same title.
+  - A Player on `/sources` gets markup and title identical to `/nope`.
+  - After a nav click: the live region says "Stats", the title is "(3) Stats · Lorekeeper", and the h1 is focused.
+  - Keyboard: Enter, arrows, Home/End, Esc returns focus, and Enter on a link navigates and announces.
+  - GM groups match the spec; Admin shows only for admins; the Player menu shows only Chronicler.
+  - 375 px: no horizontal scroll, with the menu open as well.
+- Frontend CI on PR #31.
+
+**Residual risks:**
+- Announcer timing and focus have no CI regression protection; there is no DOM runner.
+- Pages with their own loading state, other than the journal entry page, focus `main` rather than their late-rendered h1.
+- A Player sees only Chronicler until Portal, World and Keepsakes land. Journal and History remain reachable by URL and from the wordmark.
+
+**Needs desktop verification:** none beyond the normal UI pass. Optional: `cd src/frontend && npm run dev`, then with one owned and one joined campaign try `/analytics`, `/record?x=1` and `/nope`. Switch to the joined campaign and open `/sources`. Use VoiceOver to confirm the route announcement.

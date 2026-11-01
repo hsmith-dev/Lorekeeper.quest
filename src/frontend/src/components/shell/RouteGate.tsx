@@ -1,37 +1,29 @@
 import { Suspense, useEffect } from "react";
 import { Navigate, useLocation } from "react-router-dom";
 
-import { useCampaigns } from "@/hooks/useCampaigns";
-import { isLoggedIn, useNavAudience } from "@/hooks/useNavAudience";
+import { isLoggedIn, useNavAudience, useRoleSettling } from "@/hooks/useNavAudience";
 import { NOT_FOUND_TITLE, canView, redirectTarget, type PageRoute } from "@/lib/routes";
 import { NotFound } from "@/pages/NotFoundPage";
 import { setRouteTitle } from "./RouteAnnouncer";
+import { RouteLoading } from "./RouteLoading";
 
 // Rendering one registry route (E0-UX.8): login check, role gate, the route's
 // default title and the lazy-chunk fallback. Gating is cosmetic (AD-13): it
 // only stops the shell rendering a page the server would refuse anyway, and it
 // looks exactly like a missing page so "hidden" can't be told from "missing".
 
-// Shown only while a lazy page's chunk is downloading. RouteAnnouncer waits
-// for `data-route-loading` to go before it announces and moves focus.
-export function RouteLoading() {
-  return (
-    <div data-route-loading="" className="flex-1 flex items-center justify-center py-24 text-sm text-muted-foreground">
-      Loading…
-    </div>
-  );
-}
+export { RouteLoading };
 
 export function RoutePage({ route }: { route: PageRoute }) {
   const audience = useNavAudience();
   const loggedIn = isLoggedIn();
   const isPrivate = route.auth !== "public";
   const visible = canView(route, audience);
-  // A route some audience can't open waits for the first campaign list, so a
-  // Player's hard load of a GM URL never fetches the page chunk. A failed list
-  // stops waiting (no campaign: no gating, see navAudience).
-  const campaignsPending = useCampaigns({ enabled: loggedIn }).isPending && loggedIn;
-  const holding = campaignsPending && !route.roles.includes("player");
+  // A route some audience can't open waits until the role is known, so a
+  // Player's hard load of a GM URL never fetches the page chunk. Unknown
+  // paths (NotFoundPage) wait the same way, so gated and missing look alike.
+  const settling = useRoleSettling();
+  const holding = settling && !route.roles.includes("player");
   // A gated route takes the not-found title, never its own.
   const title = visible ? route.title : NOT_FOUND_TITLE;
 

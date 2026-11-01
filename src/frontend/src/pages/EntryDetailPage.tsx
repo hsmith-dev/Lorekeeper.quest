@@ -9,8 +9,15 @@ import type { JournalEntry, TagType } from "../types";
 import { InlineError } from "@/components/ui/inline-error";
 import { NotFound } from "./NotFoundPage";
 
-function isNotFoundError(err: unknown): boolean {
-  return (err as { response?: { status?: number } } | null)?.response?.status === 404;
+/** 404, or 422 from a malformed id (the path param is a uuid): both "not found". */
+export function isNotFoundError(err: unknown): boolean {
+  const status = (err as { response?: { status?: number } } | null)?.response?.status;
+  return status === 404 || status === 422;
+}
+
+/** Not-found won't change on retry; other failures get the default one retry. */
+export function retryEntry(count: number, err: unknown): boolean {
+  return !isNotFoundError(err) && count < 1;
 }
 
 const BUILTIN_TAG_TYPES: TagType[] = ["character", "location", "item", "quest", "faction"];
@@ -52,8 +59,7 @@ export function EntryDetailPage() {
       return data;
     },
     enabled: !!id,
-    // A 404 won't change on retry; other failures get the default one retry.
-    retry: (count, err) => !isNotFoundError(err) && count < 1,
+    retry: retryEntry,
   });
 
   const { data: categories } = useQuery({
@@ -105,7 +111,8 @@ export function EntryDetailPage() {
 
   if (isLoading) {
     return (
-      <div className="max-w-2xl mx-auto px-4 py-10">
+      // data-route-loading: RouteAnnouncer waits for the entry (or its 404).
+      <div data-route-loading="" className="max-w-2xl mx-auto px-4 py-10">
         <div className="flex flex-col gap-4 animate-pulse">
           <div className="h-4 bg-muted rounded w-24" />
           <div className="h-6 bg-muted rounded w-3/4" />
@@ -116,7 +123,8 @@ export function EntryDetailPage() {
   }
 
   // Missing and not-shared look the same (E0-UX.8): one NotFound for both.
-  if (error && !isNotFoundError(error)) {
+  // A failed background refetch keeps the loaded entry on screen.
+  if (error && !isNotFoundError(error) && !entry) {
     return (
       <div className="max-w-2xl mx-auto px-4 py-10">
         <InlineError error={error} fallback="Could not load this entry." onRetry={() => void refetch()} />

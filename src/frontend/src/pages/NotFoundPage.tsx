@@ -2,8 +2,9 @@ import { Compass } from "lucide-react";
 import { Link } from "react-router-dom";
 
 import { usePageTitle } from "@/components/shell/RouteAnnouncer";
+import { RouteLoading } from "@/components/shell/RouteLoading";
 import { Button } from "@/components/ui/button";
-import { isLoggedIn, useNavAudience } from "@/hooks/useNavAudience";
+import { isLoggedIn, useNavAudience, useRoleSettling } from "@/hooks/useNavAudience";
 import { NOT_FOUND_MESSAGE, NOT_FOUND_TITLE, isRouteRegistered, type NavAudience } from "@/lib/routes";
 
 // The one not-found page (E0-UX.8). Unknown URLs, role-gated routes and API
@@ -38,7 +39,8 @@ export function NotFound() {
   );
 }
 
-/** The `*` route. */
+/** The `*` route. Waits like a gated route does, so timing gives nothing away. */
 export function NotFoundPage() {
+  if (useRoleSettling()) return <RouteLoading />;
   return <NotFound />;
 }

@@ -128,12 +128,19 @@ export function RouteAnnouncer() {
     if (current) applyDocumentTitle(current.title);
   }, [current]);
 
-  // A navigation after the first render starts a pending announcement.
+  // The pathname last settled on. A query/hash-only change (filters,
+  // setSearchParams) is not a new page: no announcement, focus stays put.
+  const settledPath = useRef<string | null>(null);
+  const pathname = useRef(location.pathname);
+  pathname.current = location.pathname;
+
+  // A navigation to another path after the first load starts a pending announcement.
   useEffect(() => {
     if (!settledOnce.current) return; // still the first load (e.g. a redirect)
+    if (location.pathname === settledPath.current) return;
     pending.current = true;
     setMessage(""); // clear first so the same title is announced again
-  }, [location.key]);
+  }, [location.pathname]);
 
   // Wait for the title to settle (and a lazy page to load), then announce.
   useEffect(() => {
@@ -146,10 +153,12 @@ export function RouteAnnouncer() {
       timer.current = null;
       if (!settledOnce.current) {
         settledOnce.current = true;
+        settledPath.current = pathname.current;
         return;
       }
       if (!pending.current) return;
       pending.current = false;
+      settledPath.current = pathname.current;
       const title = getPageTitle();
       if (title) setMessage(announcementText(title.title, title.detail));
       focusPageHeading();
@@ -158,7 +167,7 @@ export function RouteAnnouncer() {
     return () => {
       if (timer.current) clearTimeout(timer.current);
     };
-  }, [location.key, current]);
+  }, [location.pathname, current]);
 
   return (
     <div role="status" aria-live="polite" aria-atomic="true" className="sr-only">

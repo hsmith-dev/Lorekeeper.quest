@@ -1,4 +1,5 @@
 import { navAudience, type NavAudience } from "@/lib/routes";
+import { useCampaigns } from "./useCampaigns";
 import { useCurrentCampaign } from "./useCurrentCampaign";
 import { useEffectiveRole } from "./useEffectiveRole";
 
@@ -10,6 +11,19 @@ export function useNavAudience(): NavAudience {
   const { current } = useCurrentCampaign();
   const { isGm } = useEffectiveRole();
   return navAudience({ hasCampaign: current !== null, isGm });
+}
+
+/**
+ * Logged in and the campaign list (so the role) is not settled yet. Gated
+ * routes and the `*` not-found route both wait on this, so a Player can't tell
+ * a hidden page from a missing one by timing. A failed list stops the wait
+ * (no campaign: no gating, see navAudience).
+ */
+export function useRoleSettling(): boolean {
+  const loggedIn = isLoggedIn();
+  const { ready } = useCurrentCampaign();
+  const { isError } = useCampaigns({ enabled: loggedIn });
+  return loggedIn && !ready && !isError;
 }
 
 /** Whether a login token is stored. Never throws. */
