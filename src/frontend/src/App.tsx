@@ -16,6 +16,7 @@ import { NavBar } from "./components/NavBar";
 import { ChatWidget } from "./components/ChatWidget";
 import { Toaster } from "./components/ui/toast";
 import { Footer } from "./components/Footer";
+import { PreviewBanner } from "./components/shell/PreviewBanner";
 
 // Lazy-loaded: everything past the core "log in → journal → history" loop.
 // Each of these used to be one static import in this file, which meant every
@@ -78,6 +79,7 @@ export default function App() {
         <BrowserRouter>
           <TourProvider>
           <div className="min-h-screen flex flex-col">
+          <PreviewBanner />
           <NavBar />
           <main className="flex-1 flex flex-col">
           <Suspense fallback={<RouteLoading />}>

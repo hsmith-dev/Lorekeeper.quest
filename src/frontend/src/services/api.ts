@@ -1,4 +1,5 @@
 import axios, { AxiosInstance } from "axios";
+import { previewHeaders, setPreviewCampaignId } from "../lib/preview";
 
 // In dev, Vite proxies /api → localhost:8000 (see vite.config.ts).
 // In production, nginx serves both the frontend and proxies /api → backend.
@@ -11,6 +12,13 @@ const api: AxiosInstance = axios.create({
 api.interceptors.request.use((config) => {
   const token = localStorage.getItem("lk_token");
   if (token) config.headers.Authorization = `Bearer ${token}`;
+  // "Preview as Player" (E0-UX.6): X-Lorekeeper-Preview: member while active.
+  // The server may only narrow its answer with it, and ignores it outside GM
+  // campaign routes, so sending it on every request is safe. The hiding itself
+  // is server-side (AD-13); until E0-Access honours the header nothing enters
+  // preview. Direct fetch() calls (e.g. useChat.ts streaming, lib/sse.ts,
+  // AdminPage.tsx model install) bypass axios and are not covered yet.
+  for (const [name, value] of Object.entries(previewHeaders())) config.headers.set(name, value);
   return config;
 });
 
@@ -20,6 +28,7 @@ api.interceptors.response.use(
     if (err.response?.status === 401) {
       localStorage.removeItem("lk_token");
       localStorage.removeItem("lk_user");
+      setPreviewCampaignId(null);
       window.location.href = "/login";
     }
     // 402 has two distinct causes that need two different destinations —

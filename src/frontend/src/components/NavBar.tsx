@@ -2,6 +2,7 @@ import { useState, useRef, useEffect } from "react";
 import { Link, useNavigate, useLocation } from "react-router-dom";
 import { ThemeSelector } from "./ThemeSelector";
 import { uploadAvatar, getMe } from "../services/api";
+import { setPreviewCampaignId } from "@/lib/preview";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 
 // Grouped rather than one flat list — 14 ungrouped links (before Admin is
@@ -99,6 +100,7 @@ function ProfileDropdown({ onClose }: { onClose: () => void }) {
   const logout = () => {
     localStorage.removeItem("lk_token");
     localStorage.removeItem("lk_user");
+    setPreviewCampaignId(null);
     navigate("/login");
     onClose();
   };
@@ -208,7 +210,7 @@ export function NavBar() {
   const current = NAV_LINKS.find((l) => isActive(l.to)) ?? (isActive("/admin") ? { to: "/admin", label: "Admin" } : undefined);
 
   return (
-    <nav className="border-b border-border bg-background/95 backdrop-blur-sm sticky top-0 z-50">
+    <nav className="border-b border-border bg-background/95 backdrop-blur-sm sticky top-[var(--lk-preview-offset,0px)] z-50">
       <div className="max-w-5xl mx-auto px-4 h-14 flex items-center gap-3">
         {/* Logo — left, always goes to the dashboard once signed in */}
         <Link

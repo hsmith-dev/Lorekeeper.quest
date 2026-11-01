@@ -40,3 +40,5 @@ jobs:
         run: node scripts/check-ui-primitives.mjs
       - name: SlideOver focus-trap and layer checks
         run: node scripts/check-focus-trap.mjs
+      - name: Spoiler-safety primitives and preview shell checks
+        run: node scripts/check-spoiler-safety.mjs
