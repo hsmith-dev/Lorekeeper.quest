@@ -54,7 +54,7 @@ function RetrievalPanel({ retrieval }: { retrieval: RetrievalDebug }) {
                     <span className={`shrink-0 font-mono ${c.used ? "text-success" : c.passed_gate ? "text-muted-foreground" : "text-warning"}`}>
                       {c.used ? "✓ used" : c.passed_gate ? "· passed" : "✗ gated"}
                     </span>
-                    <span className="truncate text-muted-foreground">{c.shorthand ?? c.session_date ?? "Journal entry"}</span>
+                    <span className="truncate text-muted-foreground">{c.shorthand || c.session_date || "Journal entry"}</span>
                     <span className="shrink-0 font-mono text-muted-foreground">
                       {c.vector_distance != null ? `d=${c.vector_distance.toFixed(3)}` : "d=—"}
                       {c.lexical_rank != null ? ` · fts#${c.lexical_rank}` : ""}

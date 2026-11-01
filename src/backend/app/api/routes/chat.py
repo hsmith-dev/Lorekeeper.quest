@@ -23,10 +23,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 
 from app.access import (
-    CHAT_DETAIL, CHAT_META, CHAT_REPLY, GM, CampaignContext, NotFound, RoleMap, check_chat_session,
+    PLAYER, PREVIEW_HEADER, CHAT_DETAIL, CHAT_META, CHAT_REPLY, GM, CampaignContext, NotFound, RoleMap, check_chat_session,
     ctx_for_request, not_found, project_chat, replay_history, resolve_sources, role_map, session_visible_text,
     visible_refs,
 )
+from app.access.context import PREVIEW_MEMBER
 from app.api.deps import get_current_user, get_user_llm_config
 from app.core.limiter import limiter, user_or_ip
 from app.db.models.campaign import Campaign
@@ -92,10 +93,17 @@ async def _own_session(db: AsyncSession, user: User, session_id: str) -> tuple[C
 async def _session_scope(request: Request, db: AsyncSession, user: User, session: ChatSession) -> ChatScope:
     """The ctx a session is read with: the caller's ctx in its Campaign (404
     once they are no longer a Member), or their role map for a session with
-    no Campaign."""
+    no Campaign. In member preview a Campaign session is 404 (the member
+    view is nobody's, so it owns no session), and a campaign-less one reads
+    as a Player everywhere; any write in preview is 404."""
     if session.campaign_id is not None:
         return await ctx_for_request(request, db, user, session.campaign_id)
-    return await role_map(db, user)
+    roles = await role_map(db, user)
+    if request.headers.get(PREVIEW_HEADER) == PREVIEW_MEMBER:
+        if request.method.upper() not in ("GET", "HEAD", "OPTIONS"):
+            not_found()
+        roles = RoleMap({cid: PLAYER for cid in roles}, user_id=roles.user_id)
+    return roles
 
 
 def _summary(session: ChatSession, campaign_name: str | None) -> ChatSessionSummary:
@@ -113,6 +121,7 @@ def _summary(session: ChatSession, campaign_name: str | None) -> ChatSessionSumm
 
 @router.get("/sessions", response_model=list[ChatSessionSummary])
 async def list_sessions(
+    request: Request,
     search: str | None = Query(None, max_length=200),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -122,8 +131,12 @@ async def list_sessions(
     `search` matches the title or the text of a message the user may still
     read (a redacted message matches nothing)."""
     roles = await role_map(db, user)
+    if request.headers.get(PREVIEW_HEADER) == PREVIEW_MEMBER:
+        # Preview only narrows: list (and search) as if a Player everywhere.
+        roles = RoleMap({cid: PLAYER for cid in roles}, user_id=roles.user_id)
     gm_ids = [cid for cid, role in roles.items() if role == GM]
     member_ids = list(roles)
+    all_gm = all(role == GM for role in roles.values())
     query = (
         select(ChatSession, Campaign.name)
         .outerjoin(Campaign, ChatSession.campaign_id == Campaign.id)
@@ -131,7 +144,8 @@ async def list_sessions(
             ChatSession.user_id == user.id,
             or_(ChatSession.campaign_id.is_(None),
                 ChatSession.campaign_id.in_(member_ids) if member_ids else false()),
-            or_(ChatSession.archived_at.is_(None), ChatSession.campaign_id.is_(None),
+            or_(ChatSession.archived_at.is_(None),
+                ChatSession.campaign_id.is_(None) if all_gm else false(),
                 ChatSession.campaign_id.in_(gm_ids) if gm_ids else false()),
         )
         .order_by(ChatSession.updated_at.desc())
@@ -186,7 +200,9 @@ async def delete_session(
 ) -> None:
     session, _ = await _own_session(db, user, session_id)
     scope = await _session_scope(request, db, user, session)  # a DELETE in preview is 404
-    check_chat_session(session, scope)  # archived: GM only
+    check_chat_session(session, scope)
+    if session.archived_at is not None:
+        not_found()  # archived sessions are read-only, even to a GM ctx
     await db.delete(session)
     await db.commit()
 
@@ -317,7 +333,9 @@ async def _prepare_chat(
                 refs.append(ref)
         citations = await resolve_sources(db, refs, scope)
     except Exception:
-        pass  # RAG failure must not break chat
+        # RAG failure must not break chat, and must not leave a half-built
+        # body (sources and stored refs without their citations).
+        journal_context, sources, candidates, refs, citations = [], [], [], [], []
 
     canon_context: str | None = None
     canon_sources: list[str] = []

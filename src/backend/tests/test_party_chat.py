@@ -367,14 +367,19 @@ async def test_archived_sessions(db, world, client):
     assert r.status_code == 404 and r.json() == NOT_FOUND
     assert await db.get(ChatSession, p_archived.id) is not None
 
-    # A GM ctx of the same user: listed, readable, deletable; never posted to.
+    # A GM ctx of the same user: listed and readable, read-only (no POST, no DELETE).
     r = await client.get("/api/chat/sessions", headers=bearer(world.owner))
     assert {s["id"]: s for s in r.json()}[str(gm_archived.id)]["archived_at"] is not None
     gm_url = f"/api/chat/sessions/{gm_archived.id}"
     assert (await client.get(gm_url, headers=bearer(world.owner))).status_code == 200
     r = await client.post("/api/chat/", headers=bearer(world.owner), json={**body, "session_id": str(gm_archived.id)})
     assert r.status_code == 404 and r.json() == NOT_FOUND
-    assert (await client.delete(gm_url, headers=bearer(world.owner))).status_code == 204
+    r = await client.delete(gm_url, headers=bearer(world.owner))
+    assert r.status_code == 404 and r.json() == NOT_FOUND
+    assert await db.get(ChatSession, gm_archived.id) is not None
+    # In member preview the GM lists as a Player: the archived session is absent.
+    r = await client.get("/api/chat/sessions", headers={**bearer(world.owner), PREVIEW_HEADER: "member"})
+    assert str(gm_archived.id) not in {s["id"] for s in r.json()}
 
 
 # ── Mismatches and denials: one 404 ────────────────────────────────────────
@@ -441,3 +446,78 @@ async def test_sessions_of_a_campaign_left_are_hidden(db, world, client):
     assert str(session.id) not in {s["id"] for s in r.json()}
     r = await client.get(f"/api/chat/sessions/{session.id}", headers=bearer(world.q))
     assert r.status_code == 404 and r.json() == NOT_FOUND
+
+
+# ── Review additions ───────────────────────────────────────────────────────
+
+async def test_campaign_less_replay_and_search_after_a_demotion(db, world, client):
+    entry = await add_entry(db, world.a, world.owner, "Prose in A.", shorthand="SECRETWORD")
+    await db.commit()
+    await _fake_llm_for(db, world.co_gm)
+    session = await add_session(db, world.co_gm, [
+        {"role": "user", "content": "q", "refs": []},
+        {"role": "assistant", "content": "GMCITED", "refs": [stored_ref(entry, None)], "grounded": True},
+        {"role": "assistant", "content": "LEGACYREPLY"},
+    ])
+    member = (await db.execute(sa.select(CampaignMember).where(CampaignMember.user_id == world.co_gm.id))).scalar_one()
+    member.role = CampaignRole.PLAYER
+    await db.commit()
+    with llm_provider.capture() as cap:
+        r = await client.post("/api/chat/", headers=bearer(world.co_gm),
+                              json={"message": "And then?", "session_id": str(session.id)})
+    assert r.status_code == 200, r.text
+    prompt = prompt_text(cap)
+    assert cap.calls and "GMCITED" not in prompt and "LEGACYREPLY" not in prompt
+    for word in ("GMCITED", "LEGACYREPLY"):
+        r = await client.get(f"/api/chat/sessions?search={word}", headers=bearer(world.co_gm))
+        assert str(session.id) not in {s["id"] for s in r.json()}
+
+
+async def test_archived_campaign_less_session_is_hidden_from_a_player(db, world, client):
+    # A Campaign deleted under an archived session leaves campaign_id NULL.
+    session = await add_session(db, world.p, [{"role": "user", "content": "x", "refs": []}], archived=True)
+    r = await client.get("/api/chat/sessions", headers=bearer(world.p))
+    assert str(session.id) not in {s["id"] for s in r.json()}
+    r = await client.get(f"/api/chat/sessions/{session.id}", headers=bearer(world.p))
+    assert r.status_code == 404 and r.json() == NOT_FOUND
+
+
+async def test_preview_reads_of_sessions(db, world, client):
+    gm_session = await add_session(db, world.owner, [{"role": "assistant", "content": "LEGACYREPLY"}],
+                                   campaign_id=world.a)
+    own = await add_session(db, world.owner, [{"role": "assistant", "content": "OWNLEGACY"}])
+    preview = {**bearer(world.owner), PREVIEW_HEADER: "member"}
+    # A Campaign session in preview: the member view owns no session, the one 404.
+    r = await client.get(f"/api/chat/sessions/{gm_session.id}", headers=preview)
+    assert r.status_code == 404 and r.json() == NOT_FOUND
+    # A campaign-less one reads as a Player everywhere: legacy turns redacted;
+    # deleting it in preview is 404.
+    r = await client.get(f"/api/chat/sessions/{own.id}", headers=preview)
+    assert r.status_code == 200 and "OWNLEGACY" not in r.text
+    r = await client.delete(f"/api/chat/sessions/{own.id}", headers=preview)
+    assert r.status_code == 404
+    assert await db.get(ChatSession, own.id) is not None
+
+
+async def test_a_failing_resolver_drops_only_its_ref(db, world, monkeypatch, caplog):
+    vis = await add_entry(db, world.a, world.owner, "The party met Zorblax.")
+    other = await add_entry(db, world.a, world.p, "P's note.", kind="player")
+    await db.commit()
+    resolvers = dict(access_sources._RESOLVERS)
+    bad = access_sources.Resolver(SourceKind.PLAYER_JOURNAL, lambda row, r: ("only one",),
+                                  access_sources.JournalEntry,
+                                  access_sources._RESOLVERS[SourceKind.PLAYER_JOURNAL].where)
+    resolvers[SourceKind.PLAYER_JOURNAL] = bad
+    monkeypatch.setattr(access_sources, "_RESOLVERS", resolvers)
+    p = await world.ctx(db, "p")
+    with caplog.at_level(logging.WARNING, logger="app.access.sources"):
+        cited = await resolve_sources(db, [ref(vis), ref(other)], p)
+    assert [c.ref for c in cited] == [ref(vis)]
+    assert any("resolver_failed" in r.getMessage() for r in caplog.records)
+
+
+def test_source_ref_span_must_be_ordered():
+    SourceRef(kind=SourceKind.JOURNAL, id=uuid.uuid4(), span=(0, 4))
+    for bad in ((-1, 2), (5, 2)):
+        with pytest.raises(ValueError):
+            SourceRef(kind=SourceKind.JOURNAL, id=uuid.uuid4(), span=bad)

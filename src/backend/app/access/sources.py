@@ -212,12 +212,12 @@ async def resolve_sources(db: AsyncSession, refs: Iterable[SourceRef], ctx: Scop
             got = _RESOLVERS[ref.kind].fn(row, ref)
             if inspect.isawaitable(got):
                 got = await got
+            if not got:
+                continue
+            title, quote = got
         except Exception:
-            logger.warning(json.dumps({"event": "resolver_failed", "kind": ref.kind.value}))
+            logger.warning(json.dumps({"event": "resolver_failed", "kind": ref.kind.value}), exc_info=True)
             continue
-        if not got:
-            continue
-        title, quote = got
         out.append(ResolvedSource(ref=ref, title=str(title), quote=str(quote or "")))
     return out
 

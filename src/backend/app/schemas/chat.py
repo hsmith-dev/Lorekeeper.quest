@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.schemas.sources import Grounded, ResolvedSource, SourceRef
 
@@ -9,7 +9,10 @@ from app.schemas.sources import Grounded, ResolvedSource, SourceRef
 # app.access.project_chat: a GM ctx gets the GM schema, anyone else the Party
 # schema, which has no `shorthand` (sources, candidates) and no
 # `system_prompt` (trace) at any depth, and whose `canon_sources` is always
-# empty (source documents are GM-only).
+# empty (source documents are GM-only). The Party models pin
+# `extra="ignore"`: project_chat validates one GM-shaped body into them, and
+# the GM keys (`shorthand`, `system_prompt`) must be dropped, never kept.
+_PARTY = ConfigDict(extra="ignore")
 
 
 class ChatMessage(BaseModel):
@@ -43,6 +46,7 @@ class ChatRequest(BaseModel):
 
 
 class JournalSourceParty(BaseModel):
+    model_config = _PARTY
     id: str
     snippet: str
     session_date: str | None
@@ -59,6 +63,7 @@ class JournalSource(JournalSourceParty):
 
 
 class RetrievalCandidateParty(BaseModel):
+    model_config = _PARTY
     """One journal entry either retriever surfaced, kept or not — the raw
     material of the 'how this answer was built' panel."""
     id: str
@@ -75,6 +80,7 @@ class RetrievalCandidate(RetrievalCandidateParty):
 
 
 class RetrievalDebugParty(BaseModel):
+    model_config = _PARTY
     """What actually happened between the user's question and the model's
     prompt — so groundedness is inspectable, not asserted. No system prompt:
     it may carry the glossary and Shorthand."""
@@ -110,6 +116,7 @@ class ChatMetaGM(Grounded):
 
 
 class ChatMetaParty(Grounded):
+    model_config = _PARTY
     session_id: str
     sources: list[JournalSourceParty] = []
     canon_sources: list[str] = []

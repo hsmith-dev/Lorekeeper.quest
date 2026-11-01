@@ -403,7 +403,7 @@ def redact_messages(messages: Iterable[Any], visible: Iterable[SourceRef], *,
             continue
         role = str(msg.get("role", ""))
         if _message_visible(msg, shown, legacy_visible):
-            out.append({"role": role, "content": str(msg.get("content", "")), "refs": _safe_refs(msg) or [],
+            out.append({"role": role, "content": str(msg.get("content") or ""), "refs": _safe_refs(msg) or [],
                         "grounded": msg.get("grounded"), "redacted": False})
         else:
             out.append({"role": role, "content": REDACTED_NOTICE, "refs": [], "grounded": None, "redacted": True})
@@ -432,10 +432,15 @@ def _chat_scope(session: ChatSession, ctx: ChatScope) -> tuple[ChatScope, bool]:
     uid = getattr(ctx, "user_id", None)
     if uid is None or session.user_id != uid:
         not_found()
+    all_gm = _roles_all_gm(ctx)
+    if session.archived_at is not None and not all_gm:
+        # An archived session whose Campaign is gone (campaign_id SET NULL)
+        # stays archived: readable only while the user is a Player nowhere.
+        not_found()
     # A campaign-less session is the user's own: the GM schema, its refs
     # checked by the Role in each cited row's Campaign; legacy messages only
     # while the user is a Player nowhere.
-    return ctx, _roles_all_gm(ctx)
+    return ctx, all_gm
 
 
 def check_chat_session(session: ChatSession, ctx: ChatScope) -> None:
@@ -495,7 +500,7 @@ async def replay_history(db: AsyncSession, session: ChatSession | None, ctx: Cha
     messages = list(session.messages or [])
     shown = set(await _visible_refs(db, _all_refs(messages), scope))
     return [
-        {"role": str(m["role"]), "content": str(m.get("content", ""))}
+        {"role": str(m["role"]), "content": str(m.get("content") or "")}
         for m in messages
         if isinstance(m, Mapping) and m.get("role") in REPLAY_ROLES and _message_visible(m, shown, legacy_visible)
     ]
@@ -507,7 +512,7 @@ async def session_visible_text(db: AsyncSession, session: ChatSession, ctx: Chat
     scope, legacy_visible = _chat_scope(session, ctx)
     messages = list(session.messages or [])
     shown = set(await _visible_refs(db, _all_refs(messages), scope))
-    return [str(m.get("content", "")) for m in messages if _message_visible(m, shown, legacy_visible)]
+    return [str(m.get("content") or "") for m in messages if _message_visible(m, shown, legacy_visible)]
 
 
 # ── Import-time check: Party schemas carry no GM field ─────────────────────

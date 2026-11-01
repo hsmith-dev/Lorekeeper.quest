@@ -10,7 +10,7 @@ from __future__ import annotations
 import uuid
 from enum import StrEnum
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
 
 
 class SourceKind(StrEnum):
@@ -41,6 +41,12 @@ class SourceRef(BaseModel):
     id: uuid.UUID
     field: str | None = None
     span: tuple[int, int] | None = None
+
+    @model_validator(mode="after")
+    def _span_ordered(self) -> "SourceRef":
+        if self.span is not None and not (0 <= self.span[0] <= self.span[1]):
+            raise ValueError("span must be [start, end] with 0 <= start <= end")
+        return self
 
 
 class ResolvedSource(BaseModel):
