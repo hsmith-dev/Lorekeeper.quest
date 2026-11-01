@@ -29,5 +29,11 @@ export const arcaneTheme: Theme = {
     border:                 "270 25% 22%",
     input:                  "260 18% 13%",
     ring:                   "270 60% 58%",
+    success:                "150 45% 55%",
+    warning:                "38 85% 60%",
+    info:                   "195 60% 62%",
+    gm:                     "320 55% 72%",
+    live:                   "350 80% 70%",
+    danger:                 "0 75% 72%",
   },
 };

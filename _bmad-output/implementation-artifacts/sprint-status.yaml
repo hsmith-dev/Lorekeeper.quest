@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 10-31-2026 23:30
-last_updated: 10-31-2026 22:20
+last_updated: 10-31-2026 22:24
 project: Lorekeeper.quest
 project_key: NOKEY
 tracking_system: file-system
@@ -140,8 +140,8 @@ development_status:
   7-4-entry-edit-and-delete-ui-on-the-entry-detail-page: backlog
   epic-7-retrospective: optional
 
-  epic-8: backlog  # E0-UX
-  8-1-semantic-colour-tokens-and-type-roles-in-all-six-themes: backlog
+  epic-8: in-progress  # E0-UX
+  8-1-semantic-colour-tokens-and-type-roles-in-all-six-themes: done
   8-2-fix-destructive-text-contrast-migrate-hardcoded-colours-and: backlog
   8-3-slideover-focus-trap-wide-and-full-screen-variants-push-head: backlog
   8-4-segmentedcontrol-tabs-and-combobox-primitives: backlog

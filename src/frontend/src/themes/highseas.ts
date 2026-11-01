@@ -26,5 +26,11 @@ export const highSeasTheme: Theme = {
     border:                 "45 28% 22%",
     input:                  "210 30% 14%",
     ring:                   "45 65% 48%",
+    success:                "145 40% 55%",
+    warning:                "30 85% 60%",
+    info:                   "190 55% 62%",
+    gm:                     "280 45% 72%",
+    live:                   "4 80% 68%",
+    danger:                 "0 75% 72%",
   },
 };
