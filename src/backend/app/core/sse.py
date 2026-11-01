@@ -2,7 +2,13 @@
 
     @router.get("/stream")
     async def stream(ctx: CampaignContext = Depends(require_campaign), db=Depends(get_db)):
-        return sse_response(listen_jobs(ctx.campaign_id), ctx=ctx, bind=db.bind)
+        bind = db.bind
+        await db.close()
+        return sse_response(listen_jobs(ctx.campaign_id), ctx=ctx, bind=bind)
+
+Close the request session before returning: otherwise it, and its pooled
+connection idle in a transaction, is held for the whole stream (the watch
+polls in sessions of its own on `bind`).
 
 `gen` is an async iterator of `(event, data)` pairs (what the app/core/pubsub
 listeners yield) or of ready frames (`format_event`). The response:
@@ -35,6 +41,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from typing import Any, AsyncIterator, Awaitable, Callable, Mapping
 
@@ -59,6 +66,8 @@ SILENT_REASONS = frozenset({"poll_failed"})
 
 SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
 
+_LINE_END = re.compile(r"\r\n|\r|\n")
+
 Watch = Callable[..., Awaitable[Any]]
 Check = Callable[[Any], None]
 
@@ -69,10 +78,10 @@ def register_close_watch(watch: Watch, *, check: Check | None = None) -> None:
     """Install the watch every stream runs: `await watch(ctx, bind=bind)`
     returns (with a reason) when the ctx's access changed. `check(ctx)`, run
     when the response is built, raises for a ctx the watch cannot watch.
-    Registering the same watch again is a no-op; a different one raises
-    ValueError."""
+    Registering the same watch and check again is a no-op; anything else
+    once one is registered raises ValueError."""
     global _close_watch
-    if _close_watch is not None and _close_watch[0] is not watch:
+    if _close_watch is not None and (_close_watch[0] is not watch or _close_watch[1] is not check):
         raise ValueError("register_close_watch: a different close watch is already registered")
     _close_watch = (watch, check)
 
@@ -80,13 +89,15 @@ def register_close_watch(watch: Watch, *, check: Check | None = None) -> None:
 def format_event(event: str, data: Any = None) -> str:
     """One SSE frame: `event: <event>` and `data: <json>` (a str is sent as
     is, one `data:` line per line), ended by a blank line."""
-    if not isinstance(event, str) or not event or any(c in event for c in "\r\n:"):
+    if not isinstance(event, str) or not event or any(c in event for c in "\r\n"):
         raise ValueError(f"format_event: bad event name {event!r}")
     if isinstance(data, str):
         payload = data
     else:
         payload = json.dumps(data, default=str, separators=(",", ":"))
-    lines = [f"event: {event}"] + [f"data: {line}" for line in payload.splitlines() or [""]]
+    # Only the SSE line ends (CR LF, CR, LF) split a value; a trailing one
+    # gives an empty last `data:` line, so the newline survives.
+    lines = [f"event: {event}"] + [f"data: {line}" for line in _LINE_END.split(payload)]
     return "\n".join(lines) + "\n\n"
 
 
@@ -114,7 +125,11 @@ async def _settle(task: asyncio.Future | None) -> None:
         task.cancel()
     try:
         await task
-    except BaseException:  # noqa: BLE001 - cancelled or failed: either way it is over
+    except asyncio.CancelledError:
+        current = asyncio.current_task()
+        if current is not None and current.cancelling():
+            raise  # this task's own cancellation, not the settled task's
+    except Exception:
         pass
 
 
@@ -126,7 +141,7 @@ class SSEResponse(StreamingResponse):
 
     def __init__(self, gen: AsyncIterator[Any], *, watch: Callable[[], Awaitable[Any]],
                  headers: Mapping[str, str] | None = None) -> None:
-        fixed = {name.lower() for name in SSE_HEADERS}
+        fixed = {name.lower() for name in SSE_HEADERS} | {"content-type", "content-length"}
         merged = {name: value for name, value in (headers or {}).items() if name.lower() not in fixed}
         merged.update(SSE_HEADERS)
         super().__init__(gen, headers=merged, media_type=self.media_type)
@@ -217,15 +232,25 @@ class SSEResponse(StreamingResponse):
         finally:
             # Also on a client disconnect (this task cancelled by the base
             # class's task group): shielded, bounded.
+            # Every task is settled and the gen closed even when one step
+            # raises this task's cancellation, which is re-raised at the end.
+            deferred: BaseException | None = None
             with anyio.move_on_after(CLEANUP_TIMEOUT_S, shield=True):
                 for task in (getter, pump, watch):
-                    await _settle(task)
+                    try:
+                        await _settle(task)
+                    except asyncio.CancelledError as exc:
+                        deferred = exc
                 aclose = getattr(self.body_iterator, "aclose", None)
                 if aclose is not None:
                     try:
                         await aclose()
+                    except asyncio.CancelledError as exc:
+                        deferred = exc
                     except Exception:
                         logger.warning(json.dumps({"event": "sse_close_failed"}), exc_info=True)
+            if deferred is not None:
+                raise deferred
 
 
 def sse_response(gen: AsyncIterator[Any], *, ctx: Any, bind: Any = None,

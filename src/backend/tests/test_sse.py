@@ -233,7 +233,13 @@ def test_format_event():
     assert format_event("job", {"a": 1}) == 'event: job\ndata: {"a":1}\n\n'
     assert format_event("note", "two\nlines") == "event: note\ndata: two\ndata: lines\n\n"
     assert format_event("ping", {}) == "event: ping\ndata: {}\n\n"
-    for bad in ("", "a\nb", "a:b", None):
+    # Only CR LF, CR and LF end a line; a trailing one survives as an empty data line.
+    assert format_event("note", "a\r\nb\rc") == "event: note\ndata: a\ndata: b\ndata: c\n\n"
+    assert format_event("note", "end\n") == "event: note\ndata: end\ndata: \n\n"
+    for other in ("\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"):
+        assert format_event("note", f"a{other}b") == f"event: note\ndata: a{other}b\n\n"
+    assert format_event("a:b", {}) == "event: a:b\ndata: {}\n\n"  # SSE allows ':' in a name
+    for bad in ("", "a\nb", "a\rb", None):
         with pytest.raises(ValueError):
             format_event(bad, {})
 
@@ -243,8 +249,11 @@ def test_headers(watch):
     assert response.headers["content-type"].startswith("text/event-stream")
     assert response.headers["x-accel-buffering"] == "no"
     assert response.headers["cache-control"] == "no-cache"
-    extra = sse_response(idle(), ctx=object(), headers={"X-Extra": "1", "Cache-Control": "public"})
+    extra = sse_response(idle(), ctx=object(), headers={"X-Extra": "1", "Cache-Control": "public",
+                                                        "content-type": "text/html", "Content-Length": "5"})
     assert extra.headers["x-extra"] == "1" and extra.headers["cache-control"] == "no-cache"
+    assert extra.headers["content-type"].startswith("text/event-stream")
+    assert "content-length" not in extra.headers
 
 
 def test_fails_closed_without_a_close_watch(monkeypatch):
@@ -261,6 +270,10 @@ def test_app_access_registers_grant_watch():
     sse.register_close_watch(grant_watch, check=_check_watchable)  # same one again: a no-op
     with pytest.raises(ValueError):
         sse.register_close_watch(lambda ctx, bind=None: None)
+    for check in (None, lambda ctx: None):  # the same watch with another check
+        with pytest.raises(ValueError):
+            sse.register_close_watch(grant_watch, check=check)
+    assert sse._close_watch == (grant_watch, _check_watchable)
 
 
 def test_the_check_rejects_an_unwatchable_ctx():
@@ -411,8 +424,7 @@ async def test_a_disconnect_unsubscribes_and_stops_the_watch(valkey, watch, serv
     await wait_until(lambda: watch.cancelled == 1, timeout=2)
 
 
-async def test_no_valkey_the_stream_still_pings_and_closes(watch, serve, monkeypatch):
-    monkeypatch.setattr(sse, "SSE_PING_S", 0.1)
+async def test_no_valkey_the_stream_ends(watch, serve):
     previous = valkey_client.set_valkey(None)
     try:
         cid = uuid.uuid4()

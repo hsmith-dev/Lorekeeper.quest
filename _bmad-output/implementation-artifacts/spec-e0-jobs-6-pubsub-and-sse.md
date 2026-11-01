@@ -2,7 +2,7 @@
 title: 'E0-Jobs.6: core/pubsub.py and core/sse.py'
 type: 'feature'
 created: '2026-11-01'
-status: 'in-progress'
+status: 'in-review'
 baseline_revision: '022cc28a38331b357971c6c76fde0dfd5f3506ef'
 review_loop_iteration: 0
 followup_review_recommended: false

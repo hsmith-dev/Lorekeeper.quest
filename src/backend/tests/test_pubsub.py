@@ -285,13 +285,30 @@ async def test_status_changes_are_never_throttled_and_drop_the_trailing_progress
     await got.close()
 
 
-async def test_progress_throttle_is_per_job(valkey, fast_windows):
+async def test_progress_throttle_is_per_job(valkey, monkeypatch):
+    monkeypatch.setattr(pubsub, "JOB_PROGRESS_WINDOW_S", 30)  # a trailing edge could not arrive in time
     cid = uuid.uuid4()
     got = Collector(listen_jobs(cid))
     await got.subscribed(valkey, jobs_channel(cid))
     await publish_job(cid, job_data(uuid.uuid4(), progress=0.1), progress_only=True)
     await publish_job(cid, job_data(uuid.uuid4(), progress=0.1), progress_only=True)
-    await wait_until(lambda: len(got.items) == 2, timeout=0.2)
+    await wait_until(lambda: len(got.items) == 2, timeout=2)
+    await got.close()
+
+
+async def test_a_trail_is_dropped_when_another_process_takes_the_next_window(valkey):
+    cid, jid = uuid.uuid4(), uuid.uuid4()
+    key = f"{pubsub.THROTTLE_PREFIX}:job:{jid}"
+    got = Collector(listen_jobs(cid))
+    await got.subscribed(valkey, jobs_channel(cid))
+    await valkey.set(key, "1", px=300)  # another process's window
+    await publish_job(cid, job_data(jid, progress=0.1), progress_only=True)  # a trail, waiting
+    assert key in pubsub._TRAILING
+    await asyncio.sleep(0.15)
+    await valkey.delete(key)  # that window ends ...
+    await valkey.set(key, "1", px=5000)  # ... and the other process takes the next one first
+    await asyncio.sleep(0.5)  # the trail woke, lost the acquire and was dropped
+    assert got.items == [] and key not in pubsub._TRAILING
     await got.close()
 
 
@@ -471,6 +488,77 @@ async def test_no_valkey_skips_the_job_event_select(db, no_valkey, monkeypatch, 
     db.add(_job_row(c))
     await db.commit()
     assert "after-commit callback failed" not in caplog.text
+
+
+async def test_orm_writes_choose_status_or_progress_events(db, valkey, monkeypatch):
+    """With a 30 s window and the throttle key held, only a status event
+    can arrive in time: a misclassified ORM change would show."""
+    import app.jobs  # noqa: F401
+    from app.domain.enums import JobStatus
+
+    monkeypatch.setattr(pubsub, "JOB_PROGRESS_WINDOW_S", 30)
+    c = await _campaign(db)
+    got = Collector(listen_jobs(c.id))
+    await got.subscribed(valkey, jobs_channel(c.id))
+    row = _job_row(c)
+    db.add(row)
+    await db.commit()
+    await wait_until(lambda: got.items)  # queued: a new row is a status event
+    key = f"{pubsub.THROTTLE_PREFIX}:job:{row.id}"
+    await valkey.set(key, "1", px=30_000)
+
+    row.stage = "Reading"
+    await db.commit()
+    await asyncio.sleep(0.5)
+    assert len(got.items) == 1  # progress-only: throttled
+    assert key in pubsub._TRAILING
+
+    row.status = JobStatus.CANCELLED
+    await db.commit()
+    await wait_until(lambda: len(got.items) == 2, timeout=0.5)
+    assert got.items[1][1]["status"] == "cancelled" and got.items[1][1]["stage"] == "Reading"
+    assert key not in pubsub._TRAILING  # the pending progress was dropped
+    await asyncio.sleep(0.2)
+    assert len(got.items) == 2
+    await got.close()
+
+
+async def test_a_reaper_pass_publishes_the_requeue(db, monkeypatch):
+    import fakeredis as fr
+    from datetime import datetime, timedelta, timezone
+
+    import sqlalchemy as sa
+
+    import app.jobs  # noqa: F401
+    from app.core.config import get_settings
+    from app.db.models import Job
+    from app.domain.enums import JobStatus
+    from app.jobs import worker
+    from tests.conftest import TEST_DB_URL
+
+    calls: list[tuple] = []
+
+    async def record(campaign_id, event, *, progress_only=False):
+        calls.append((campaign_id, dict(event), progress_only))
+
+    monkeypatch.setattr(get_settings(), "database_url", TEST_DB_URL)
+    monkeypatch.setattr(worker.aioredis, "from_url", lambda *a, **kw: fr.FakeAsyncRedis(decode_responses=True))
+    monkeypatch.setattr(pubsub, "publish_job", record)
+    c = await _campaign(db)
+    now = datetime.now(timezone.utc)
+    row = _job_row(c)
+    row.status, row.attempts, row.worker_id = JobStatus.RUNNING, 1, "gone-worker"
+    row.started_at, row.heartbeat_at = now - timedelta(seconds=100), now - timedelta(seconds=61)
+    db.add(row)
+    await db.commit()
+    await db.execute(sa.update(Job).where(Job.id == row.id).values(created_at=now - timedelta(seconds=600)))
+    await db.commit()
+    calls.clear()
+
+    reaper = worker.Reaper("x", connection=fr.FakeRedis(server=fr.FakeServer()))
+    assert await asyncio.to_thread(reaper.tick) is not None
+    mine = [(e, p) for cid, e, p in calls if e["job_id"] == str(row.id)]
+    assert any(e["status"] == "queued" and e["error_code"] == "interrupted" and not p for e, p in mine), calls
 
 
 async def test_a_worker_run_publishes_running_then_done(db, valkey, fast_windows):

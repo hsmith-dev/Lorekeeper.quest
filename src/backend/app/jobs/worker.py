@@ -372,13 +372,14 @@ def _reporter(session_factory: async_sessionmaker[AsyncSession], job: Job, worke
         try:
             async with session_factory() as s:
                 await s.execute(sa.text(f"SET LOCAL lock_timeout = '{_LOCK_TIMEOUT}'"))
-                await s.execute(
+                result = await s.execute(
                     sa.update(Job)
                     .where(Job.id == job.id, Job.status == JobStatus.RUNNING, Job.worker_id == worker_id)
                     .values(**values)
                     .execution_options(synchronize_session=False)
                 )
-                events.queue_job_event(s, job.id, status_changed=False)  # raw UPDATE (E0-Jobs.6)
+                if result.rowcount:  # still running and ours
+                    events.queue_job_event(s, job.id, status_changed=False)  # raw UPDATE (E0-Jobs.6)
                 await s.commit()
         except DBAPIError as exc:
             if getattr(exc.orig, "sqlstate", None) != _LOCK_NOT_AVAILABLE:
@@ -871,7 +872,10 @@ class Reaper:
             finally:
                 await pubsub.flush_pending()
                 set_valkey(previous)
-                await valkey.aclose()
+                try:
+                    await valkey.aclose()
+                except Exception:
+                    logger.warning("reaper valkey close failed", exc_info=True)
                 await engine.dispose()
 
 

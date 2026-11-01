@@ -22,7 +22,8 @@ invalidation) and `live` (data: the message). The listeners yield
 its Valkey key (`SET NX PX`, shared by every process) is free; otherwise the
 latest value is kept in this process and one trailing publish goes out when
 the window ends (a trailing task on the running loop), so the last value is
-never lost. Two throttles:
+never lost. If another process takes the next window first, its publish is
+the newer one and this process's trail is dropped unsent. Two throttles:
 
 * `publish_job(..., progress_only=True)`: at most one per Job per
   JOB_PROGRESS_WINDOW_S. A status change (`progress_only=False`, the
@@ -155,25 +156,26 @@ async def _acquire(client: Any, key: str, window_s: float) -> bool:
 
 
 async def _run_trail(key: str, trail: _Trail) -> None:
+    """Wait for the window to end, then take the next one and send the
+    latest value. When another process took the next window first, its
+    publish is newer than this trail, so the trail is dropped unsent (k
+    processes never each re-send a window apart)."""
     try:
-        while True:
-            client = _client()
-            if client is None:
-                return
-            try:
-                ttl_ms = await asyncio.wait_for(client.pttl(key), PUBLISH_TIMEOUT_S)
-                if ttl_ms is not None and ttl_ms > 0:
-                    await asyncio.sleep(ttl_ms / 1000)
-                if await _acquire(client, key, trail.window_s):
-                    break
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.warning(json.dumps({"event": "pubsub_throttle_failed", "channel": trail.channel}),
-                               exc_info=True)
-                return
-            # Another process took the next window first: wait for it to end.
-            await asyncio.sleep(0.01)
+        client = _client()
+        if client is None:
+            return
+        try:
+            ttl_ms = await asyncio.wait_for(client.pttl(key), PUBLISH_TIMEOUT_S)
+            if ttl_ms is not None and ttl_ms > 0:
+                await asyncio.sleep(ttl_ms / 1000)
+            if not await _acquire(client, key, trail.window_s):
+                return  # another process's newer publish holds the window
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning(json.dumps({"event": "pubsub_throttle_failed", "channel": trail.channel}),
+                           exc_info=True)
+            return
         if _TRAILING.get(key) is trail:
             _TRAILING.pop(key, None)
         await _send(client, trail.channel, trail.message)
