@@ -1,0 +1,896 @@
+# Lorekeeper licence register: the inventory of everything we ship.
+#
+# Checked by scripts/check-licenses.py --register (.github/workflows/license-check.yml)
+# against the rules in .github/license-policy.toml, in both editions
+# (LOREKEEPER_EDITION = agpl | commercial; commercial is strict).
+# Any PR that adds or changes a dependency, image, apt library, model, voice or
+# font updates this file in the same PR.
+#
+# Entry fields:
+#   name, kind (python | npm | image | apt | model | voice | font), version
+#   (informational; several versions comma-separated), license (SPDX),
+#   source_url, editions (subset of [agpl, commercial]), notes.
+#   model / voice / font: also `artifact` (repo path) or `download` (URL), plus `sha256`.
+#   Optional: images (shipped images that carry it), scanned_license (the raw
+#   metadata string, when it is not SPDX or is wrong), pip_package (a model
+#   shipped as a pip package).
+#
+# GPL-family entries are allowed only with editions: [agpl] and images: [tts].
+# The NVIDIA CUDA wheels pulled in by CUDA torch are deliberately NOT
+# registered (E0-QA.8 / E0-Platform.2 own them), so a CUDA image scan fails.
+#
+# Stubs for unregistered packages:
+#   python scripts/check-licenses.py --python-env --register licenses/register.yaml --emit-missing
+#
+# Python and npm rows are one line each (flow style) to keep the diff per
+# package to one line.
+
+entries:
+  # ---- base images (the five shipped image families, plus the build stage) ----
+  - name: python
+    kind: image
+    version: "3.11-slim"
+    license: PSF-2.0
+    source_url: https://hub.docker.com/_/python
+    editions: [agpl, commercial]
+    images: [backend]
+    notes: >-
+      Base of src/backend/Dockerfile(.prod). Covers CPython only; the Debian
+      packages inside the image (and apt installs: build-essential, libpq-dev)
+      are scanned by E0-QA.8 (dpkg-query + copyright files).
+  - name: pgvector/pgvector
+    kind: image
+    version: "pg16"
+    license: PostgreSQL
+    source_url: https://hub.docker.com/r/pgvector/pgvector
+    editions: [agpl, commercial]
+    images: [postgres]
+    notes: PostgreSQL 16 plus the pgvector extension, both under the PostgreSQL licence. Used unmodified.
+  - name: redis
+    kind: image
+    version: "7-alpine"
+    license: LicenseRef-RSALv2 OR SSPL-1.0
+    source_url: https://hub.docker.com/_/redis
+    editions: [agpl, commercial]
+    images: [redis]
+    notes: >-
+      docker-compose uses redis:7-alpine, which resolves to Redis 7.4.x
+      (verified 7.4.12): dual RSALv2 / SSPLv1, not OSI-approved. Redis 7.2.x
+      was the last BSD-3-Clause release. Covered by an [[exception]] marked
+      OWNER TO CONFIRM; permissive options: pin redis:7.2-alpine or switch to
+      valkey/valkey (BSD-3-Clause).
+  - name: nginx
+    kind: image
+    version: "1.27-alpine"
+    license: BSD-2-Clause
+    source_url: https://hub.docker.com/_/nginx
+    editions: [agpl, commercial]
+    images: [nginx]
+    notes: Base of nginx/Dockerfile (serves the built frontend). Alpine packages (openssl etc.) are scanned by E0-QA.8.
+  - name: ollama/ollama
+    kind: image
+    version: "latest"
+    license: MIT
+    source_url: https://hub.docker.com/r/ollama/ollama
+    editions: [agpl, commercial]
+    images: [ollama]
+    notes: Ollama (MIT) with llama.cpp (MIT). Used unmodified; models are installed at runtime (see model entries).
+  - name: node
+    kind: image
+    version: "20-alpine"
+    license: MIT
+    source_url: https://hub.docker.com/_/node
+    editions: [agpl, commercial]
+    notes: Build stage only (nginx/Dockerfile builder, src/frontend/Dockerfile dev image); not present in a shipped image.
+
+  # ---- apt / bundled system libraries ----
+  - name: espeak-ng
+    kind: apt
+    version: "1.52"
+    license: GPL-3.0-or-later
+    source_url: https://github.com/espeak-ng/espeak-ng
+    editions: [agpl]
+    images: [tts]
+    notes: >-
+      LIC-1. G2P fallback for Kokoro TTS, bundled by espeakng-loader and pulled
+      in by kokoro / kokoro-onnx / misaki. Excluded from the commercial build:
+      it exists only in the optional AGPL-only `tts` container, and no backend
+      image may install kokoro, kokoro-onnx, misaki, phonemizer or
+      espeakng-loader. Without it fantasy proper nouns are silently dropped.
+      Deferred spike: a non-GPL pronunciation path (Entity-name lexicon as
+      Kokoro phoneme overrides). Legal review is an owner action.
+
+  # ---- models ----
+  - name: all-MiniLM-L6-v2
+    kind: model
+    version: "1110a243fdf4706b3f48f1d95db1a4f5529b4d41"
+    license: Apache-2.0
+    source_url: https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2
+    download: https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/1110a243fdf4706b3f48f1d95db1a4f5529b4d41/model.safetensors
+    sha256: 53aa51172d142c89d9012cce15ae4d6cc0ca6895895114379cacb4fab128d9db
+    editions: [agpl, commercial]
+    images: [backend]
+    notes: Embeddings (app/services/embedding_service.py). Downloaded by sentence-transformers on first use; sha256 is model.safetensors.
+  - name: en_core_web_trf
+    kind: model
+    version: "3.7.3"
+    license: MIT
+    source_url: https://github.com/explosion/spacy-models/releases/tag/en_core_web_trf-3.7.3
+    download: https://github.com/explosion/spacy-models/releases/download/en_core_web_trf-3.7.3/en_core_web_trf-3.7.3-py3-none-any.whl
+    sha256: f72abb34bdf174876bd4267b29b2501677e605e0a251fdc56c163003182ed68b
+    pip_package: en-core-web-trf
+    editions: [agpl, commercial]
+    images: [backend]
+    notes: >-
+      spaCy NER (app/services/nlp_service.py), baked into the backend image by
+      `spacy download` in the Dockerfile (3.7.3 is what spacy 3.7.6 resolves).
+      Ships as a pip package, so image scans match it via pip_package. Based on
+      roberta-base (MIT).
+  - name: whisper-base
+    kind: model
+    version: "base"
+    license: MIT
+    source_url: https://github.com/openai/whisper
+    download: https://openaipublic.azureedge.net/main/whisper/models/ed3a0b6b1c0edf879ad9b11b1af5a0e6ab5db9205f891f668f8b0e6c6326e34e/base.pt
+    sha256: ed3a0b6b1c0edf879ad9b11b1af5a0e6ab5db9205f891f668f8b0e6c6326e34e
+    editions: [agpl, commercial]
+    images: [backend]
+    notes: Transcription (app/services/transcription_service.py, whisper.load_model("base")). Downloaded on first use.
+  - name: easyocr-craft-mlt-25k
+    kind: model
+    version: "pre-v1.1.6"
+    license: MIT
+    source_url: https://github.com/clovaai/CRAFT-pytorch
+    download: https://github.com/JaidedAI/EasyOCR/releases/download/pre-v1.1.6/craft_mlt_25k.zip
+    sha256: 8dc6a1c703a89ed56308ef742d26ebd45c656248cbbbda6e7fe60e569f873e65
+    editions: [agpl, commercial]
+    images: [backend]
+    notes: EasyOCR "en" text detector (CRAFT, Clova AI, MIT). With easyocr-english-g2 this is the EasyOCR en model (app/services/vision_service.py). Downloaded on first use.
+  - name: easyocr-english-g2
+    kind: model
+    version: "v1.3"
+    license: Apache-2.0
+    source_url: https://github.com/JaidedAI/EasyOCR
+    download: https://github.com/JaidedAI/EasyOCR/releases/download/v1.3/english_g2.zip
+    sha256: 1b5eaebf1c062de6205560c97ffcfa8dc0e6f413c340e8adc5cfc57e159f61ff
+    editions: [agpl, commercial]
+    images: [backend]
+    notes: EasyOCR "en" recogniser (JaidedAI, Apache-2.0). Downloaded on first use.
+  - name: lorekeeper-7b-q4
+    kind: model
+    version: "d7c9c8fd0309c15f718e908a2465c87104567344"
+    license: Apache-2.0
+    source_url: https://huggingface.co/harrisonsmith/Lorekeeper-Mistral-7B-GGUF
+    download: https://huggingface.co/harrisonsmith/Lorekeeper-Mistral-7B-GGUF/resolve/d7c9c8fd0309c15f718e908a2465c87104567344/lorekeeper-7b-q4.gguf
+    sha256: 1a1198f7c188d3a8d8a2a1a4c5d65eb8f35f714d974d24805ce4446300d249ed
+    editions: [agpl, commercial]
+    images: [ollama]
+    notes: >-
+      The Lorekeeper fine-tune (LoRA on Mistral-7B-Instruct, Apache-2.0),
+      merged and quantised to GGUF; published by src/ml/scripts/publish_to_hub.py
+      and installed into Ollama by app/services/ollama_service.py.
+  - name: mistral-7b-instruct-q4_0
+    kind: model
+    version: "7b-instruct-q4_0"
+    license: Apache-2.0
+    source_url: https://ollama.com/library/mistral
+    download: https://registry.ollama.ai/v2/library/mistral/blobs/sha256:2a9b718fde09b9237da3edde181fb74d8731f09d5ae5f9478d95af1932feda4b
+    sha256: 2a9b718fde09b9237da3edde181fb74d8731f09d5ae5f9478d95af1932feda4b
+    editions: [agpl, commercial]
+    images: [ollama]
+    notes: Un-fine-tuned base (ollama_service.BASE_LIBRARY_REF), optionally pulled from the Ollama library for comparison.
+
+  # ---- fonts ----
+  - name: Cinzel (landing page)
+    kind: font
+    version: "700"
+    license: OFL-1.1
+    source_url: https://fonts.google.com/specimen/Cinzel
+    artifact: site/fonts/cinzel-700.woff2
+    sha256: f266c0cab0426b5034c4607692d2973c66fb357467e168d11abcc1a6abd01379
+    editions: [agpl, commercial]
+    notes: Self-hosted by the GitHub Pages landing page (site/styles.css).
+  - name: Cormorant Garamond (landing page)
+    kind: font
+    version: "500-700"
+    license: OFL-1.1
+    source_url: https://fonts.google.com/specimen/Cormorant+Garamond
+    artifact: site/fonts/cormorant.woff2
+    sha256: 5d618c462b7a5b74f442e1548880086af71764d9cc7d35c16ab45353da934621
+    editions: [agpl, commercial]
+    notes: Self-hosted by the landing page (site/styles.css).
+  - name: Cormorant Garamond Italic (landing page)
+    kind: font
+    version: "500-600 italic"
+    license: OFL-1.1
+    source_url: https://fonts.google.com/specimen/Cormorant+Garamond
+    artifact: site/fonts/cormorant-italic.woff2
+    sha256: e6d6d1d73858aa9b66f3a3539f9dec22faab2276e61ad1d813bc04dd59c9c122
+    editions: [agpl, commercial]
+    notes: Self-hosted by the landing page (site/styles.css).
+  - name: Geist (landing page)
+    kind: font
+    version: "400-700"
+    license: OFL-1.1
+    source_url: https://github.com/vercel/geist-font
+    artifact: site/fonts/geist.woff2
+    sha256: 9b6f5ff45b278c744b5f379a2c4ecbaf858a842b8eaf82ac8d21b699ca16c608
+    editions: [agpl, commercial]
+    notes: Self-hosted by the landing page (site/styles.css).
+  - name: Geist Mono (landing page)
+    kind: font
+    version: "400-500"
+    license: OFL-1.1
+    source_url: https://github.com/vercel/geist-font
+    artifact: site/fonts/geist-mono.woff2
+    sha256: 5f3d6ad60f29d6cb708414ec6887163d63bf197377ef5417d2483ff31ace6c3b
+    editions: [agpl, commercial]
+    notes: Self-hosted by the landing page (site/styles.css).
+  - name: Cinzel (app)
+    kind: font
+    version: "v26 400-700"
+    license: OFL-1.1
+    source_url: https://fonts.google.com/specimen/Cinzel
+    download: https://fonts.gstatic.com/s/cinzel/v26/8vIJ7ww63mVu7gt79mT7PkRXMw.woff2
+    sha256: ef95296c778719c3d658a8284d65078100450948851b9114485ada01d9d3d3f8
+    editions: [agpl, commercial]
+    notes: >-
+      Loaded by the browser from Google Fonts (src/frontend/index.html), not
+      bundled. sha256 is the latin variable woff2 at registration; Google may
+      re-version it.
+  - name: Cinzel Decorative (app)
+    kind: font
+    version: "v19 400"
+    license: OFL-1.1
+    source_url: https://fonts.google.com/specimen/Cinzel+Decorative
+    download: https://fonts.gstatic.com/s/cinzeldecorative/v19/daaCSScvJGqLYhG8nNt8KPPswUAPni7TTMxpazyD.woff2
+    sha256: 1d446b27182808887ad6ce0e71c94fb38ff52bc4c82e4babe390e3b019a0d5ef
+    editions: [agpl, commercial]
+    notes: Loaded from Google Fonts (src/frontend/index.html); latin 400 woff2.
+  - name: Cinzel Decorative Bold (app)
+    kind: font
+    version: "v19 700"
+    license: OFL-1.1
+    source_url: https://fonts.google.com/specimen/Cinzel+Decorative
+    download: https://fonts.gstatic.com/s/cinzeldecorative/v19/daaHSScvJGqLYhG8nNt8KPPswUAPniZoadlESTGplhXF.woff2
+    sha256: 9f36288a4e7497c602cce217167ec011ee4fc50156f0362abf4576e24ad33763
+    editions: [agpl, commercial]
+    notes: Loaded from Google Fonts (src/frontend/index.html); latin 700 woff2.
+  - name: Crimson Text (app)
+    kind: font
+    version: "v19 400"
+    license: OFL-1.1
+    source_url: https://fonts.google.com/specimen/Crimson+Text
+    download: https://fonts.gstatic.com/s/crimsontext/v19/wlp2gwHKFkZgtmSR3NB0oRJfbwhTIfFd3A.woff2
+    sha256: aac0df38a2b744060a432018c9b8179ac33a09f381f4d7e804a9b638f173af29
+    editions: [agpl, commercial]
+    notes: Loaded from Google Fonts (src/frontend/index.html); latin 400 woff2.
+  - name: Crimson Text Italic (app)
+    kind: font
+    version: "v19 400 italic"
+    license: OFL-1.1
+    source_url: https://fonts.google.com/specimen/Crimson+Text
+    download: https://fonts.gstatic.com/s/crimsontext/v19/wlpogwHKFkZgtmSR3NB0oRJfajhRK_Z_3rhH.woff2
+    sha256: 381a244e30f7b32581984c81692d9a3b4babcb7e4a308d9bd7c62bf7866450d1
+    editions: [agpl, commercial]
+    notes: Loaded from Google Fonts (src/frontend/index.html); latin 400 italic woff2.
+  - name: Crimson Text SemiBold (app)
+    kind: font
+    version: "v19 600"
+    license: OFL-1.1
+    source_url: https://fonts.google.com/specimen/Crimson+Text
+    download: https://fonts.gstatic.com/s/crimsontext/v19/wlppgwHKFkZgtmSR3NB0oRJXsCxGDNNQ9rJPfw.woff2
+    sha256: 94af206059c4451965b7378671139cd22e1a21c3f20d546132789f8a81352875
+    editions: [agpl, commercial]
+    notes: Loaded from Google Fonts (src/frontend/index.html); latin 600 woff2.
+
+  # ---- python: CI CPU-torch install of src/backend/requirements.txt (+ baked model deps) ----
+  - {name: "alembic", kind: python, version: "1.13.3", license: "MIT", source_url: "https://pypi.org/project/alembic/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "annotated-doc", kind: python, version: "0.0.5", license: "MIT", source_url: "https://pypi.org/project/annotated-doc/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "annotated-types", kind: python, version: "0.8.0", license: "MIT", source_url: "https://pypi.org/project/annotated-types/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "anyio", kind: python, version: "4.15.1", license: "MIT", source_url: "https://pypi.org/project/anyio/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "async-timeout", kind: python, version: "5.0.1", license: "Apache-2.0", source_url: "https://pypi.org/project/async-timeout/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "asyncpg", kind: python, version: "0.29.0", license: "Apache-2.0", source_url: "https://pypi.org/project/asyncpg/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "bcrypt", kind: python, version: "4.2.0", license: "Apache-2.0", source_url: "https://pypi.org/project/bcrypt/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "blis", kind: python, version: "0.7.11", license: "BSD-3-Clause", source_url: "https://pypi.org/project/blis/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "catalogue", kind: python, version: "2.0.10", license: "MIT", source_url: "https://pypi.org/project/catalogue/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "certifi", kind: python, version: "2026.10.23", license: "MPL-2.0", source_url: "https://pypi.org/project/certifi/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "cffi", kind: python, version: "2.1.1", license: "MIT-0", source_url: "https://pypi.org/project/cffi/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "charset-normalizer", kind: python, version: "3.5.2", license: "MIT", source_url: "https://pypi.org/project/charset-normalizer/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "click", kind: python, version: "8.5.0", license: "BSD-3-Clause", source_url: "https://pypi.org/project/click/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "cloudpathlib", kind: python, version: "0.26.0", license: "MIT", source_url: "https://pypi.org/project/cloudpathlib/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "cloudpickle", kind: python, version: "3.1.2", license: "BSD-3-Clause", source_url: "https://pypi.org/project/cloudpickle/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "confection", kind: python, version: "0.1.5", license: "MIT", source_url: "https://pypi.org/project/confection/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "cryptography", kind: python, version: "50.0.2", license: "Apache-2.0 OR BSD-3-Clause", source_url: "https://pypi.org/project/cryptography/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "cymem", kind: python, version: "2.0.16", license: "MIT", source_url: "https://pypi.org/project/cymem/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "defusedxml", kind: python, version: "0.7.1", license: "PSF-2.0", source_url: "https://pypi.org/project/defusedxml/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "Deprecated", kind: python, version: "1.3.1", license: "MIT", source_url: "https://pypi.org/project/Deprecated/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "dnspython", kind: python, version: "2.9.1", license: "ISC", source_url: "https://pypi.org/project/dnspython/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "easyocr", kind: python, version: "1.7.2", license: "Apache-2.0", source_url: "https://pypi.org/project/easyocr/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "ecdsa", kind: python, version: "0.19.2", license: "MIT", source_url: "https://pypi.org/project/ecdsa/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "email-validator", kind: python, version: "2.3.0", license: "Unlicense", source_url: "https://pypi.org/project/email-validator/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "fastapi", kind: python, version: "0.115.0", license: "MIT", source_url: "https://pypi.org/project/fastapi/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "filelock", kind: python, version: "4.2.6", license: "MIT", source_url: "https://pypi.org/project/filelock/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "fonttools", kind: python, version: "4.68.0", license: "MIT", source_url: "https://pypi.org/project/fonttools/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "fpdf2", kind: python, version: "2.8.7", license: "LGPL-3.0-only", source_url: "https://pypi.org/project/fpdf2/", editions: [agpl, commercial], images: [backend], notes: "Direct dep (PDF export). LGPL-3.0, imported unmodified; owner-approved [[exception]] (OWNER TO CONFIRM, E0-QA.9). E8 replaces it with WeasyPrint."}
+  - {name: "fsspec", kind: python, version: "2026.9.0", license: "BSD-3-Clause", source_url: "https://pypi.org/project/fsspec/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "greenlet", kind: python, version: "3.5.6", license: "MIT AND PSF-2.0", source_url: "https://pypi.org/project/greenlet/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "gunicorn", kind: python, version: "23.0.0", license: "MIT", source_url: "https://pypi.org/project/gunicorn/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "h11", kind: python, version: "0.16.0", license: "MIT", source_url: "https://pypi.org/project/h11/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "hf-xet", kind: python, version: "1.8.0", license: "Apache-2.0", source_url: "https://pypi.org/project/hf-xet/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "httpcore", kind: python, version: "1.0.9", license: "BSD-3-Clause", source_url: "https://pypi.org/project/httpcore/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "httpcore2", kind: python, version: "2.16.0", license: "BSD-3-Clause", source_url: "https://pypi.org/project/httpcore2/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "httptools", kind: python, version: "0.9.0", license: "MIT", source_url: "https://pypi.org/project/httptools/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "httpx", kind: python, version: "0.27.2", license: "BSD-3-Clause", source_url: "https://pypi.org/project/httpx/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "httpx2", kind: python, version: "2.16.0", license: "BSD-3-Clause", source_url: "https://pypi.org/project/httpx2/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "huggingface_hub", kind: python, version: "2.4.0", license: "Apache-2.0", source_url: "https://pypi.org/project/huggingface_hub/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "idna", kind: python, version: "3.20", license: "BSD-3-Clause", source_url: "https://pypi.org/project/idna/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "ImageIO", kind: python, version: "2.38.1", license: "BSD-2-Clause", source_url: "https://pypi.org/project/ImageIO/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "Jinja2", kind: python, version: "3.1.6", license: "BSD-3-Clause", source_url: "https://pypi.org/project/Jinja2/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "joblib", kind: python, version: "1.6.0", license: "BSD-3-Clause", source_url: "https://pypi.org/project/joblib/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "langcodes", kind: python, version: "3.5.1", license: "MIT", source_url: "https://pypi.org/project/langcodes/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "lazy-loader", kind: python, version: "0.6", license: "BSD-3-Clause", source_url: "https://pypi.org/project/lazy-loader/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "limits", kind: python, version: "5.8.0", license: "MIT", source_url: "https://pypi.org/project/limits/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "llvmlite", kind: python, version: "0.50.0", license: "BSD-2-Clause AND Apache-2.0 WITH LLVM-exception", source_url: "https://pypi.org/project/llvmlite/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "Mako", kind: python, version: "1.4.3", license: "MIT", source_url: "https://pypi.org/project/Mako/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "markdown-it-py", kind: python, version: "4.2.0", license: "MIT", source_url: "https://pypi.org/project/markdown-it-py/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "MarkupSafe", kind: python, version: "3.0.4", license: "BSD-3-Clause", source_url: "https://pypi.org/project/MarkupSafe/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "mdurl", kind: python, version: "0.1.2", license: "MIT", source_url: "https://pypi.org/project/mdurl/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "more-itertools", kind: python, version: "11.2.1", license: "MIT", source_url: "https://pypi.org/project/more-itertools/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "mpmath", kind: python, version: "1.3.0", license: "BSD-3-Clause", source_url: "https://pypi.org/project/mpmath/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "murmurhash", kind: python, version: "1.0.16", license: "MIT", source_url: "https://pypi.org/project/murmurhash/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "narwhals", kind: python, version: "2.28.0", license: "MIT", source_url: "https://pypi.org/project/narwhals/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "networkx", kind: python, version: "3.6.1", license: "BSD-3-Clause", source_url: "https://pypi.org/project/networkx/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "ninja", kind: python, version: "1.13.2", license: "Apache-2.0", source_url: "https://pypi.org/project/ninja/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "numba", kind: python, version: "0.68.1", license: "BSD-2-Clause", scanned_license: "BSD License", source_url: "https://pypi.org/project/numba/", editions: [agpl, commercial], images: [backend], notes: "Metadata trove classifier 'BSD License'; upstream LICENSE is BSD-2-Clause."}
+  - {name: "numpy", kind: python, version: "1.26.4", license: "BSD-3-Clause", source_url: "https://pypi.org/project/numpy/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "openai-whisper", kind: python, version: "20250625", license: "MIT", source_url: "https://pypi.org/project/openai-whisper/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "opencv-python-headless", kind: python, version: "4.11.0.86", license: "Apache-2.0", source_url: "https://pypi.org/project/opencv-python-headless/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "packaging", kind: python, version: "26.3", license: "Apache-2.0 OR BSD-2-Clause", source_url: "https://pypi.org/project/packaging/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "pgvector", kind: python, version: "0.4.2", license: "MIT", source_url: "https://pypi.org/project/pgvector/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "pillow", kind: python, version: "13.0.0", license: "MIT-CMU", source_url: "https://pypi.org/project/pillow/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "preshed", kind: python, version: "3.0.15", license: "MIT", source_url: "https://pypi.org/project/preshed/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "pyasn1", kind: python, version: "0.6.5", license: "BSD-2-Clause", source_url: "https://pypi.org/project/pyasn1/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "pyclipper", kind: python, version: "1.4.0", license: "MIT", scanned_license: "OSI Approved; MIT License", source_url: "https://pypi.org/project/pyclipper/", editions: [agpl, commercial], images: [backend], notes: "Metadata lists the generic 'OSI Approved' classifier plus MIT."}
+  - {name: "pycparser", kind: python, version: "3.12", license: "BSD-3-Clause", source_url: "https://pypi.org/project/pycparser/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "pydantic", kind: python, version: "2.9.0", license: "MIT", source_url: "https://pypi.org/project/pydantic/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "pydantic-settings", kind: python, version: "2.5.0", license: "MIT", source_url: "https://pypi.org/project/pydantic-settings/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "pydantic_core", kind: python, version: "2.23.2", license: "MIT", source_url: "https://pypi.org/project/pydantic_core/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "Pygments", kind: python, version: "2.21.0", license: "BSD-2-Clause", source_url: "https://pypi.org/project/Pygments/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "pypdf", kind: python, version: "6.14.2", license: "BSD-3-Clause", source_url: "https://pypi.org/project/pypdf/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "python-bidi", kind: python, version: "0.6.12", license: "LGPL-3.0-or-later", scanned_license: "GNU Library or Lesser General Public License (LGPL)", source_url: "https://pypi.org/project/python-bidi/", editions: [agpl, commercial], images: [backend], notes: "Transitive via easyocr. LGPL-3.0, compiled extension imported unmodified; [[exception]] (OWNER TO CONFIRM, E0-QA.9). E0-Platform moves it to the ml image."}
+  - {name: "python-dotenv", kind: python, version: "1.2.4", license: "BSD-3-Clause", source_url: "https://pypi.org/project/python-dotenv/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "python-jose", kind: python, version: "3.3.0", license: "MIT", source_url: "https://pypi.org/project/python-jose/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "python-multipart", kind: python, version: "0.0.12", license: "Apache-2.0", source_url: "https://pypi.org/project/python-multipart/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "PyYAML", kind: python, version: "6.0.3", license: "MIT", source_url: "https://pypi.org/project/PyYAML/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "redis", kind: python, version: "5.1.0", license: "MIT", source_url: "https://pypi.org/project/redis/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "regex", kind: python, version: "2026.9.29", license: "Apache-2.0 AND CNRI-Python", source_url: "https://pypi.org/project/regex/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "requests", kind: python, version: "2.34.2", license: "Apache-2.0", source_url: "https://pypi.org/project/requests/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "rich", kind: python, version: "15.0.0", license: "MIT", source_url: "https://pypi.org/project/rich/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "rsa", kind: python, version: "4.9.1", license: "Apache-2.0", source_url: "https://pypi.org/project/rsa/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "safetensors", kind: python, version: "0.8.0", license: "Apache-2.0", source_url: "https://pypi.org/project/safetensors/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "scikit-image", kind: python, version: "0.26.0", license: "BSD-3-Clause", source_url: "https://pypi.org/project/scikit-image/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "scikit-learn", kind: python, version: "1.9.1", license: "BSD-3-Clause", source_url: "https://pypi.org/project/scikit-learn/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "scipy", kind: python, version: "1.17.1", license: "BSD-3-Clause", source_url: "https://pypi.org/project/scipy/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "sentence-transformers", kind: python, version: "5.5.1", license: "Apache-2.0", source_url: "https://pypi.org/project/sentence-transformers/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "shapely", kind: python, version: "2.2.0", license: "BSD-3-Clause", source_url: "https://pypi.org/project/shapely/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "shellingham", kind: python, version: "1.5.4", license: "ISC", source_url: "https://pypi.org/project/shellingham/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "six", kind: python, version: "1.17.0", license: "MIT", source_url: "https://pypi.org/project/six/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "slowapi", kind: python, version: "0.1.9", license: "MIT", source_url: "https://pypi.org/project/slowapi/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "smart_open", kind: python, version: "7.7.1", license: "MIT", source_url: "https://pypi.org/project/smart_open/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "sniffio", kind: python, version: "1.3.1", license: "MIT OR Apache-2.0", source_url: "https://pypi.org/project/sniffio/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "spacy", kind: python, version: "3.7.6", license: "MIT", source_url: "https://pypi.org/project/spacy/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "spacy-legacy", kind: python, version: "3.0.12", license: "MIT", source_url: "https://pypi.org/project/spacy-legacy/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "spacy-loggers", kind: python, version: "1.0.5", license: "MIT", source_url: "https://pypi.org/project/spacy-loggers/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "SQLAlchemy", kind: python, version: "2.0.35", license: "MIT", source_url: "https://pypi.org/project/SQLAlchemy/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "srsly", kind: python, version: "2.5.5", license: "MIT", source_url: "https://pypi.org/project/srsly/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "starlette", kind: python, version: "0.38.6", license: "BSD-3-Clause", source_url: "https://pypi.org/project/starlette/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "stripe", kind: python, version: "15.4.0", license: "MIT", source_url: "https://pypi.org/project/stripe/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "sympy", kind: python, version: "1.14.0", license: "BSD-3-Clause", source_url: "https://pypi.org/project/sympy/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "thinc", kind: python, version: "8.2.5", license: "MIT", source_url: "https://pypi.org/project/thinc/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "threadpoolctl", kind: python, version: "3.7.0", license: "BSD-3-Clause", source_url: "https://pypi.org/project/threadpoolctl/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "tifffile", kind: python, version: "2026.3.3", license: "BSD-3-Clause", source_url: "https://pypi.org/project/tifffile/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "tiktoken", kind: python, version: "0.14.0", license: "MIT", source_url: "https://pypi.org/project/tiktoken/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "tokenizers", kind: python, version: "0.23.3", license: "Apache-2.0", source_url: "https://pypi.org/project/tokenizers/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "torch", kind: python, version: "2.15.0+cpu", license: "Apache-2.0 AND Apache-2.0 WITH LLVM-exception AND BSD-2-Clause AND BSD-3-Clause AND BSL-1.0 AND ISC AND MIT AND Zlib", source_url: "https://pypi.org/project/torch/", editions: [agpl, commercial], images: [backend], notes: "CPU wheel in CI; the CUDA build reports the same licence but drags in NVIDIA proprietary wheels (not registered: E0-QA.8 / E0-Platform.2)."}
+  - {name: "torchvision", kind: python, version: "0.29.2+cpu", license: "BSD-3-Clause", source_url: "https://pypi.org/project/torchvision/", editions: [agpl, commercial], images: [backend], notes: "Metadata says 'BSD'; upstream LICENSE is BSD-3-Clause."}
+  - {name: "tqdm", kind: python, version: "4.70.1", license: "MPL-2.0 AND MIT", source_url: "https://pypi.org/project/tqdm/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "transformers", kind: python, version: "5.22.1", license: "Apache-2.0", source_url: "https://pypi.org/project/transformers/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "triton", kind: python, version: "3.9.0", license: "MIT", source_url: "https://pypi.org/project/triton/", editions: [agpl, commercial], images: [backend], notes: "Pulled by openai-whisper on linux x86_64 even in the CPU-only install (MIT). The CUDA-image question is owned by E0-QA.8 / E0-Platform.2."}
+  - {name: "truststore", kind: python, version: "0.10.5", license: "MIT", source_url: "https://pypi.org/project/truststore/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "typer", kind: python, version: "0.27.3", license: "MIT", source_url: "https://pypi.org/project/typer/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "typer-slim", kind: python, version: "0.24.0", license: "MIT", source_url: "https://pypi.org/project/typer-slim/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "typing_extensions", kind: python, version: "4.16.0", license: "PSF-2.0", source_url: "https://pypi.org/project/typing_extensions/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "tzdata", kind: python, version: "2026.6", license: "Apache-2.0", source_url: "https://pypi.org/project/tzdata/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "urllib3", kind: python, version: "2.8.0", license: "MIT", source_url: "https://pypi.org/project/urllib3/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "uvicorn", kind: python, version: "0.30.0", license: "BSD-3-Clause", source_url: "https://pypi.org/project/uvicorn/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "uvloop", kind: python, version: "0.23.0", license: "Apache-2.0 OR MIT", source_url: "https://pypi.org/project/uvloop/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "wasabi", kind: python, version: "1.1.3", license: "MIT", source_url: "https://pypi.org/project/wasabi/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "watchfiles", kind: python, version: "1.3.0", license: "MIT", source_url: "https://pypi.org/project/watchfiles/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "weasel", kind: python, version: "0.4.3", license: "MIT", source_url: "https://pypi.org/project/weasel/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "websockets", kind: python, version: "17.4", license: "BSD-3-Clause", source_url: "https://pypi.org/project/websockets/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "wrapt", kind: python, version: "2.5.2", license: "BSD-2-Clause", source_url: "https://pypi.org/project/wrapt/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "spacy-curated-transformers", kind: python, version: "0.2.2", license: "MIT", source_url: "https://pypi.org/project/spacy-curated-transformers/", editions: [agpl, commercial], images: [backend], notes: "Dependency of the baked en_core_web_trf model (not in the CI CPU install)."}
+  - {name: "curated-transformers", kind: python, version: "0.1.1", license: "MIT", source_url: "https://pypi.org/project/curated-transformers/", editions: [agpl, commercial], images: [backend], notes: "Dependency of spacy-curated-transformers (baked en_core_web_trf)."}
+  - {name: "curated-tokenizers", kind: python, version: "0.0.10", license: "MIT", source_url: "https://pypi.org/project/curated-tokenizers/", editions: [agpl, commercial], images: [backend], notes: "Dependency of spacy-curated-transformers (baked en_core_web_trf)."}
+  # ---- npm: every package in src/frontend/package-lock.json (license-checker-rseidelsohn) ----
+  - {name: "@alloc/quick-lru", kind: npm, version: "5.2.0", license: "MIT", source_url: "https://github.com/sindresorhus/quick-lru", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@apideck/better-ajv-errors", kind: npm, version: "0.3.7", license: "MIT", source_url: "https://github.com/apideck-libraries/better-ajv-errors", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/code-frame", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/compat-data", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/core", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/generator", kind: npm, version: "7.29.8", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/helper-annotate-as-pure", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/helper-compilation-targets", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/helper-create-class-features-plugin", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/helper-create-regexp-features-plugin", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/helper-define-polyfill-provider", kind: npm, version: "0.6.8", license: "MIT", source_url: "https://github.com/babel/babel-polyfills", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/helper-globals", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/helper-member-expression-to-functions", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/helper-module-imports", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/helper-module-transforms", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/helper-optimise-call-expression", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/helper-plugin-utils", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/helper-remap-async-to-generator", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/helper-replace-supers", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/helper-skip-transparent-expression-wrappers", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/helper-string-parser", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/helper-validator-identifier", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/helper-validator-option", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/helper-wrap-function", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/helpers", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/parser", kind: npm, version: "7.29.8", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/plugin-bugfix-firefox-class-in-computed-class-key", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/plugin-bugfix-safari-class-field-initializer-scope", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/plugin-bugfix-safari-id-destructuring-collision-in-function-expression", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/plugin-bugfix-safari-rest-destructuring-rhs-array", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/plugin-bugfix-v8-spread-parameters-in-optional-chaining", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/plugin-bugfix-v8-static-class-fields-redefine-readonly", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/plugin-proposal-private-property-in-object", kind: npm, version: "7.21.0-placeholder-for-preset-env.2", license: "MIT", source_url: "https://github.com/babel/babel-plugin-proposal-private-property-in-object", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/plugin-syntax-import-assertions", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/plugin-syntax-import-attributes", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/plugin-syntax-unicode-sets-regex", kind: npm, version: "7.18.6", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/plugin-transform-arrow-functions", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/plugin-transform-async-generator-functions", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/plugin-transform-async-to-generator", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/plugin-transform-block-scoped-functions", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/plugin-transform-block-scoping", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/plugin-transform-class-properties", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/plugin-transform-class-static-block", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/plugin-transform-classes", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/plugin-transform-computed-properties", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/plugin-transform-destructuring", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/plugin-transform-dotall-regex", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/plugin-transform-duplicate-keys", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/plugin-transform-duplicate-named-capturing-groups-regex", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/plugin-transform-dynamic-import", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/plugin-transform-explicit-resource-management", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/plugin-transform-exponentiation-operator", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/plugin-transform-export-namespace-from", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/plugin-transform-for-of", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/plugin-transform-function-name", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/plugin-transform-json-strings", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/plugin-transform-literals", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/plugin-transform-logical-assignment-operators", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/plugin-transform-member-expression-literals", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/plugin-transform-modules-amd", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/plugin-transform-modules-commonjs", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/plugin-transform-modules-systemjs", kind: npm, version: "7.29.8", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/plugin-transform-modules-umd", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/plugin-transform-named-capturing-groups-regex", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/plugin-transform-new-target", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/plugin-transform-nullish-coalescing-operator", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/plugin-transform-numeric-separator", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/plugin-transform-object-rest-spread", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/plugin-transform-object-super", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/plugin-transform-optional-catch-binding", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/plugin-transform-optional-chaining", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/plugin-transform-parameters", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/plugin-transform-private-methods", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/plugin-transform-private-property-in-object", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/plugin-transform-property-literals", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/plugin-transform-react-jsx-self", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/plugin-transform-react-jsx-source", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/plugin-transform-regenerator", kind: npm, version: "7.29.8", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/plugin-transform-regexp-modifiers", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/plugin-transform-reserved-words", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/plugin-transform-shorthand-properties", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/plugin-transform-spread", kind: npm, version: "7.29.8", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/plugin-transform-sticky-regex", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/plugin-transform-template-literals", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/plugin-transform-typeof-symbol", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/plugin-transform-unicode-escapes", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/plugin-transform-unicode-property-regex", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/plugin-transform-unicode-regex", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/plugin-transform-unicode-sets-regex", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/preset-env", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/preset-modules", kind: npm, version: "0.1.6-no-external-plugins", license: "MIT", source_url: "https://github.com/babel/preset-modules", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/runtime", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/template", kind: npm, version: "7.29.7", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/traverse", kind: npm, version: "7.29.8", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@babel/types", kind: npm, version: "7.29.8", license: "MIT", source_url: "https://github.com/babel/babel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@esbuild/aix-ppc64", kind: npm, version: "0.21.5", license: "MIT", source_url: "https://www.npmjs.com/package/@esbuild/aix-ppc64", editions: [agpl, commercial], notes: "build-time (devDependency tree); platform-specific optional binary (licence from package-lock.json)"}
+  - {name: "@esbuild/android-arm", kind: npm, version: "0.21.5", license: "MIT", source_url: "https://www.npmjs.com/package/@esbuild/android-arm", editions: [agpl, commercial], notes: "build-time (devDependency tree); platform-specific optional binary (licence from package-lock.json)"}
+  - {name: "@esbuild/android-arm64", kind: npm, version: "0.21.5", license: "MIT", source_url: "https://www.npmjs.com/package/@esbuild/android-arm64", editions: [agpl, commercial], notes: "build-time (devDependency tree); platform-specific optional binary (licence from package-lock.json)"}
+  - {name: "@esbuild/android-x64", kind: npm, version: "0.21.5", license: "MIT", source_url: "https://www.npmjs.com/package/@esbuild/android-x64", editions: [agpl, commercial], notes: "build-time (devDependency tree); platform-specific optional binary (licence from package-lock.json)"}
+  - {name: "@esbuild/darwin-arm64", kind: npm, version: "0.21.5", license: "MIT", source_url: "https://github.com/evanw/esbuild", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@esbuild/darwin-x64", kind: npm, version: "0.21.5", license: "MIT", source_url: "https://www.npmjs.com/package/@esbuild/darwin-x64", editions: [agpl, commercial], notes: "build-time (devDependency tree); platform-specific optional binary (licence from package-lock.json)"}
+  - {name: "@esbuild/freebsd-arm64", kind: npm, version: "0.21.5", license: "MIT", source_url: "https://www.npmjs.com/package/@esbuild/freebsd-arm64", editions: [agpl, commercial], notes: "build-time (devDependency tree); platform-specific optional binary (licence from package-lock.json)"}
+  - {name: "@esbuild/freebsd-x64", kind: npm, version: "0.21.5", license: "MIT", source_url: "https://www.npmjs.com/package/@esbuild/freebsd-x64", editions: [agpl, commercial], notes: "build-time (devDependency tree); platform-specific optional binary (licence from package-lock.json)"}
+  - {name: "@esbuild/linux-arm", kind: npm, version: "0.21.5", license: "MIT", source_url: "https://www.npmjs.com/package/@esbuild/linux-arm", editions: [agpl, commercial], notes: "build-time (devDependency tree); platform-specific optional binary (licence from package-lock.json)"}
+  - {name: "@esbuild/linux-arm64", kind: npm, version: "0.21.5", license: "MIT", source_url: "https://www.npmjs.com/package/@esbuild/linux-arm64", editions: [agpl, commercial], notes: "build-time (devDependency tree); platform-specific optional binary (licence from package-lock.json)"}
+  - {name: "@esbuild/linux-ia32", kind: npm, version: "0.21.5", license: "MIT", source_url: "https://www.npmjs.com/package/@esbuild/linux-ia32", editions: [agpl, commercial], notes: "build-time (devDependency tree); platform-specific optional binary (licence from package-lock.json)"}
+  - {name: "@esbuild/linux-loong64", kind: npm, version: "0.21.5", license: "MIT", source_url: "https://www.npmjs.com/package/@esbuild/linux-loong64", editions: [agpl, commercial], notes: "build-time (devDependency tree); platform-specific optional binary (licence from package-lock.json)"}
+  - {name: "@esbuild/linux-mips64el", kind: npm, version: "0.21.5", license: "MIT", source_url: "https://www.npmjs.com/package/@esbuild/linux-mips64el", editions: [agpl, commercial], notes: "build-time (devDependency tree); platform-specific optional binary (licence from package-lock.json)"}
+  - {name: "@esbuild/linux-ppc64", kind: npm, version: "0.21.5", license: "MIT", source_url: "https://www.npmjs.com/package/@esbuild/linux-ppc64", editions: [agpl, commercial], notes: "build-time (devDependency tree); platform-specific optional binary (licence from package-lock.json)"}
+  - {name: "@esbuild/linux-riscv64", kind: npm, version: "0.21.5", license: "MIT", source_url: "https://www.npmjs.com/package/@esbuild/linux-riscv64", editions: [agpl, commercial], notes: "build-time (devDependency tree); platform-specific optional binary (licence from package-lock.json)"}
+  - {name: "@esbuild/linux-s390x", kind: npm, version: "0.21.5", license: "MIT", source_url: "https://www.npmjs.com/package/@esbuild/linux-s390x", editions: [agpl, commercial], notes: "build-time (devDependency tree); platform-specific optional binary (licence from package-lock.json)"}
+  - {name: "@esbuild/linux-x64", kind: npm, version: "0.21.5", license: "MIT", source_url: "https://www.npmjs.com/package/@esbuild/linux-x64", editions: [agpl, commercial], notes: "build-time (devDependency tree); platform-specific optional binary (licence from package-lock.json)"}
+  - {name: "@esbuild/netbsd-x64", kind: npm, version: "0.21.5", license: "MIT", source_url: "https://www.npmjs.com/package/@esbuild/netbsd-x64", editions: [agpl, commercial], notes: "build-time (devDependency tree); platform-specific optional binary (licence from package-lock.json)"}
+  - {name: "@esbuild/openbsd-x64", kind: npm, version: "0.21.5", license: "MIT", source_url: "https://www.npmjs.com/package/@esbuild/openbsd-x64", editions: [agpl, commercial], notes: "build-time (devDependency tree); platform-specific optional binary (licence from package-lock.json)"}
+  - {name: "@esbuild/sunos-x64", kind: npm, version: "0.21.5", license: "MIT", source_url: "https://www.npmjs.com/package/@esbuild/sunos-x64", editions: [agpl, commercial], notes: "build-time (devDependency tree); platform-specific optional binary (licence from package-lock.json)"}
+  - {name: "@esbuild/win32-arm64", kind: npm, version: "0.21.5", license: "MIT", source_url: "https://www.npmjs.com/package/@esbuild/win32-arm64", editions: [agpl, commercial], notes: "build-time (devDependency tree); platform-specific optional binary (licence from package-lock.json)"}
+  - {name: "@esbuild/win32-ia32", kind: npm, version: "0.21.5", license: "MIT", source_url: "https://www.npmjs.com/package/@esbuild/win32-ia32", editions: [agpl, commercial], notes: "build-time (devDependency tree); platform-specific optional binary (licence from package-lock.json)"}
+  - {name: "@esbuild/win32-x64", kind: npm, version: "0.21.5", license: "MIT", source_url: "https://www.npmjs.com/package/@esbuild/win32-x64", editions: [agpl, commercial], notes: "build-time (devDependency tree); platform-specific optional binary (licence from package-lock.json)"}
+  - {name: "@isaacs/cliui", kind: npm, version: "9.0.0", license: "BlueOak-1.0.0", source_url: "https://github.com/isaacs/cliui", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@jridgewell/gen-mapping", kind: npm, version: "0.3.13", license: "MIT", source_url: "https://github.com/jridgewell/sourcemaps", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@jridgewell/remapping", kind: npm, version: "2.3.5", license: "MIT", source_url: "https://github.com/jridgewell/sourcemaps", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@jridgewell/resolve-uri", kind: npm, version: "3.1.2", license: "MIT", source_url: "https://github.com/jridgewell/resolve-uri", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@jridgewell/source-map", kind: npm, version: "0.3.11", license: "MIT", source_url: "https://github.com/jridgewell/sourcemaps", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@jridgewell/sourcemap-codec", kind: npm, version: "1.5.5", license: "MIT", source_url: "https://github.com/jridgewell/sourcemaps", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@jridgewell/trace-mapping", kind: npm, version: "0.3.31", license: "MIT", source_url: "https://github.com/jridgewell/sourcemaps", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@nodelib/fs.scandir", kind: npm, version: "2.1.5", license: "MIT", source_url: "https://github.com/nodelib/nodelib.git#master", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@nodelib/fs.stat", kind: npm, version: "2.0.5", license: "MIT", source_url: "https://github.com/nodelib/nodelib.git#master", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@nodelib/fs.walk", kind: npm, version: "1.2.8", license: "MIT", source_url: "https://github.com/nodelib/nodelib.git#master", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@radix-ui/react-compose-refs", kind: npm, version: "1.1.2", license: "MIT", source_url: "https://github.com/radix-ui/primitives", editions: [agpl, commercial], images: [nginx], notes: "shipped (runtime dependency tree)"}
+  - {name: "@radix-ui/react-slot", kind: npm, version: "1.2.4", license: "MIT", source_url: "https://github.com/radix-ui/primitives", editions: [agpl, commercial], images: [nginx], notes: "shipped (runtime dependency tree)"}
+  - {name: "@remix-run/router", kind: npm, version: "1.23.3", license: "MIT", source_url: "https://github.com/remix-run/react-router", editions: [agpl, commercial], images: [nginx], notes: "shipped (runtime dependency tree)"}
+  - {name: "@rolldown/pluginutils", kind: npm, version: "1.0.0-beta.27", license: "MIT", source_url: "https://github.com/rolldown/rolldown", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@rollup/plugin-babel", kind: npm, version: "6.1.0", license: "MIT", source_url: "https://github.com/rollup/plugins", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@rollup/plugin-node-resolve", kind: npm, version: "16.0.3", license: "MIT", source_url: "https://github.com/rollup/plugins", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@rollup/plugin-replace", kind: npm, version: "6.0.3", license: "MIT", source_url: "https://github.com/rollup/plugins", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@rollup/plugin-terser", kind: npm, version: "1.0.0", license: "MIT", source_url: "https://github.com/rollup/plugins", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@rollup/pluginutils", kind: npm, version: "5.4.0", license: "MIT", source_url: "https://github.com/rollup/plugins", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@rollup/rollup-android-arm-eabi", kind: npm, version: "4.61.1", license: "MIT", source_url: "https://www.npmjs.com/package/@rollup/rollup-android-arm-eabi", editions: [agpl, commercial], notes: "build-time (devDependency tree); platform-specific optional binary (licence from package-lock.json)"}
+  - {name: "@rollup/rollup-android-arm64", kind: npm, version: "4.61.1", license: "MIT", source_url: "https://www.npmjs.com/package/@rollup/rollup-android-arm64", editions: [agpl, commercial], notes: "build-time (devDependency tree); platform-specific optional binary (licence from package-lock.json)"}
+  - {name: "@rollup/rollup-darwin-arm64", kind: npm, version: "4.61.1", license: "MIT", source_url: "https://github.com/rollup/rollup", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@rollup/rollup-darwin-x64", kind: npm, version: "4.61.1", license: "MIT", source_url: "https://www.npmjs.com/package/@rollup/rollup-darwin-x64", editions: [agpl, commercial], notes: "build-time (devDependency tree); platform-specific optional binary (licence from package-lock.json)"}
+  - {name: "@rollup/rollup-freebsd-arm64", kind: npm, version: "4.61.1", license: "MIT", source_url: "https://www.npmjs.com/package/@rollup/rollup-freebsd-arm64", editions: [agpl, commercial], notes: "build-time (devDependency tree); platform-specific optional binary (licence from package-lock.json)"}
+  - {name: "@rollup/rollup-freebsd-x64", kind: npm, version: "4.61.1", license: "MIT", source_url: "https://www.npmjs.com/package/@rollup/rollup-freebsd-x64", editions: [agpl, commercial], notes: "build-time (devDependency tree); platform-specific optional binary (licence from package-lock.json)"}
+  - {name: "@rollup/rollup-linux-arm-gnueabihf", kind: npm, version: "4.61.1", license: "MIT", source_url: "https://www.npmjs.com/package/@rollup/rollup-linux-arm-gnueabihf", editions: [agpl, commercial], notes: "build-time (devDependency tree); platform-specific optional binary (licence from package-lock.json)"}
+  - {name: "@rollup/rollup-linux-arm-musleabihf", kind: npm, version: "4.61.1", license: "MIT", source_url: "https://www.npmjs.com/package/@rollup/rollup-linux-arm-musleabihf", editions: [agpl, commercial], notes: "build-time (devDependency tree); platform-specific optional binary (licence from package-lock.json)"}
+  - {name: "@rollup/rollup-linux-arm64-gnu", kind: npm, version: "4.61.1", license: "MIT", source_url: "https://www.npmjs.com/package/@rollup/rollup-linux-arm64-gnu", editions: [agpl, commercial], notes: "build-time (devDependency tree); platform-specific optional binary (licence from package-lock.json)"}
+  - {name: "@rollup/rollup-linux-arm64-musl", kind: npm, version: "4.61.1", license: "MIT", source_url: "https://www.npmjs.com/package/@rollup/rollup-linux-arm64-musl", editions: [agpl, commercial], notes: "build-time (devDependency tree); platform-specific optional binary (licence from package-lock.json)"}
+  - {name: "@rollup/rollup-linux-loong64-gnu", kind: npm, version: "4.61.1", license: "MIT", source_url: "https://www.npmjs.com/package/@rollup/rollup-linux-loong64-gnu", editions: [agpl, commercial], notes: "build-time (devDependency tree); platform-specific optional binary (licence from package-lock.json)"}
+  - {name: "@rollup/rollup-linux-loong64-musl", kind: npm, version: "4.61.1", license: "MIT", source_url: "https://www.npmjs.com/package/@rollup/rollup-linux-loong64-musl", editions: [agpl, commercial], notes: "build-time (devDependency tree); platform-specific optional binary (licence from package-lock.json)"}
+  - {name: "@rollup/rollup-linux-ppc64-gnu", kind: npm, version: "4.61.1", license: "MIT", source_url: "https://www.npmjs.com/package/@rollup/rollup-linux-ppc64-gnu", editions: [agpl, commercial], notes: "build-time (devDependency tree); platform-specific optional binary (licence from package-lock.json)"}
+  - {name: "@rollup/rollup-linux-ppc64-musl", kind: npm, version: "4.61.1", license: "MIT", source_url: "https://www.npmjs.com/package/@rollup/rollup-linux-ppc64-musl", editions: [agpl, commercial], notes: "build-time (devDependency tree); platform-specific optional binary (licence from package-lock.json)"}
+  - {name: "@rollup/rollup-linux-riscv64-gnu", kind: npm, version: "4.61.1", license: "MIT", source_url: "https://www.npmjs.com/package/@rollup/rollup-linux-riscv64-gnu", editions: [agpl, commercial], notes: "build-time (devDependency tree); platform-specific optional binary (licence from package-lock.json)"}
+  - {name: "@rollup/rollup-linux-riscv64-musl", kind: npm, version: "4.61.1", license: "MIT", source_url: "https://www.npmjs.com/package/@rollup/rollup-linux-riscv64-musl", editions: [agpl, commercial], notes: "build-time (devDependency tree); platform-specific optional binary (licence from package-lock.json)"}
+  - {name: "@rollup/rollup-linux-s390x-gnu", kind: npm, version: "4.61.1", license: "MIT", source_url: "https://www.npmjs.com/package/@rollup/rollup-linux-s390x-gnu", editions: [agpl, commercial], notes: "build-time (devDependency tree); platform-specific optional binary (licence from package-lock.json)"}
+  - {name: "@rollup/rollup-linux-x64-gnu", kind: npm, version: "4.61.1", license: "MIT", source_url: "https://www.npmjs.com/package/@rollup/rollup-linux-x64-gnu", editions: [agpl, commercial], notes: "build-time (devDependency tree); platform-specific optional binary (licence from package-lock.json)"}
+  - {name: "@rollup/rollup-linux-x64-musl", kind: npm, version: "4.61.1", license: "MIT", source_url: "https://www.npmjs.com/package/@rollup/rollup-linux-x64-musl", editions: [agpl, commercial], notes: "build-time (devDependency tree); platform-specific optional binary (licence from package-lock.json)"}
+  - {name: "@rollup/rollup-openbsd-x64", kind: npm, version: "4.61.1", license: "MIT", source_url: "https://www.npmjs.com/package/@rollup/rollup-openbsd-x64", editions: [agpl, commercial], notes: "build-time (devDependency tree); platform-specific optional binary (licence from package-lock.json)"}
+  - {name: "@rollup/rollup-openharmony-arm64", kind: npm, version: "4.61.1", license: "MIT", source_url: "https://www.npmjs.com/package/@rollup/rollup-openharmony-arm64", editions: [agpl, commercial], notes: "build-time (devDependency tree); platform-specific optional binary (licence from package-lock.json)"}
+  - {name: "@rollup/rollup-win32-arm64-msvc", kind: npm, version: "4.61.1", license: "MIT", source_url: "https://www.npmjs.com/package/@rollup/rollup-win32-arm64-msvc", editions: [agpl, commercial], notes: "build-time (devDependency tree); platform-specific optional binary (licence from package-lock.json)"}
+  - {name: "@rollup/rollup-win32-ia32-msvc", kind: npm, version: "4.61.1", license: "MIT", source_url: "https://www.npmjs.com/package/@rollup/rollup-win32-ia32-msvc", editions: [agpl, commercial], notes: "build-time (devDependency tree); platform-specific optional binary (licence from package-lock.json)"}
+  - {name: "@rollup/rollup-win32-x64-gnu", kind: npm, version: "4.61.1", license: "MIT", source_url: "https://www.npmjs.com/package/@rollup/rollup-win32-x64-gnu", editions: [agpl, commercial], notes: "build-time (devDependency tree); platform-specific optional binary (licence from package-lock.json)"}
+  - {name: "@rollup/rollup-win32-x64-msvc", kind: npm, version: "4.61.1", license: "MIT", source_url: "https://www.npmjs.com/package/@rollup/rollup-win32-x64-msvc", editions: [agpl, commercial], notes: "build-time (devDependency tree); platform-specific optional binary (licence from package-lock.json)"}
+  - {name: "@tanstack/query-core", kind: npm, version: "5.101.0", license: "MIT", source_url: "https://github.com/TanStack/query", editions: [agpl, commercial], images: [nginx], notes: "shipped (runtime dependency tree)"}
+  - {name: "@tanstack/react-query", kind: npm, version: "5.101.0", license: "MIT", source_url: "https://github.com/TanStack/query", editions: [agpl, commercial], images: [nginx], notes: "shipped (runtime dependency tree)"}
+  - {name: "@trickfilm400/rollup-plugin-off-main-thread", kind: npm, version: "3.0.0-pre1", license: "Apache-2.0", source_url: "https://github.com/Trickfilm400/rollup-plugin-off-main-thread", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@types/babel__core", kind: npm, version: "7.20.5", license: "MIT", source_url: "https://github.com/DefinitelyTyped/DefinitelyTyped", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@types/babel__generator", kind: npm, version: "7.27.0", license: "MIT", source_url: "https://github.com/DefinitelyTyped/DefinitelyTyped", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@types/babel__template", kind: npm, version: "7.4.4", license: "MIT", source_url: "https://github.com/DefinitelyTyped/DefinitelyTyped", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@types/babel__traverse", kind: npm, version: "7.28.0", license: "MIT", source_url: "https://github.com/DefinitelyTyped/DefinitelyTyped", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@types/estree", kind: npm, version: "1.0.9", license: "MIT", source_url: "https://github.com/DefinitelyTyped/DefinitelyTyped", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@types/prop-types", kind: npm, version: "15.7.15", license: "MIT", source_url: "https://github.com/DefinitelyTyped/DefinitelyTyped", editions: [agpl, commercial], images: [nginx], notes: "shipped (runtime dependency tree)"}
+  - {name: "@types/react", kind: npm, version: "18.3.30", license: "MIT", source_url: "https://github.com/DefinitelyTyped/DefinitelyTyped", editions: [agpl, commercial], images: [nginx], notes: "shipped (runtime dependency tree)"}
+  - {name: "@types/react-dom", kind: npm, version: "18.3.7", license: "MIT", source_url: "https://github.com/DefinitelyTyped/DefinitelyTyped", editions: [agpl, commercial], notes: "build-time (devDependency tree); injects code/CSS into the bundle"}
+  - {name: "@types/resolve", kind: npm, version: "1.20.2", license: "MIT", source_url: "https://github.com/DefinitelyTyped/DefinitelyTyped", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@types/trusted-types", kind: npm, version: "2.0.7", license: "MIT", source_url: "https://github.com/DefinitelyTyped/DefinitelyTyped", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "@vitejs/plugin-react", kind: npm, version: "4.7.0", license: "MIT", source_url: "https://github.com/vitejs/vite-plugin-react", editions: [agpl, commercial], notes: "build-time (devDependency tree); injects code/CSS into the bundle"}
+  - {name: "acorn", kind: npm, version: "8.18.0", license: "MIT", source_url: "https://github.com/acornjs/acorn", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "agent-base", kind: npm, version: "6.0.2", license: "MIT", source_url: "https://github.com/TooTallNate/node-agent-base", editions: [agpl, commercial], images: [nginx], notes: "shipped (runtime dependency tree)"}
+  - {name: "ajv", kind: npm, version: "8.20.0", license: "MIT", source_url: "https://github.com/ajv-validator/ajv", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "any-promise", kind: npm, version: "1.3.0", license: "MIT", source_url: "https://github.com/kevinbeaty/any-promise", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "anymatch", kind: npm, version: "3.1.3", license: "ISC", source_url: "https://github.com/micromatch/anymatch", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "arg", kind: npm, version: "5.0.2", license: "MIT", source_url: "https://github.com/vercel/arg", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "array-buffer-byte-length", kind: npm, version: "1.0.2", license: "MIT", source_url: "https://github.com/inspect-js/array-buffer-byte-length", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "arraybuffer.prototype.slice", kind: npm, version: "1.0.4", license: "MIT", source_url: "https://github.com/es-shims/ArrayBuffer.prototype.slice", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "async", kind: npm, version: "3.2.6", license: "MIT", source_url: "https://github.com/caolan/async", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "async-function", kind: npm, version: "1.0.0", license: "MIT", source_url: "https://github.com/ljharb/async-function", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "asynckit", kind: npm, version: "0.4.0", license: "MIT", source_url: "https://github.com/alexindigo/asynckit", editions: [agpl, commercial], images: [nginx], notes: "shipped (runtime dependency tree)"}
+  - {name: "at-least-node", kind: npm, version: "1.0.0", license: "ISC", source_url: "https://github.com/RyanZim/at-least-node", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "autoprefixer", kind: npm, version: "10.5.0", license: "MIT", source_url: "https://github.com/postcss/autoprefixer", editions: [agpl, commercial], notes: "build-time (devDependency tree); injects code/CSS into the bundle"}
+  - {name: "available-typed-arrays", kind: npm, version: "1.0.7", license: "MIT", source_url: "https://github.com/inspect-js/available-typed-arrays", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "axios", kind: npm, version: "1.17.0", license: "MIT", source_url: "https://github.com/axios/axios", editions: [agpl, commercial], images: [nginx], notes: "shipped (runtime dependency tree)"}
+  - {name: "babel-plugin-polyfill-corejs2", kind: npm, version: "0.4.17", license: "MIT", source_url: "https://github.com/babel/babel-polyfills", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "babel-plugin-polyfill-corejs3", kind: npm, version: "0.14.2", license: "MIT", source_url: "https://github.com/babel/babel-polyfills", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "babel-plugin-polyfill-regenerator", kind: npm, version: "0.6.8", license: "MIT", source_url: "https://github.com/babel/babel-polyfills", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "balanced-match", kind: npm, version: "1.0.2, 4.0.4", license: "MIT", source_url: "https://github.com/juliangruber/balanced-match", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "baseline-browser-mapping", kind: npm, version: "2.11.12", license: "Apache-2.0", source_url: "https://github.com/web-platform-dx/baseline-browser-mapping", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "binary-extensions", kind: npm, version: "2.3.0", license: "MIT", source_url: "https://github.com/sindresorhus/binary-extensions", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "brace-expansion", kind: npm, version: "2.1.4, 5.0.9", license: "MIT", source_url: "https://github.com/juliangruber/brace-expansion", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "braces", kind: npm, version: "3.0.3", license: "MIT", source_url: "https://github.com/micromatch/braces", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "browserslist", kind: npm, version: "4.28.7", license: "MIT", source_url: "https://github.com/browserslist/browserslist", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "buffer-from", kind: npm, version: "1.1.2", license: "MIT", source_url: "https://github.com/LinusU/buffer-from", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "call-bind", kind: npm, version: "1.0.9", license: "MIT", source_url: "https://github.com/ljharb/call-bind", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "call-bind-apply-helpers", kind: npm, version: "1.0.2", license: "MIT", source_url: "https://github.com/ljharb/call-bind-apply-helpers", editions: [agpl, commercial], images: [nginx], notes: "shipped (runtime dependency tree)"}
+  - {name: "call-bound", kind: npm, version: "1.0.4", license: "MIT", source_url: "https://github.com/ljharb/call-bound", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "camelcase-css", kind: npm, version: "2.0.1", license: "MIT", source_url: "https://github.com/stevenvachon/camelcase-css", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "caniuse-lite", kind: npm, version: "1.0.30001806", license: "CC-BY-4.0", source_url: "https://github.com/browserslist/caniuse-lite", editions: [agpl, commercial], notes: "build-time (devDependency tree); CC-BY-4.0 browser data, owner-approved [[exception]] (OWNER TO CONFIRM, E0-QA.9)"}
+  - {name: "chokidar", kind: npm, version: "3.6.0", license: "MIT", source_url: "https://github.com/paulmillr/chokidar", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "class-variance-authority", kind: npm, version: "0.7.1", license: "Apache-2.0", source_url: "https://github.com/joe-bell/cva", editions: [agpl, commercial], images: [nginx], notes: "shipped (runtime dependency tree)"}
+  - {name: "clsx", kind: npm, version: "2.1.1", license: "MIT", source_url: "https://github.com/lukeed/clsx", editions: [agpl, commercial], images: [nginx], notes: "shipped (runtime dependency tree)"}
+  - {name: "combined-stream", kind: npm, version: "1.0.8", license: "MIT", source_url: "https://github.com/felixge/node-combined-stream", editions: [agpl, commercial], images: [nginx], notes: "shipped (runtime dependency tree)"}
+  - {name: "commander", kind: npm, version: "2.20.3, 4.1.1", license: "MIT", source_url: "https://github.com/tj/commander.js", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "common-tags", kind: npm, version: "1.8.2", license: "MIT", source_url: "https://github.com/zspecza/common-tags", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "convert-source-map", kind: npm, version: "2.0.0", license: "MIT", source_url: "https://github.com/thlorenz/convert-source-map", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "core-js-compat", kind: npm, version: "3.50.0", license: "MIT", source_url: "https://github.com/zloirock/core-js", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "cross-spawn", kind: npm, version: "7.0.6", license: "MIT", source_url: "https://github.com/moxystudio/node-cross-spawn", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "crypto-random-string", kind: npm, version: "2.0.0", license: "MIT", source_url: "https://github.com/sindresorhus/crypto-random-string", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "cssesc", kind: npm, version: "3.0.0", license: "MIT", source_url: "https://github.com/mathiasbynens/cssesc", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "csstype", kind: npm, version: "3.2.3", license: "MIT", source_url: "https://github.com/frenic/csstype", editions: [agpl, commercial], images: [nginx], notes: "shipped (runtime dependency tree)"}
+  - {name: "data-view-buffer", kind: npm, version: "1.0.2", license: "MIT", source_url: "https://github.com/inspect-js/data-view-buffer", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "data-view-byte-length", kind: npm, version: "1.0.2", license: "MIT", source_url: "https://github.com/inspect-js/data-view-byte-length", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "data-view-byte-offset", kind: npm, version: "1.0.1", license: "MIT", source_url: "https://github.com/inspect-js/data-view-byte-offset", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "debug", kind: npm, version: "4.4.3", license: "MIT", source_url: "https://github.com/debug-js/debug", editions: [agpl, commercial], images: [nginx], notes: "shipped (runtime dependency tree)"}
+  - {name: "deepmerge", kind: npm, version: "4.3.1", license: "MIT", source_url: "https://github.com/TehShrike/deepmerge", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "define-data-property", kind: npm, version: "1.1.4", license: "MIT", source_url: "https://github.com/ljharb/define-data-property", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "define-properties", kind: npm, version: "1.2.1", license: "MIT", source_url: "https://github.com/ljharb/define-properties", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "delayed-stream", kind: npm, version: "1.0.0", license: "MIT", source_url: "https://github.com/felixge/node-delayed-stream", editions: [agpl, commercial], images: [nginx], notes: "shipped (runtime dependency tree)"}
+  - {name: "didyoumean", kind: npm, version: "1.2.2", license: "Apache-2.0", source_url: "https://github.com/dcporter/didyoumean.js", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "dlv", kind: npm, version: "1.1.3", license: "MIT", source_url: "https://github.com/developit/dlv", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "dunder-proto", kind: npm, version: "1.0.1", license: "MIT", source_url: "https://github.com/es-shims/dunder-proto", editions: [agpl, commercial], images: [nginx], notes: "shipped (runtime dependency tree)"}
+  - {name: "ejs", kind: npm, version: "3.1.10", license: "Apache-2.0", source_url: "https://github.com/mde/ejs", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "electron-to-chromium", kind: npm, version: "1.5.402", license: "ISC", source_url: "https://github.com/Kilian/electron-to-chromium", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "es-abstract", kind: npm, version: "1.24.2", license: "MIT", source_url: "https://github.com/ljharb/es-abstract", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "es-abstract-get", kind: npm, version: "1.0.0", license: "MIT", source_url: "https://github.com/ljharb/es-abstract-get", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "es-define-property", kind: npm, version: "1.0.1", license: "MIT", source_url: "https://github.com/ljharb/es-define-property", editions: [agpl, commercial], images: [nginx], notes: "shipped (runtime dependency tree)"}
+  - {name: "es-errors", kind: npm, version: "1.3.0", license: "MIT", source_url: "https://github.com/ljharb/es-errors", editions: [agpl, commercial], images: [nginx], notes: "shipped (runtime dependency tree)"}
+  - {name: "es-object-atoms", kind: npm, version: "1.1.2", license: "MIT", source_url: "https://github.com/ljharb/es-object-atoms", editions: [agpl, commercial], images: [nginx], notes: "shipped (runtime dependency tree)"}
+  - {name: "es-set-tostringtag", kind: npm, version: "2.1.0", license: "MIT", source_url: "https://github.com/es-shims/es-set-tostringtag", editions: [agpl, commercial], images: [nginx], notes: "shipped (runtime dependency tree)"}
+  - {name: "es-to-primitive", kind: npm, version: "1.3.4", license: "MIT", source_url: "https://github.com/ljharb/es-to-primitive", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "esbuild", kind: npm, version: "0.21.5", license: "MIT", source_url: "https://github.com/evanw/esbuild", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "escalade", kind: npm, version: "3.2.0", license: "MIT", source_url: "https://github.com/lukeed/escalade", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "estree-walker", kind: npm, version: "2.0.2", license: "MIT", source_url: "https://github.com/Rich-Harris/estree-walker", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "esutils", kind: npm, version: "2.0.3", license: "BSD-2-Clause", source_url: "https://github.com/estools/esutils", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "eta", kind: npm, version: "4.6.0", license: "MIT", source_url: "https://github.com/bgub/eta", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "fast-deep-equal", kind: npm, version: "3.1.3", license: "MIT", source_url: "https://github.com/epoberezkin/fast-deep-equal", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "fast-glob", kind: npm, version: "3.3.3", license: "MIT", source_url: "https://github.com/mrmlnc/fast-glob", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "fast-json-stable-stringify", kind: npm, version: "2.1.0", license: "MIT", source_url: "https://github.com/epoberezkin/fast-json-stable-stringify", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "fast-uri", kind: npm, version: "3.1.5", license: "BSD-3-Clause", source_url: "https://github.com/fastify/fast-uri", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "fastq", kind: npm, version: "1.20.1", license: "ISC", source_url: "https://github.com/mcollina/fastq", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "fdir", kind: npm, version: "6.5.0", license: "MIT", source_url: "https://github.com/thecodrr/fdir", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "filelist", kind: npm, version: "1.0.6", license: "Apache-2.0", source_url: "https://github.com/mde/filelist", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "fill-range", kind: npm, version: "7.1.1", license: "MIT", source_url: "https://github.com/jonschlinkert/fill-range", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "follow-redirects", kind: npm, version: "1.16.0", license: "MIT", source_url: "https://github.com/follow-redirects/follow-redirects", editions: [agpl, commercial], images: [nginx], notes: "shipped (runtime dependency tree)"}
+  - {name: "for-each", kind: npm, version: "0.3.5", license: "MIT", source_url: "https://github.com/Raynos/for-each", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "foreground-child", kind: npm, version: "3.3.1", license: "ISC", source_url: "https://github.com/tapjs/foreground-child", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "form-data", kind: npm, version: "4.0.5", license: "MIT", source_url: "https://github.com/form-data/form-data", editions: [agpl, commercial], images: [nginx], notes: "shipped (runtime dependency tree)"}
+  - {name: "fraction.js", kind: npm, version: "5.3.4", license: "MIT", source_url: "https://github.com/rawify/Fraction.js", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "fs-extra", kind: npm, version: "9.1.0", license: "MIT", source_url: "https://github.com/jprichardson/node-fs-extra", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "fsevents", kind: npm, version: "2.3.3", license: "MIT", source_url: "https://github.com/fsevents/fsevents", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "function-bind", kind: npm, version: "1.1.2", license: "MIT", source_url: "https://github.com/Raynos/function-bind", editions: [agpl, commercial], images: [nginx], notes: "shipped (runtime dependency tree)"}
+  - {name: "function.prototype.name", kind: npm, version: "1.2.0", license: "MIT", source_url: "https://github.com/es-shims/Function.prototype.name", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "functions-have-names", kind: npm, version: "1.2.3", license: "MIT", source_url: "https://github.com/inspect-js/functions-have-names", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "generator-function", kind: npm, version: "2.0.1", license: "MIT", source_url: "https://github.com/TimothyGu/generator-function", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "gensync", kind: npm, version: "1.0.0-beta.2", license: "MIT", source_url: "https://github.com/loganfsmyth/gensync", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "get-intrinsic", kind: npm, version: "1.3.0", license: "MIT", source_url: "https://github.com/ljharb/get-intrinsic", editions: [agpl, commercial], images: [nginx], notes: "shipped (runtime dependency tree)"}
+  - {name: "get-own-enumerable-property-symbols", kind: npm, version: "3.0.2", license: "ISC", source_url: "https://github.com/mightyiam/get-own-enumerable-property-symbols", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "get-proto", kind: npm, version: "1.0.1", license: "MIT", source_url: "https://github.com/ljharb/get-proto", editions: [agpl, commercial], images: [nginx], notes: "shipped (runtime dependency tree)"}
+  - {name: "get-symbol-description", kind: npm, version: "1.1.0", license: "MIT", source_url: "https://github.com/inspect-js/get-symbol-description", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "glob", kind: npm, version: "11.1.0", license: "BlueOak-1.0.0", source_url: "https://github.com/isaacs/node-glob", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "glob-parent", kind: npm, version: "5.1.2, 6.0.2", license: "ISC", source_url: "https://github.com/gulpjs/glob-parent", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "globalthis", kind: npm, version: "1.0.4", license: "MIT", source_url: "https://github.com/ljharb/System.global", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "gopd", kind: npm, version: "1.2.0", license: "MIT", source_url: "https://github.com/ljharb/gopd", editions: [agpl, commercial], images: [nginx], notes: "shipped (runtime dependency tree)"}
+  - {name: "graceful-fs", kind: npm, version: "4.2.11", license: "ISC", source_url: "https://github.com/isaacs/node-graceful-fs", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "has-bigints", kind: npm, version: "1.1.0", license: "MIT", source_url: "https://github.com/ljharb/has-bigints", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "has-property-descriptors", kind: npm, version: "1.0.2", license: "MIT", source_url: "https://github.com/inspect-js/has-property-descriptors", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "has-proto", kind: npm, version: "1.2.0", license: "MIT", source_url: "https://github.com/inspect-js/has-proto", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "has-symbols", kind: npm, version: "1.1.0", license: "MIT", source_url: "https://github.com/inspect-js/has-symbols", editions: [agpl, commercial], images: [nginx], notes: "shipped (runtime dependency tree)"}
+  - {name: "has-tostringtag", kind: npm, version: "1.0.2", license: "MIT", source_url: "https://github.com/inspect-js/has-tostringtag", editions: [agpl, commercial], images: [nginx], notes: "shipped (runtime dependency tree)"}
+  - {name: "hasown", kind: npm, version: "2.0.4", license: "MIT", source_url: "https://github.com/inspect-js/hasOwn", editions: [agpl, commercial], images: [nginx], notes: "shipped (runtime dependency tree)"}
+  - {name: "https-proxy-agent", kind: npm, version: "5.0.1", license: "MIT", source_url: "https://github.com/TooTallNate/node-https-proxy-agent", editions: [agpl, commercial], images: [nginx], notes: "shipped (runtime dependency tree)"}
+  - {name: "idb", kind: npm, version: "7.1.1", license: "ISC", source_url: "https://github.com/jakearchibald/idb", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "internal-slot", kind: npm, version: "1.1.0", license: "MIT", source_url: "https://github.com/ljharb/internal-slot", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "is-array-buffer", kind: npm, version: "3.0.5", license: "MIT", source_url: "https://github.com/inspect-js/is-array-buffer", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "is-async-function", kind: npm, version: "2.1.1", license: "MIT", source_url: "https://github.com/inspect-js/is-async-function", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "is-bigint", kind: npm, version: "1.1.0", license: "MIT", source_url: "https://github.com/inspect-js/is-bigint", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "is-binary-path", kind: npm, version: "2.1.0", license: "MIT", source_url: "https://github.com/sindresorhus/is-binary-path", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "is-boolean-object", kind: npm, version: "1.2.2", license: "MIT", source_url: "https://github.com/inspect-js/is-boolean-object", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "is-callable", kind: npm, version: "1.2.7", license: "MIT", source_url: "https://github.com/inspect-js/is-callable", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "is-core-module", kind: npm, version: "2.16.2", license: "MIT", source_url: "https://github.com/inspect-js/is-core-module", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "is-data-view", kind: npm, version: "1.0.2", license: "MIT", source_url: "https://github.com/inspect-js/is-data-view", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "is-date-object", kind: npm, version: "1.1.0", license: "MIT", source_url: "https://github.com/inspect-js/is-date-object", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "is-document.all", kind: npm, version: "1.0.0", license: "MIT", source_url: "https://github.com/inspect-js/is-document.all", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "is-extglob", kind: npm, version: "2.1.1", license: "MIT", source_url: "https://github.com/jonschlinkert/is-extglob", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "is-finalizationregistry", kind: npm, version: "1.1.1", license: "MIT", source_url: "https://github.com/inspect-js/is-finalizationregistry", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "is-generator-function", kind: npm, version: "1.1.2", license: "MIT", source_url: "https://github.com/inspect-js/is-generator-function", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "is-glob", kind: npm, version: "4.0.3", license: "MIT", source_url: "https://github.com/micromatch/is-glob", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "is-map", kind: npm, version: "2.0.3", license: "MIT", source_url: "https://github.com/inspect-js/is-map", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "is-module", kind: npm, version: "1.0.0", license: "MIT", source_url: "https://github.com/component/is-module", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "is-negative-zero", kind: npm, version: "2.0.3", license: "MIT", source_url: "https://github.com/inspect-js/is-negative-zero", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "is-number", kind: npm, version: "7.0.0", license: "MIT", source_url: "https://github.com/jonschlinkert/is-number", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "is-number-object", kind: npm, version: "1.1.1", license: "MIT", source_url: "https://github.com/inspect-js/is-number-object", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "is-obj", kind: npm, version: "1.0.1", license: "MIT", source_url: "https://github.com/sindresorhus/is-obj", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "is-regex", kind: npm, version: "1.2.1", license: "MIT", source_url: "https://github.com/inspect-js/is-regex", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "is-regexp", kind: npm, version: "1.0.0", license: "MIT", source_url: "https://github.com/sindresorhus/is-regexp", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "is-set", kind: npm, version: "2.0.3", license: "MIT", source_url: "https://github.com/inspect-js/is-set", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "is-shared-array-buffer", kind: npm, version: "1.0.4", license: "MIT", source_url: "https://github.com/inspect-js/is-shared-array-buffer", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "is-stream", kind: npm, version: "2.0.1", license: "MIT", source_url: "https://github.com/sindresorhus/is-stream", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "is-string", kind: npm, version: "1.1.1", license: "MIT", source_url: "https://github.com/inspect-js/is-string", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "is-symbol", kind: npm, version: "1.1.1", license: "MIT", source_url: "https://github.com/inspect-js/is-symbol", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "is-typed-array", kind: npm, version: "1.1.15", license: "MIT", source_url: "https://github.com/inspect-js/is-typed-array", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "is-weakmap", kind: npm, version: "2.0.2", license: "MIT", source_url: "https://github.com/inspect-js/is-weakmap", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "is-weakref", kind: npm, version: "1.1.1", license: "MIT", source_url: "https://github.com/inspect-js/is-weakref", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "is-weakset", kind: npm, version: "2.0.4", license: "MIT", source_url: "https://github.com/inspect-js/is-weakset", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "isarray", kind: npm, version: "2.0.5", license: "MIT", source_url: "https://github.com/juliangruber/isarray", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "isexe", kind: npm, version: "2.0.0", license: "ISC", source_url: "https://github.com/isaacs/isexe", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "jackspeak", kind: npm, version: "4.2.3", license: "BlueOak-1.0.0", source_url: "https://github.com/isaacs/jackspeak", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "jake", kind: npm, version: "10.9.4", license: "Apache-2.0", source_url: "https://github.com/jakejs/jake", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "jiti", kind: npm, version: "1.21.7", license: "MIT", source_url: "https://github.com/unjs/jiti", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "js-tokens", kind: npm, version: "4.0.0", license: "MIT", source_url: "https://github.com/lydell/js-tokens", editions: [agpl, commercial], images: [nginx], notes: "shipped (runtime dependency tree)"}
+  - {name: "jsesc", kind: npm, version: "3.1.0", license: "MIT", source_url: "https://github.com/mathiasbynens/jsesc", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "json-schema-traverse", kind: npm, version: "1.0.0", license: "MIT", source_url: "https://github.com/epoberezkin/json-schema-traverse", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "json5", kind: npm, version: "2.2.3", license: "MIT", source_url: "https://github.com/json5/json5", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "jsonfile", kind: npm, version: "6.2.1", license: "MIT", source_url: "https://github.com/jprichardson/node-jsonfile", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "jsonpointer", kind: npm, version: "5.0.1", license: "MIT", source_url: "https://github.com/janl/node-jsonpointer", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "leven", kind: npm, version: "3.1.0", license: "MIT", source_url: "https://github.com/sindresorhus/leven", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "lilconfig", kind: npm, version: "3.1.3", license: "MIT", source_url: "https://github.com/antonk52/lilconfig", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "lines-and-columns", kind: npm, version: "1.2.4", license: "MIT", source_url: "https://github.com/eventualbuddha/lines-and-columns", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "lodash.debounce", kind: npm, version: "4.0.8", license: "MIT", source_url: "https://github.com/lodash/lodash", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "loose-envify", kind: npm, version: "1.4.0", license: "MIT", source_url: "https://github.com/zertosh/loose-envify", editions: [agpl, commercial], images: [nginx], notes: "shipped (runtime dependency tree)"}
+  - {name: "lru-cache", kind: npm, version: "11.5.2", license: "BlueOak-1.0.0", source_url: "https://github.com/isaacs/node-lru-cache", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "lru-cache", kind: npm, version: "5.1.1", license: "ISC", source_url: "https://github.com/isaacs/node-lru-cache", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "lucide-react", kind: npm, version: "0.441.0", license: "ISC", source_url: "https://github.com/lucide-icons/lucide", editions: [agpl, commercial], images: [nginx], notes: "shipped (runtime dependency tree)"}
+  - {name: "magic-string", kind: npm, version: "0.30.21", license: "MIT", source_url: "https://github.com/Rich-Harris/magic-string", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "math-intrinsics", kind: npm, version: "1.1.0", license: "MIT", source_url: "https://github.com/es-shims/math-intrinsics", editions: [agpl, commercial], images: [nginx], notes: "shipped (runtime dependency tree)"}
+  - {name: "merge2", kind: npm, version: "1.4.1", license: "MIT", source_url: "https://github.com/teambition/merge2", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "micromatch", kind: npm, version: "4.0.8", license: "MIT", source_url: "https://github.com/micromatch/micromatch", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "mime-db", kind: npm, version: "1.52.0", license: "MIT", source_url: "https://github.com/jshttp/mime-db", editions: [agpl, commercial], images: [nginx], notes: "shipped (runtime dependency tree)"}
+  - {name: "mime-types", kind: npm, version: "2.1.35", license: "MIT", source_url: "https://github.com/jshttp/mime-types", editions: [agpl, commercial], images: [nginx], notes: "shipped (runtime dependency tree)"}
+  - {name: "minimatch", kind: npm, version: "10.2.6", license: "BlueOak-1.0.0", source_url: "https://github.com/isaacs/minimatch", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "minimatch", kind: npm, version: "5.1.9", license: "ISC", source_url: "https://github.com/isaacs/minimatch", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "minipass", kind: npm, version: "7.1.3", license: "BlueOak-1.0.0", source_url: "https://github.com/isaacs/minipass", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "ms", kind: npm, version: "2.1.3", license: "MIT", source_url: "https://github.com/vercel/ms", editions: [agpl, commercial], images: [nginx], notes: "shipped (runtime dependency tree)"}
+  - {name: "mz", kind: npm, version: "2.7.0", license: "MIT", source_url: "https://github.com/normalize/mz", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "nanoid", kind: npm, version: "3.3.12", license: "MIT", source_url: "https://github.com/ai/nanoid", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "node-releases", kind: npm, version: "2.0.52", license: "MIT", source_url: "https://github.com/chicoxyzzy/node-releases", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "normalize-path", kind: npm, version: "3.0.0", license: "MIT", source_url: "https://github.com/jonschlinkert/normalize-path", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "object-assign", kind: npm, version: "4.1.1", license: "MIT", source_url: "https://github.com/sindresorhus/object-assign", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "object-hash", kind: npm, version: "3.0.0", license: "MIT", source_url: "https://github.com/puleos/object-hash", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "object-inspect", kind: npm, version: "1.13.4", license: "MIT", source_url: "https://github.com/inspect-js/object-inspect", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "object-keys", kind: npm, version: "1.1.1", license: "MIT", source_url: "https://github.com/ljharb/object-keys", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "object.assign", kind: npm, version: "4.1.7", license: "MIT", source_url: "https://github.com/ljharb/object.assign", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "own-keys", kind: npm, version: "1.0.2", license: "MIT", source_url: "https://github.com/ljharb/own-keys", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "package-json-from-dist", kind: npm, version: "1.0.1", license: "BlueOak-1.0.0", source_url: "https://github.com/isaacs/package-json-from-dist", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "path-key", kind: npm, version: "3.1.1", license: "MIT", source_url: "https://github.com/sindresorhus/path-key", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "path-parse", kind: npm, version: "1.0.7", license: "MIT", source_url: "https://github.com/jbgutierrez/path-parse", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "path-scurry", kind: npm, version: "2.0.2", license: "BlueOak-1.0.0", source_url: "https://github.com/isaacs/path-scurry", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "picocolors", kind: npm, version: "1.1.1", license: "ISC", source_url: "https://github.com/alexeyraspopov/picocolors", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "picomatch", kind: npm, version: "2.3.2, 4.0.4, 4.0.5", license: "MIT", source_url: "https://github.com/micromatch/picomatch", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "pify", kind: npm, version: "2.3.0", license: "MIT", source_url: "https://github.com/sindresorhus/pify", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "pirates", kind: npm, version: "4.0.7", license: "MIT", source_url: "https://github.com/danez/pirates", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "possible-typed-array-names", kind: npm, version: "1.1.0", license: "MIT", source_url: "https://github.com/ljharb/possible-typed-array-names", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "postcss", kind: npm, version: "8.5.15", license: "MIT", source_url: "https://github.com/postcss/postcss", editions: [agpl, commercial], notes: "build-time (devDependency tree); injects code/CSS into the bundle"}
+  - {name: "postcss-import", kind: npm, version: "15.1.0", license: "MIT", source_url: "https://github.com/postcss/postcss-import", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "postcss-js", kind: npm, version: "4.1.0", license: "MIT", source_url: "https://github.com/postcss/postcss-js", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "postcss-load-config", kind: npm, version: "6.0.1", license: "MIT", source_url: "https://github.com/postcss/postcss-load-config", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "postcss-nested", kind: npm, version: "6.2.0", license: "MIT", source_url: "https://github.com/postcss/postcss-nested", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "postcss-selector-parser", kind: npm, version: "6.1.2", license: "MIT", source_url: "https://github.com/postcss/postcss-selector-parser", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "postcss-value-parser", kind: npm, version: "4.2.0", license: "MIT", source_url: "https://github.com/TrySound/postcss-value-parser", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "pretty-bytes", kind: npm, version: "5.6.0, 6.1.1", license: "MIT", source_url: "https://github.com/sindresorhus/pretty-bytes", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "proxy-from-env", kind: npm, version: "2.1.0", license: "MIT", source_url: "https://github.com/Rob--W/proxy-from-env", editions: [agpl, commercial], images: [nginx], notes: "shipped (runtime dependency tree)"}
+  - {name: "queue-microtask", kind: npm, version: "1.2.3", license: "MIT", source_url: "https://github.com/feross/queue-microtask", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "react", kind: npm, version: "18.3.1", license: "MIT", source_url: "https://github.com/facebook/react", editions: [agpl, commercial], images: [nginx], notes: "shipped (runtime dependency tree)"}
+  - {name: "react-dom", kind: npm, version: "18.3.1", license: "MIT", source_url: "https://github.com/facebook/react", editions: [agpl, commercial], images: [nginx], notes: "shipped (runtime dependency tree)"}
+  - {name: "react-refresh", kind: npm, version: "0.17.0", license: "MIT", source_url: "https://github.com/facebook/react", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "react-router", kind: npm, version: "6.30.4", license: "MIT", source_url: "https://github.com/remix-run/react-router", editions: [agpl, commercial], images: [nginx], notes: "shipped (runtime dependency tree)"}
+  - {name: "react-router-dom", kind: npm, version: "6.30.4", license: "MIT", source_url: "https://github.com/remix-run/react-router", editions: [agpl, commercial], images: [nginx], notes: "shipped (runtime dependency tree)"}
+  - {name: "read-cache", kind: npm, version: "1.0.0", license: "MIT", source_url: "https://github.com/TrySound/read-cache", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "readdirp", kind: npm, version: "3.6.0", license: "MIT", source_url: "https://github.com/paulmillr/readdirp", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "reflect.getprototypeof", kind: npm, version: "1.0.10", license: "MIT", source_url: "https://github.com/es-shims/Reflect.getPrototypeOf", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "regenerate", kind: npm, version: "1.4.2", license: "MIT", source_url: "https://github.com/mathiasbynens/regenerate", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "regenerate-unicode-properties", kind: npm, version: "10.2.2", license: "MIT", source_url: "https://github.com/mathiasbynens/regenerate-unicode-properties", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "regexp.prototype.flags", kind: npm, version: "1.5.4", license: "MIT", source_url: "https://github.com/es-shims/RegExp.prototype.flags", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "regexpu-core", kind: npm, version: "6.4.0", license: "MIT", source_url: "https://github.com/mathiasbynens/regexpu-core", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "regjsgen", kind: npm, version: "0.8.0", license: "MIT", source_url: "https://github.com/bnjmnt4n/regjsgen", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "regjsparser", kind: npm, version: "0.13.2", license: "BSD-2-Clause", source_url: "https://github.com/jviereck/regjsparser", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "require-from-string", kind: npm, version: "2.0.2", license: "MIT", source_url: "https://github.com/floatdrop/require-from-string", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "resolve", kind: npm, version: "1.22.12", license: "MIT", source_url: "https://github.com/browserify/resolve", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "reusify", kind: npm, version: "1.1.0", license: "MIT", source_url: "https://github.com/mcollina/reusify", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "rollup", kind: npm, version: "4.61.1", license: "MIT", source_url: "https://github.com/rollup/rollup", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "run-parallel", kind: npm, version: "1.2.0", license: "MIT", source_url: "https://github.com/feross/run-parallel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "safe-array-concat", kind: npm, version: "1.1.4", license: "MIT", source_url: "https://github.com/ljharb/safe-array-concat", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "safe-push-apply", kind: npm, version: "1.0.0", license: "MIT", source_url: "https://github.com/ljharb/safe-push-apply", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "safe-regex-test", kind: npm, version: "1.1.0", license: "MIT", source_url: "https://github.com/ljharb/safe-regex-test", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "scheduler", kind: npm, version: "0.23.2", license: "MIT", source_url: "https://github.com/facebook/react", editions: [agpl, commercial], images: [nginx], notes: "shipped (runtime dependency tree)"}
+  - {name: "semver", kind: npm, version: "6.3.1", license: "ISC", source_url: "https://github.com/npm/node-semver", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "serialize-javascript", kind: npm, version: "7.0.7", license: "BSD-3-Clause", source_url: "https://github.com/yahoo/serialize-javascript", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "set-function-length", kind: npm, version: "1.2.2", license: "MIT", source_url: "https://github.com/ljharb/set-function-length", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "set-function-name", kind: npm, version: "2.0.2", license: "MIT", source_url: "https://github.com/ljharb/set-function-name", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "set-proto", kind: npm, version: "1.0.0", license: "MIT", source_url: "https://github.com/ljharb/set-proto", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "shebang-command", kind: npm, version: "2.0.0", license: "MIT", source_url: "https://github.com/kevva/shebang-command", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "shebang-regex", kind: npm, version: "3.0.0", license: "MIT", source_url: "https://github.com/sindresorhus/shebang-regex", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "side-channel", kind: npm, version: "1.1.1", license: "MIT", source_url: "https://github.com/ljharb/side-channel", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "side-channel-list", kind: npm, version: "1.0.1", license: "MIT", source_url: "https://github.com/ljharb/side-channel-list", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "side-channel-map", kind: npm, version: "1.0.1", license: "MIT", source_url: "https://github.com/ljharb/side-channel-map", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "side-channel-weakmap", kind: npm, version: "1.0.2", license: "MIT", source_url: "https://github.com/ljharb/side-channel-weakmap", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "signal-exit", kind: npm, version: "4.1.0", license: "ISC", source_url: "https://github.com/tapjs/signal-exit", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "smob", kind: npm, version: "1.6.2", license: "MIT", source_url: "https://github.com/Tada5hi/smob", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "source-map", kind: npm, version: "0.6.1, 0.8.0", license: "BSD-3-Clause", source_url: "https://github.com/mozilla/source-map", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "source-map-js", kind: npm, version: "1.2.1", license: "BSD-3-Clause", source_url: "https://github.com/7rulnik/source-map-js", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "source-map-support", kind: npm, version: "0.5.21", license: "MIT", source_url: "https://github.com/evanw/node-source-map-support", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "stop-iteration-iterator", kind: npm, version: "1.1.0", license: "MIT", source_url: "https://github.com/ljharb/stop-iteration-iterator", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "string.prototype.matchall", kind: npm, version: "4.0.12", license: "MIT", source_url: "https://github.com/es-shims/String.prototype.matchAll", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "string.prototype.trim", kind: npm, version: "1.2.11", license: "MIT", source_url: "https://github.com/es-shims/String.prototype.trim", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "string.prototype.trimend", kind: npm, version: "1.0.10", license: "MIT", source_url: "https://github.com/es-shims/String.prototype.trimEnd", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "string.prototype.trimstart", kind: npm, version: "1.0.8", license: "MIT", source_url: "https://github.com/es-shims/String.prototype.trimStart", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "stringify-object", kind: npm, version: "3.3.0", license: "BSD-2-Clause", source_url: "https://github.com/yeoman/stringify-object", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "strip-comments", kind: npm, version: "2.0.1", license: "MIT", source_url: "https://github.com/jonschlinkert/strip-comments", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "sucrase", kind: npm, version: "3.35.1", license: "MIT", source_url: "https://github.com/alangpierce/sucrase", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "supports-preserve-symlinks-flag", kind: npm, version: "1.0.0", license: "MIT", source_url: "https://github.com/inspect-js/node-supports-preserve-symlinks-flag", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "tailwind-merge", kind: npm, version: "2.6.1", license: "MIT", source_url: "https://github.com/dcastil/tailwind-merge", editions: [agpl, commercial], images: [nginx], notes: "shipped (runtime dependency tree)"}
+  - {name: "tailwindcss", kind: npm, version: "3.4.19", license: "MIT", source_url: "https://github.com/tailwindlabs/tailwindcss.git#v3", editions: [agpl, commercial], notes: "build-time (devDependency tree); injects code/CSS into the bundle"}
+  - {name: "temp-dir", kind: npm, version: "2.0.0", license: "MIT", source_url: "https://github.com/sindresorhus/temp-dir", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "tempy", kind: npm, version: "0.6.0", license: "MIT", source_url: "https://github.com/sindresorhus/tempy", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "terser", kind: npm, version: "5.49.2", license: "BSD-2-Clause", source_url: "https://github.com/terser/terser", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "thenify", kind: npm, version: "3.3.1", license: "MIT", source_url: "https://github.com/thenables/thenify", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "thenify-all", kind: npm, version: "1.6.0", license: "MIT", source_url: "https://github.com/thenables/thenify-all", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "tinyglobby", kind: npm, version: "0.2.17", license: "MIT", source_url: "https://github.com/SuperchupuDev/tinyglobby", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "to-regex-range", kind: npm, version: "5.0.1", license: "MIT", source_url: "https://github.com/micromatch/to-regex-range", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "ts-interface-checker", kind: npm, version: "0.1.13", license: "Apache-2.0", source_url: "https://github.com/gristlabs/ts-interface-checker", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "type-fest", kind: npm, version: "0.16.0", license: "MIT OR CC0-1.0", source_url: "https://github.com/sindresorhus/type-fest", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "typed-array-buffer", kind: npm, version: "1.0.3", license: "MIT", source_url: "https://github.com/inspect-js/typed-array-buffer", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "typed-array-byte-length", kind: npm, version: "1.0.3", license: "MIT", source_url: "https://github.com/inspect-js/typed-array-byte-length", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "typed-array-byte-offset", kind: npm, version: "1.0.4", license: "MIT", source_url: "https://github.com/inspect-js/typed-array-byte-offset", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "typed-array-length", kind: npm, version: "1.0.8", license: "MIT", source_url: "https://github.com/inspect-js/typed-array-length", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "typescript", kind: npm, version: "5.9.3", license: "Apache-2.0", source_url: "https://github.com/microsoft/TypeScript", editions: [agpl, commercial], notes: "build-time (devDependency tree); injects code/CSS into the bundle"}
+  - {name: "unbox-primitive", kind: npm, version: "1.1.0", license: "MIT", source_url: "https://github.com/ljharb/unbox-primitive", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "unicode-canonical-property-names-ecmascript", kind: npm, version: "2.0.1", license: "MIT", source_url: "https://github.com/mathiasbynens/unicode-canonical-property-names-ecmascript", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "unicode-match-property-ecmascript", kind: npm, version: "2.0.0", license: "MIT", source_url: "https://github.com/mathiasbynens/unicode-match-property-ecmascript", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "unicode-match-property-value-ecmascript", kind: npm, version: "2.2.1", license: "MIT", source_url: "https://github.com/mathiasbynens/unicode-match-property-value-ecmascript", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "unicode-property-aliases-ecmascript", kind: npm, version: "2.2.0", license: "MIT", source_url: "https://github.com/mathiasbynens/unicode-property-aliases-ecmascript", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "unique-string", kind: npm, version: "2.0.0", license: "MIT", source_url: "https://github.com/sindresorhus/unique-string", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "universalify", kind: npm, version: "2.0.1", license: "MIT", source_url: "https://github.com/RyanZim/universalify", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "upath", kind: npm, version: "1.2.0", license: "MIT", source_url: "https://github.com/anodynos/upath", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "update-browserslist-db", kind: npm, version: "1.2.3", license: "MIT", source_url: "https://github.com/browserslist/update-db", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "util-deprecate", kind: npm, version: "1.0.2", license: "MIT", source_url: "https://github.com/TooTallNate/util-deprecate", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "vite", kind: npm, version: "5.4.21", license: "MIT", source_url: "https://github.com/vitejs/vite", editions: [agpl, commercial], notes: "build-time (devDependency tree); injects code/CSS into the bundle"}
+  - {name: "vite-plugin-pwa", kind: npm, version: "1.3.0", license: "MIT", source_url: "https://github.com/vite-pwa/vite-plugin-pwa", editions: [agpl, commercial], notes: "build-time (devDependency tree); injects code/CSS into the bundle"}
+  - {name: "which", kind: npm, version: "2.0.2", license: "ISC", source_url: "https://github.com/isaacs/node-which", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "which-boxed-primitive", kind: npm, version: "1.1.1", license: "MIT", source_url: "https://github.com/inspect-js/which-boxed-primitive", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "which-builtin-type", kind: npm, version: "1.2.1", license: "MIT", source_url: "https://github.com/inspect-js/which-builtin-type", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "which-collection", kind: npm, version: "1.0.2", license: "MIT", source_url: "https://github.com/inspect-js/which-collection", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "which-typed-array", kind: npm, version: "1.1.22", license: "MIT", source_url: "https://github.com/inspect-js/which-typed-array", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "workbox-background-sync", kind: npm, version: "7.4.1", license: "MIT", source_url: "https://github.com/googlechrome/workbox", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "workbox-broadcast-update", kind: npm, version: "7.4.1", license: "MIT", source_url: "https://github.com/googlechrome/workbox", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "workbox-build", kind: npm, version: "7.4.1", license: "MIT", source_url: "https://github.com/googlechrome/workbox", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "workbox-cacheable-response", kind: npm, version: "7.4.1", license: "MIT", source_url: "https://github.com/googlechrome/workbox", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "workbox-core", kind: npm, version: "7.4.1", license: "MIT", source_url: "https://github.com/googlechrome/workbox", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "workbox-expiration", kind: npm, version: "7.4.1", license: "MIT", source_url: "https://github.com/googlechrome/workbox", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "workbox-google-analytics", kind: npm, version: "7.4.1", license: "MIT", source_url: "https://github.com/googlechrome/workbox", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "workbox-navigation-preload", kind: npm, version: "7.4.1", license: "MIT", source_url: "https://github.com/googlechrome/workbox", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "workbox-precaching", kind: npm, version: "7.4.1", license: "MIT", source_url: "https://github.com/googlechrome/workbox", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "workbox-range-requests", kind: npm, version: "7.4.1", license: "MIT", source_url: "https://github.com/googlechrome/workbox", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "workbox-recipes", kind: npm, version: "7.4.1", license: "MIT", source_url: "https://github.com/googlechrome/workbox", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "workbox-routing", kind: npm, version: "7.4.1", license: "MIT", source_url: "https://github.com/googlechrome/workbox", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "workbox-strategies", kind: npm, version: "7.4.1", license: "MIT", source_url: "https://github.com/googlechrome/workbox", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "workbox-streams", kind: npm, version: "7.4.1", license: "MIT", source_url: "https://github.com/googlechrome/workbox", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "workbox-sw", kind: npm, version: "7.4.1", license: "MIT", source_url: "https://github.com/googlechrome/workbox", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "workbox-window", kind: npm, version: "7.4.1", license: "MIT", source_url: "https://github.com/googlechrome/workbox", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+  - {name: "yallist", kind: npm, version: "3.1.1", license: "ISC", source_url: "https://github.com/isaacs/yallist", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
+
+# Considered and rejected (PRD addendum F). Not shipped; kept so nobody
+# re-proposes them without reading why.
+rejected:
+  - {name: Piper, kind: voice, license: GPL-3.0, source_url: "https://github.com/OHF-Voice/piper1-gpl", reason: "GPL-3.0 (and espeak-ng based); not distributable in the commercial edition. Kokoro-82M chosen instead."}
+  - {name: XTTS-v2, kind: voice, license: CPML, source_url: "https://huggingface.co/coqui/XTTS-v2", reason: "Coqui Public Model License: non-commercial only."}
+  - {name: F5-TTS, kind: voice, license: CC-BY-NC-4.0, source_url: "https://github.com/SWivid/F5-TTS", reason: "Pretrained weights are CC-BY-NC (non-commercial)."}
+  - {name: MiniCheck-7B, kind: model, license: CC-BY-NC-4.0, source_url: "https://huggingface.co/bespokelabs/Bespoke-MiniCheck-7B", reason: "Non-commercial licence. nli-deberta-v3 (Apache-2.0) is the fact-check path."}
+  - {name: "GLiNER v0/v1", kind: model, license: CC-BY-NC-4.0, source_url: "https://huggingface.co/urchade/gliner_base", reason: "Early GLiNER weights are non-commercial (trained on non-commercial data)."}
+  - {name: EbookLib, kind: python, license: AGPL-3.0, source_url: "https://github.com/aerkalov/ebooklib", reason: "AGPL-3.0; incompatible with the commercial edition."}
+  - {name: Pandoc, kind: apt, license: GPL-2.0-or-later, source_url: "https://pandoc.org", reason: "GPL; would have to ship in the commercial image."}
+  - {name: react-leaflet, kind: npm, license: Hippocratic-2.1, source_url: "https://github.com/PaulLeCam/react-leaflet", reason: "Hippocratic (ethical-use) licence restricts field of use. Use Leaflet (BSD-2-Clause) directly."}

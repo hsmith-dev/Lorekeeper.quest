@@ -1,9 +1,12 @@
 name: Dependency licences
 
 # Lorekeeper is AGPL-3.0 *and* sold under a proprietary commercial licence, so
-# every dependency must be permissively licensed. This fails on copyleft,
-# non-commercial, ethical-use and unknown licences. Policy (allowlist, deny
-# patterns, owner-approved exceptions) lives in .github/license-policy.toml.
+# everything we ship must be distributable under both. licenses/register.yaml
+# is the inventory (packages, images, apt libraries, models, voices, fonts);
+# .github/license-policy.toml holds the rules (allowlist, aliases, deny lists,
+# [strict] edition rules, owner-approved exceptions). Each scan runs once per
+# edition (LOREKEEPER_EDITION): `commercial` is strict, `agpl` additionally
+# allows GPL-family entries that ship only in the AGPL-only `tts` image.
 on:
   push:
     branches: [main]
@@ -13,7 +16,9 @@ on:
       - "src/frontend/package-lock.json"
       - ".github/license-policy.toml"
       - "scripts/check-licenses.py"
+      - "scripts/test_check_licenses.py"
       - ".github/workflows/license-check.yml"
+      - "licenses/**"
   pull_request:
     paths:
       - "src/backend/requirements*.txt"
@@ -21,7 +26,9 @@ on:
       - "src/frontend/package-lock.json"
       - ".github/license-policy.toml"
       - "scripts/check-licenses.py"
+      - "scripts/test_check_licenses.py"
       - ".github/workflows/license-check.yml"
+      - "licenses/**"
   workflow_dispatch:
 
 permissions:
@@ -30,6 +37,12 @@ permissions:
 jobs:
   backend:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        edition: [agpl, commercial]
+    env:
+      LOREKEEPER_EDITION: ${{ matrix.edition }}
     steps:
       - uses: actions/checkout@v4
 
@@ -40,28 +53,41 @@ jobs:
           cache-dependency-path: src/backend/requirements.txt
 
       # Only runtime requirements: requirements-dev.txt (pytest etc.) is never
-      # distributed. CPU-only torch wheels keep the install small; their
-      # licence metadata is identical to the CUDA build.
+      # distributed, so of it only the checker's pyyaml is installed (it is
+      # also a runtime transitive, so it adds nothing unregistered). CPU-only
+      # torch wheels keep the install small; their licence metadata is
+      # identical to the CUDA build, but the CUDA build's NVIDIA wheels are
+      # never seen here (E0-QA.8 scans the real images).
       - name: Install runtime dependencies
         run: |
           python -m pip install --upgrade pip
           pip install --extra-index-url https://download.pytorch.org/whl/cpu \
             -r src/backend/requirements.txt
+          pip install -r <(grep -i '^pyyaml' src/backend/requirements-dev.txt)
 
       # Reads installed package metadata directly (PEP 639 License-Expression,
       # then classifiers). pip-licenses 5.0 ignores License-Expression and
       # reports ~40 modern packages as UNKNOWN.
-      - name: Check against policy
-        run: python scripts/check-licenses.py --python-env
+      - name: Check against register and policy (${{ matrix.edition }})
+        run: python scripts/check-licenses.py --python-env --register licenses/register.yaml --artifact backend
 
   frontend:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        edition: [agpl, commercial]
+    env:
+      LOREKEEPER_EDITION: ${{ matrix.edition }}
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
+      - name: Install checker dependency
+        run: pip install -r <(grep -i '^pyyaml' src/backend/requirements-dev.txt)
 
       - uses: actions/setup-node@v4
         with:
@@ -79,5 +105,29 @@ jobs:
         working-directory: src/frontend
         run: npx --yes license-checker-rseidelsohn@4.4.2 --json --excludePrivatePackages > "$GITHUB_WORKSPACE/npm-licenses.json"
 
-      - name: Check against policy
-        run: python scripts/check-licenses.py --npm npm-licenses.json
+      - name: Check against register and policy (${{ matrix.edition }})
+        run: python scripts/check-licenses.py --npm npm-licenses.json --register licenses/register.yaml --artifact nginx
+
+  # Register-vs-artifacts: every model/voice/font entry has an artifact path
+  # or download URL plus sha256, tracked artifacts match their hash, and a
+  # baked artifact (font, weights) with no register entry fails. Also runs the
+  # checker's unit tests.
+  register:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install checker dependencies
+        run: pip install -r <(grep -iE '^(pyyaml|pytest)==' src/backend/requirements-dev.txt)
+
+      - name: Checker unit tests
+        run: python -m pytest -q scripts/test_check_licenses.py
+
+      - name: Register vs artifacts (both editions)
+        run: |
+          python scripts/check-licenses.py --check-artifacts --register licenses/register.yaml --edition agpl
+          python scripts/check-licenses.py --check-artifacts --register licenses/register.yaml --edition commercial
