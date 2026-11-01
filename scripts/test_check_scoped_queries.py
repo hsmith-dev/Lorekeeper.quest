@@ -1,4 +1,4 @@
-"""Unit tests for scripts/check_scoped_queries.py (CI-8: E0-Access.2, .3 and .5 parts).
+"""Unit tests for scripts/check_scoped_queries.py (CI-8: E0-Access.2, .3, .5 and .9 parts).
 
 Run: python -m pytest -q scripts/test_check_scoped_queries.py  (stdlib + pytest)
 """
@@ -392,3 +392,116 @@ def test_jobs_package_may_read_its_own_tables(tmp_path):
 def test_owner_infra_allows_nothing_else(tmp_path, rel, body):
     errors = infra(tmp_path, {rel: body})
     assert len(errors) == 1 and "outside app/access/" in errors[0], errors
+
+
+# ---- E0-Access.9: the one Visibility writer ----------------------------------
+
+# Pinned: widening the allowance means changing this test too.
+FROZEN_VISIBILITY_WRITE_ALLOWED = {("app/services/world_service.py", "apply_change"): frozenset({"visibility_floor"})}
+
+
+def vis(tmp_path: Path, files: dict[str, str]) -> list:
+    return csq.check_visibility_writes(make_app(tmp_path, files))
+
+
+def test_visibility_allowlist_is_pinned_and_separate_from_owner_infra():
+    assert csq.VISIBILITY_WRITE_ALLOWED == FROZEN_VISIBILITY_WRITE_ALLOWED
+    assert not any(path.startswith(prefix) for path, _ in csq.VISIBILITY_WRITE_ALLOWED for prefix in csq.OWNER_INFRA)
+
+
+def test_repo_has_no_visibility_write_outside_access():
+    found = csq.check_visibility_writes()
+    assert not found, "\n".join(map(str, found))
+
+
+@pytest.mark.parametrize("body, column", [
+    ("def f(x, v):\n    x.visibility = v\n", "visibility"),
+    ("def f(x, v):\n    x.visibility_floor = v\n", "visibility_floor"),
+    ("def f(x, v):\n    x.field_visibility = {'a': v}\n", "field_visibility"),
+    ("def f(a, b, v):\n    a.title, b.visibility = 't', v\n", "visibility"),
+    ("def f(x, v):\n    x.visibility: str = v\n", "visibility"),
+    ("def f(x, v):\n    x.field_visibility['name'] = v\n", "field_visibility"),
+    ("def f(x):\n    del x.field_visibility['name']\n", "field_visibility"),
+    ("def f(x, v):\n    x.field_visibility.update(name=v)\n", "field_visibility"),
+    ("def f(x, v):\n    setattr(x, 'field_visibility', v)\n", "field_visibility"),
+    ("def f(x, v):\n    setattr(x, 'visibility', v)\n", "visibility"),
+    ("def f(M, v):\n    return update(M).values(visibility=v)\n", "visibility"),
+    ("def f(M, v):\n    return sa.update(M).where(M.id == 1).values({'visibility_floor': v})\n", "visibility_floor"),
+    ("def f(M, v):\n    return update(M).values({M.visibility: v})\n", "visibility"),
+    ("def f(stmt, v):\n    return stmt.on_conflict_do_update(index_elements=['id'], set_={'visibility': v})\n",
+     "visibility"),
+    ("def f():\n    return text('UPDATE journal_entries SET visibility = :v WHERE id = :id')\n", "visibility"),
+    ("async def f(conn):\n    await conn.exec_driver_sql(\"update e set field_visibility = '{}'\")\n",
+     "field_visibility"),
+    # In a method too.
+    ("class S:\n    def f(self, v):\n        self.row.visibility = v\n", "visibility"),
+])
+def test_planted_visibility_write_fails(tmp_path, body, column):
+    found = vis(tmp_path, {"services/thing.py": body})
+    assert len(found) == 1, found
+    assert found[0].path == "app/services/thing.py" and f"writes `{column}`" in str(found[0])
+    assert "set_visibility" in str(found[0])
+
+
+def test_visibility_reads_constructors_and_access_pass(tmp_path):
+    assert vis(tmp_path, {
+        "services/reads.py": (
+            "from app.db.models import JournalEntry\n"
+            "def f(db, x, cid):\n"
+            "    shown = x.visibility == 'party'\n"
+            "    e = JournalEntry(campaign_id=cid, visibility='gm')\n"
+            "    q = select(JournalEntry).where(JournalEntry.visibility == 'gm')\n"
+            "    t = text('SELECT id FROM journal_entries WHERE visibility = :v')\n"
+            "    u = text('UPDATE journal_entries SET narrative = :n WHERE visibility = :v')\n"
+            "    data = {'visibility': 'gm'}\n"
+            "    data.update({'visibility': 'gm'})\n"
+            "    return getattr(x, 'visibility'), x.field_visibility.get('a'), e, q, t, u, data, shown\n"
+        ),
+        "db/models/thing.py": (
+            "class Thing(Base):\n"
+            "    visibility: Mapped[Visibility] = mapped_column(VISIBILITY_ENUM)\n"
+            "    visibility_floor = mapped_column(VISIBILITY_ENUM)\n"
+        ),
+        # Strings are not writes.
+        "services/doc.py": '"""x.visibility = v, setattr(x, "visibility", v)"""\n',
+        "access/visibility.py": "def set_visibility(row, v):\n    row.visibility = v\n    setattr(row, 'field_visibility', {})\n",
+    }) == []
+
+
+def test_merge_floor_write_in_apply_change_passes(tmp_path):
+    assert vis(tmp_path, {
+        "services/world_service.py": (
+            "async def apply_change(db, ctx, op, rows, floor):\n"
+            "    for row in rows:\n"
+            "        row.visibility_floor = floor\n"
+            "    def inner(r):\n"
+            "        r.visibility_floor = floor\n"
+            "    return update(Mention).values(visibility_floor=floor)\n"
+        ),
+    }) == []
+
+
+@pytest.mark.parametrize("rel, body", [
+    # The same write anywhere else.
+    ("services/world_service.py", "def merge_entities(row, floor):\n    row.visibility_floor = floor\n"),
+    ("services/other_service.py", "def apply_change(row, floor):\n    row.visibility_floor = floor\n"),
+    ("api/routes/world.py", "def apply_change(row, floor):\n    row.visibility_floor = floor\n"),
+    ("services/world_service.py", "row.visibility_floor = 'gm'\n"),
+    # A method named apply_change is not the module-level function.
+    ("services/world_service.py", "class W:\n    def apply_change(self, row, floor):\n        row.visibility_floor = floor\n"),
+    # apply_change may write only visibility_floor.
+    ("services/world_service.py", "def apply_change(row, v):\n    row.visibility = v\n"),
+    ("services/world_service.py", "def apply_change(row, v):\n    row.field_visibility = {'a': v}\n"),
+    ("services/world_service.py", "def apply_change(M, v):\n    return update(M).values(visibility=v)\n"),
+])
+def test_floor_write_elsewhere_fails(tmp_path, rel, body):
+    found = vis(tmp_path, {rel: body})
+    assert len(found) == 1, found
+
+
+def test_main_runs_the_visibility_check(tmp_path, capsys):
+    empty = tmp_path / "b.txt"
+    empty.write_text("")
+    app = make_app(tmp_path, {"services/s.py": "def f(x, v):\n    x.visibility = v\n"})
+    assert csq.main(["--app", str(app), "--baseline", str(empty)]) == 1
+    assert "app/services/s.py:2: writes `visibility` outside app/access/" in capsys.readouterr().out

@@ -3,7 +3,7 @@
 Append-only: later stories add members and models here, never rename or
 remove them. E0-Access.7 ships `SourceKind` (the keys of
 `retrieval_service.register_source`); E0-Access.8 adds `SourceRef`,
-`ResolvedSource` and `grounded`.
+`ResolvedSource` and `grounded`; E0-Access.9 adds `RecordRef`.
 """
 from __future__ import annotations
 
@@ -64,3 +64,18 @@ class Grounded(BaseModel):
     your journal"."""
 
     grounded: bool = True
+
+
+# ── Visibility targets (E0-Access.9) ───────────────────────────────────────
+
+class RecordRef(BaseModel):
+    """A pointer to a record whose Visibility `access.set_visibility` may
+    change: `kind` is a Visibility kind (`access.register_visibility_kind`,
+    e.g. "journal", "session_plan"), `id` the row, and `field` optionally one
+    field of it (a per-field Visibility, or "visibility_floor")."""
+
+    model_config = ConfigDict(frozen=True)
+
+    kind: str
+    id: uuid.UUID
+    field: str | None = None

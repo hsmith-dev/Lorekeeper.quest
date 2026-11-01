@@ -7,8 +7,9 @@ Audience is computed, and the two predicates generated from it.
 Each model registers exactly one class:
 
   * `stored(column="visibility", owner_field="user_id", kind_field=None,
-    field_visibility=None)`: the row carries its Visibility. `column=None`
-    means every row is Owner(owner_field) (chat sessions).
+    field_visibility=None, writer=None)`: the row carries its Visibility.
+    `column=None` means every row is Owner(owner_field) (chat sessions).
+    `writer` (E0-Access.9) is the function `set_visibility` writes through.
   * `derived(derive_from=[...])`: the row's Audience comes from other rows,
     through `parent(...)` links (the most restrictive parent, plus a
     `field=` rule such as `journal_tags.source_field`), or through
@@ -51,7 +52,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Iterable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Mapping, Sequence
 
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -100,6 +101,12 @@ class Stored:
     # `entities`. Field level only: it never changes the row's Audience.
     field_visibility: str | None = None
     gm_fields: tuple[str, ...] = ()
+    # E0-Access.9: the one function that writes this model's Visibility
+    # columns, `writer(db, ctx, row, field, value)` (sync or async), where
+    # `field` is "visibility", "visibility_floor" or "field_visibility.<key>".
+    # `set_visibility` calls it instead of setting the column itself
+    # (E0-WorldCore registers `world_service.apply_change` for Canon tables).
+    writer: Callable[..., Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -166,8 +173,9 @@ Registration = Stored | Derived | AlwaysGM | Membership | DerivedFromSources
 
 
 def stored(column: str | None = "visibility", owner_field: str = "user_id", kind_field: str | None = None,
-           field_visibility: str | None = None, *, gm_fields: Iterable[str] = ()) -> Stored:
-    return Stored(column, owner_field, kind_field, field_visibility, tuple(gm_fields))
+           field_visibility: str | None = None, *, gm_fields: Iterable[str] = (),
+           writer: Callable[..., Any] | None = None) -> Stored:
+    return Stored(column, owner_field, kind_field, field_visibility, tuple(gm_fields), writer)
 
 
 def parent(model: type, fk: str, *, remote: str = "id", attr: str | None = None) -> Parent:

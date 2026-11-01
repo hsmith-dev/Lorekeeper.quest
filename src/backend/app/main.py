@@ -10,7 +10,7 @@ from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 from app.core.limiter import limiter
-from app.access import VaryMiddleware
+from app.access import VaryMiddleware, VisibilityError, visibility_exception_handler
 
 from app.core.config import get_settings
 from app.core.errors import LLMError, llm_exception_handler
@@ -22,7 +22,7 @@ from app.services.chat_service import check_kobold_health
 from app.db.session import get_db
 from app.api.routes import (
     auth, campaigns, journals, tags, chat, ingest, npcs, quests, sources, share, billing, session_plans, feedback,
-    admin, shorthand, character_sheets, members,
+    admin, shorthand, character_sheets, members, visibility,
 )
 from app.api.routes import settings as settings_routes
 from app.api.deps import require_active_account, require_admin
@@ -63,6 +63,8 @@ def create_app() -> FastAPI:
     # app/core/errors.py); more specific than the catch-all Exception handler
     # below, so Starlette picks this one for the LLMError family.
     app.add_exception_handler(LLMError, llm_exception_handler)
+    # VisibilityError (E0-Access.9): 422 {"detail", "code"}, e.g. code always_gm.
+    app.add_exception_handler(VisibilityError, visibility_exception_handler)
     app.add_middleware(SlowAPIMiddleware)
 
     # ── CORS ───────────────────────────────────────────────────────────────────
@@ -134,6 +136,8 @@ def create_app() -> FastAPI:
     app.include_router(campaigns.router, prefix="/api/campaigns", tags=["campaigns"], dependencies=gate)
     # E0-Access members routes (GET /{campaign_id}/me today), same prefix.
     app.include_router(members.router,   prefix="/api/campaigns", tags=["members"],   dependencies=gate)
+    # E0-Access.9: POST /{campaign_id}/visibility (bulk set_visibility), same prefix.
+    app.include_router(visibility.router, prefix="/api/campaigns", tags=["visibility"], dependencies=gate)
     app.include_router(journals.router,  prefix="/api/journals",  tags=["journals"],  dependencies=gate)
     app.include_router(tags.router,      prefix="/api/tags",      tags=["tags"],      dependencies=gate)
     app.include_router(chat.router,      prefix="/api/chat",      tags=["chat"],      dependencies=gate)
