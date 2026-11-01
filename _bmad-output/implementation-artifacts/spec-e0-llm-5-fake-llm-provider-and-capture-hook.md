@@ -2,10 +2,10 @@
 title: 'E0-LLM.5: Deterministic fake LLM provider and the EV-4 context-capture hook'
 type: 'feature'
 created: '2026-11-01'
-status: 'in-review'
+status: 'done'
 baseline_revision: 'f0431584b210413cf9f9812dc7a3f04ce3705998'
 review_loop_iteration: 0
-followup_review_recommended: false
+followup_review_recommended: true
 context:
   - '{project-root}/_bmad-output/implementation-artifacts/epic-6-context.md'
 warnings: [oversized]
@@ -156,3 +156,66 @@ deferred: []
 - `uv run --python 3.11 python -m py_compile <changed .py>` -- expected: no output.
 - Scratch venv with `--noconftest` for the pure unit tests -- expected: pass.
 - Draft PR, then `gh pr checks <n> --repo hsmith-dev/Lorekeeper.quest --watch` -- expected: all green.
+
+## Auto Run Result
+
+Status: done
+
+**Summary:**
+- **The fake provider.** `llm_provider` has `provider="fake"`. Under `ENVIRONMENT=test` it also answers every config, except in tests that install a MockTransport or are `ollama`-marked.
+  - It covers `complete_messages`, `stream_messages` (at least 2 chunks) and `complete_structured` (backend `"fake"`).
+  - The fake replaces only the sender, so the gate, model choice, budget, schema prompt, validation, repairs, stats and logs all still run.
+  - `fake_llm.script([...])` queues replies. A str is returned as is, a dict, list or BaseModel as JSON, and an exception instance or class is raised.
+  - Unscripted structured calls get a minimal valid instance (`fake_json`). Unscripted plain calls get text keyed on sha256(messages).
+  - `detect_backend` short-circuits while the fake is active, so `ai_service` never makes its KoboldCpp-native request in tests.
+- **The capture hook.** `llm_provider.capture()` is a sync context manager on a contextvar that yields `LLMCapture.calls` of `CapturedCall(messages, task, gate_class, model, provider, fake, schema)`.
+  - It records at the send point for every path: plain, the fake stream, the real OpenAI-compatible stream, each structured attempt, and the KoboldCpp-native narrative.
+  - It deep-copies the messages and never records a key. Captures nest, and with none active the cost is one contextvar read.
+  - This is the shape `tests/ev4/families.assert_captured_context_clean` expects, which is proven with the real hook in `tests/ev4/test_families.py`.
+- **Fixtures.** `tests/fixtures/fake_llm.py` holds the `fake_llm` fixture and the autouse `no_kobold_socket` guard. The guard refuses and records any connect to KOBOLD_URL's resolved (ip, port) and fails the test at teardown. `tests/conftest.py` needed one added line.
+- **Eval.** `eval_common.FakeLLM` now delegates to the provider fake.
+
+**Files changed:**
+- `src/backend/app/clients/fakes.py` -- `FakeLLM`, `fake_json`, `fake_llm_text` and `fake_chunks`.
+- `src/backend/app/services/llm_provider.py` -- the fake routing, `fake_llm_active`, the capture hook, and the default BYOK models hoisted to constants (no behaviour change).
+- `src/backend/app/services/ai_service.py` -- the KoboldCpp-native prompt is recorded for capture.
+- `src/backend/scripts/eval_common.py` -- `FakeLLM` delegates to `provider="fake"`.
+- `src/backend/tests/fixtures/__init__.py`, `src/backend/tests/fixtures/fake_llm.py` -- the fixture and the socket guard.
+- `src/backend/tests/conftest.py` -- one import line.
+- `src/backend/tests/test_llm_fake.py` -- every matrix row plus the review additions.
+- `src/backend/tests/ev4/test_families.py` -- the harness tested against the real `capture()`, with a canary caught and a clean prompt passing.
+- `src/backend/tests/test_eval_common.py` -- the eval fake is the provider fake.
+
+**Review:** 1 pass, 26 findings (medium 2, low 17, false 3, maybe-false 0). 15 rows were patched; the grouped entries are:
+- stream capture tests (medium);
+- the KoboldCpp-native capture (medium);
+- `fake_json` constraints;
+- JSON serialisation of scripted replies and raising exception classes;
+- docstrings on what capture records and the serial script;
+- the fixture annotation.
+
+None were deferred. The rejected findings and their reasons are in the Review Triage Log:
+- `provider="fake"` being selectable in production only affects the user who picks it;
+- no strict check for unused script entries;
+- the eval digest change;
+- no end-to-end Player-route test (that is E0-QA.14);
+- `ENVIRONMENT=test` outside pytest;
+- a scheme-less KOBOLD_URL;
+- 3 false findings.
+
+**Follow-up review:** true. Two medium entries were patched. The unverified risk: capture is complete only for the send points instrumented here. A future send path that bypasses `complete_messages`/`stream_messages`/`complete_structured` (as `_generate_kobold_native` did) would silently escape EV-4 capture.
+
+**Verification:**
+- `py_compile` passes on every changed file, and the unit tests passed in a scratch venv.
+- PR #41 CI is all green on both commits. The backend `test` job on the review-fix commit ran 713 passed, 4 skipped, with no KOBOLD_URL socket recorded. The licence, image-licence, database, static and build jobs passed.
+- Sprint-status sync was skipped, per the orchestrator brief.
+
+**Needs desktop verification:**
+- The `ollama`-marked opt-out against a real model: `python -m pytest -m ollama -s tests/integration/test_llm_structured_ollama.py` with `OLLAMA_TEST_URL=http://100.119.62.5:11434`, in the `lorekeeper-backend-test` container. Expected: it reaches the real Ollama (the fake and the socket guard are off for `ollama`-marked tests).
+
+**Residual risks:**
+- These endpoints still connect to KOBOLD_URL directly, so any future test that hits them fails the guard at teardown, which is intended:
+  - `chat_service.check_kobold_health`
+  - `ollama_service.ollama_status`
+  - the `/api/health`, `/api/chat/health` and settings model-status routes
+- The script queue is process-wide, so scripted calls must run serially.
