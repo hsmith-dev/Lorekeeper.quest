@@ -211,6 +211,32 @@ services:
       - default
       - models
 
+  # Background Jobs (E0-Jobs.3): an RQ WorkerPool of WORKER_PROCESSES
+  # (default 2) LorekeeperWorker processes on the interactive, onsave and
+  # backfill queues (highest priority first). Same image and env as the
+  # backend; it starts after the backend is healthy, so after its migrations.
+  # No ports and no nginx route. Override the ceiling with WORKER_MEM_LIMIT.
+  worker:
+    build:
+      context: ./src/backend
+      dockerfile: Dockerfile.prod
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      ENVIRONMENT: production
+    depends_on:
+      backend:
+        condition: service_healthy
+    command: python -m app.jobs.worker
+    networks:
+      - default
+      - models
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: ${WORKER_MEM_LIMIT:-1g}
+
   # Shared embeddings + NER sidecar (src/services/ml): one copy of MiniLM and
   # en_core_web_trf instead of one per gunicorn worker. Not exposed to the
   # host and no nginx route — only on the internal `models` network, where

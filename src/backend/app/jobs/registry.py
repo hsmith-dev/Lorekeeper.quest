@@ -13,7 +13,13 @@ A handler must not call `db.commit()`: the wrapper (app/jobs/worker.py)
 commits the handler's writes together with `done`, and rolls them back when
 the handler raises.
 
-E0-Jobs.3 adds `gate_class`; it is not here yet.
+`gate_class` (E0-Jobs.3) is the LLM gate class the kind's model calls queue
+in (app/core/llm_gate.py); None means the queue's class (`class_for_queue`).
+
+The worker imports every module in KIND_MODULES at start (`load_kind_modules`),
+so a kind registered at import time is known before the first Job runs. A
+module that calls `register` belongs in that tuple; tests/jobs/test_worker.py
+fails when one is missing.
 """
 from __future__ import annotations
 
@@ -22,6 +28,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
+from app.core.llm_gate import GateClass
 from app.domain.enums import JobQueue
 
 # What a kind may hold a lease on (AD-5). `llm` is serialised by E0-LLM's
@@ -47,6 +54,7 @@ class JobKind:
     resources: frozenset[str] = field(default_factory=frozenset)
     live_safe: bool = False
     result_audience: str = "gm"
+    gate_class: GateClass | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or len(self.name) > 64 or not _NAME_RE.match(self.name):
@@ -67,6 +75,11 @@ class JobKind:
             raise ValueError(f"JobKind {self.name}: live_safe must be a bool")
         if self.result_audience not in RESULT_AUDIENCES:
             raise ValueError(f"JobKind {self.name}: result_audience must be one of {sorted(RESULT_AUDIENCES)}")
+        if self.gate_class is not None:
+            try:
+                object.__setattr__(self, "gate_class", GateClass(self.gate_class))
+            except ValueError:
+                raise ValueError(f"JobKind {self.name}: unknown gate_class {self.gate_class!r}") from None
 
     def load_handler(self) -> Handler:
         module, _, attr = self.handler.partition(":")
@@ -96,10 +109,24 @@ def get_kind(name: str) -> JobKind:
     return kind
 
 
+# Modules that register kinds at import time, imported by the worker at start
+# (LorekeeperWorker). This module's own built-ins need no entry.
+KIND_MODULES: tuple[str, ...] = ()
+
+
+def load_kind_modules() -> None:
+    """Import every module in KIND_MODULES (registering their kinds)."""
+    for module in KIND_MODULES:
+        importlib.import_module(module)
+
+
 # Built-in: does nothing. For tests and smoke checks of the whole pipeline.
 SYSTEM_NOOP = register(JobKind(
     name="system.noop", queue=JobQueue.INTERACTIVE, timeout_s=30, handler="app.jobs.builtin:noop",
     live_safe=True,
 ))
 
-__all__ = ["KINDS", "RESOURCES", "RESULT_AUDIENCES", "SYSTEM_NOOP", "JobKind", "get_kind", "register"]
+__all__ = [
+    "KINDS", "KIND_MODULES", "RESOURCES", "RESULT_AUDIENCES", "SYSTEM_NOOP", "JobKind", "get_kind",
+    "load_kind_modules", "register",
+]

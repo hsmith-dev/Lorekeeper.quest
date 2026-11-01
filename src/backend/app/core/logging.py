@@ -1,3 +1,4 @@
+import contextvars
 import logging
 import json
 import sys
@@ -13,6 +14,27 @@ from pathlib import Path
 # exists so log viewing still works when no file is configured (local dev).
 RECENT_LOGS: deque[str] = deque(maxlen=2000)
 
+# The Job a log line belongs to, set by the Jobs wrapper (app/jobs/worker.py)
+# while a Job runs. JobContextFilter copies it onto every record, so code the
+# handler calls logs job_id, kind and campaign_id without passing them.
+JOB_LOG_FIELDS = ("job_id", "kind", "campaign_id")
+job_log_context: contextvars.ContextVar[dict[str, str] | None] = contextvars.ContextVar(
+    "job_log_context", default=None
+)
+
+
+class JobContextFilter(logging.Filter):
+    """Adds the running Job's fields to each record, never overriding fields
+    the call passed in `extra`. configure_logging installs it on every handler."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        fields = job_log_context.get()
+        if fields:
+            for key, value in fields.items():
+                if not hasattr(record, key):
+                    setattr(record, key, value)
+        return True
+
 
 class JSONFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
@@ -24,6 +46,10 @@ class JSONFormatter(logging.Formatter):
         }
         if record.exc_info:
             payload["exc"] = self.formatException(record.exc_info)
+        for key in JOB_LOG_FIELDS:
+            value = getattr(record, key, None)
+            if value is not None:
+                payload[key] = str(value)
         if hasattr(record, "extra"):
             payload.update(record.extra)
         return json.dumps(payload)
@@ -70,6 +96,9 @@ def configure_logging(level: str = "INFO", log_file: str | None = None) -> None:
                 )
             )
 
+    job_filter = JobContextFilter()
+    for h in handlers:
+        h.addFilter(job_filter)
     logging.root.handlers = handlers
     logging.root.setLevel(getattr(logging, level.upper(), logging.INFO))
     # Quiet noisy third-party loggers

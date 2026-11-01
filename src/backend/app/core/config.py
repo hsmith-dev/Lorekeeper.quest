@@ -59,6 +59,9 @@ class Settings(BaseSettings):
     # through the same wrapper the worker uses, instead of being pushed to RQ
     # (app/jobs/outbox.py). Never set it in a deployment.
     jobs_eager: bool = False
+    # WORKER_PROCESSES: how many LorekeeperWorker processes `python -m
+    # app.jobs.worker` runs in its RQ WorkerPool (AD-2: 2).
+    worker_processes: int = 2
 
     # JWT
     secret_key: str
