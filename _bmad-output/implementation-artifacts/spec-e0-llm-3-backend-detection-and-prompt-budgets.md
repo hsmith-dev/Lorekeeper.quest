@@ -149,3 +149,66 @@ deferred:
 **Needs desktop verification (record in Auto Run Result):**
 - Budget estimates vs the real `lorekeeper` model tokenizer and context window on the desktop Ollama.
 - `detect_backend` against a real Ollama vs an OpenAI-compatible BYOK endpoint.
+
+## Auto Run Result
+
+Status: done
+
+**Summary:**
+- `llm_provider.detect_backend(api_url)` sends one `GET /api/version`. It returns `ollama` when the reply is a 2xx JSON object with a string `version`, and `openai_compat` otherwise.
+  - Answered probes are cached per URL for the life of the process.
+  - Transport errors, timeouts and 5xx replies are not cached.
+  - It never uses the gate and never raises.
+- `generate_narrative` probes before taking its gate slot. On Ollama it skips the KoboldCpp-native attempt.
+- New `app/services/prompt_budget.py`:
+  - Offline token estimate: `ceil(chars/3.2)` plus 10%, plus 6 tokens per message for the chat template.
+  - A `TASK_POLICIES` registry with the seven Phase 0 tasks.
+  - `fit` / `fit_report`, which trim whole items only and report what they dropped. They raise `PromptBudgetError` when the required parts don't fit, or on overflow for a map_reduce task.
+  - `split_text`, which loses nothing.
+  - `map_reduce`, which batches results to fit and refuses a round that doesn't shrink.
+- `OLLAMA_CONTEXT_LENGTH` setting: default 4096, minimum 2048.
+
+**Files changed:**
+- `src/backend/app/services/prompt_budget.py` -- new: estimate, registry, fit, split_text, map_reduce.
+- `src/backend/app/services/llm_provider.py` -- `detect_backend`, `BACKEND_*`, `_backend_cache`. No gate code touched.
+- `src/backend/app/services/ai_service.py` -- skips the native attempt on Ollama.
+- `src/backend/app/core/config.py` -- `ollama_context_length`.
+- `.env.example` -- `OLLAMA_CONTEXT_LENGTH=4096`.
+- `src/backend/tests/test_backend_detection.py`, `src/backend/tests/test_prompt_budget.py` -- new tests.
+
+**Review:** 1 pass, 31 findings (high 0, medium 6, low 18, false 5, maybe-false 2).
+- **Patched, 4 entries:**
+  - 5xx probe answers are no longer cached (medium).
+  - Tests for the user's own kobold URL and `config=None` (medium).
+  - Context-length floor raised to 2048 (low).
+  - The default-context test no longer depends on the environment (low).
+- **Deferred:**
+  - Passing `OLLAMA_CONTEXT_LENGTH` to the compose ollama service (E0-Platform.7).
+  - The estimate under-counting CJK and emoji text (E0-LLM.6 calibration).
+- **Rejected:**
+  - Prompt builders adopting `fit`, which E4.7 and the feature epics own.
+  - Role alternation after trimming.
+  - Cache TTL and size, since the intent says process lifetime.
+  - Negative caching during outages.
+  - A round cap and `context_length` for `map_reduce`.
+  - Guards for empty parts and for None from map/reduce.
+  - Reduce overhead defaulting to 0, since `fit` raises rather than truncating.
+  - List content, false: no caller uses it.
+  - Mimics of Ollama's `/api/version`, maybe-false: low if true, because chat completions still works.
+  - The spec missing from the diff, false.
+
+**Follow-up review:** true. Two medium entries were patched. The specific unverified risk is how detection behaves against real servers. KoboldCpp's Ollama emulation, or a proxy in front of Ollama, might answer `/api/version` in ways the mocks don't model.
+
+**Verification:**
+- PR #28 CI is all green. The backend `test` job ran 311 tests and all passed. Backend and frontend licence jobs pass in both editions, as do register, image-licenses and build.
+- `py_compile` is clean.
+- In a scratch venv: prompt_budget, detection and gate tests all passed. The 6 chat-route tests could not run there because the venv has no sqlalchemy; they pass in CI.
+
+**Needs desktop verification:**
+- **Budget estimates vs the real tokenizer and context window.** On the desktop Ollama, send prompts built by `prompt_budget.fit` for each task to the `lorekeeper` model. Use English prose, plus one transcript and one entity list. Compare `estimate_messages(messages)` with the `prompt_eval_count` from `POST /api/chat` (`"stream": false`). The estimate should be greater than or equal to the real count. Also confirm the window the model actually runs with: `ollama ps` / `POST /api/show` for `lorekeeper`, with `OLLAMA_CONTEXT_LENGTH=4096` set on the server.
+- **Backend detection against real servers.** Run `python -c "import asyncio; from app.services import llm_provider as p; print(asyncio.run(p.detect_backend('http://100.119.62.5:11434')))"`; expect `ollama`. Then run it against an OpenAI-compatible BYOK endpoint (KoboldCpp, or llama.cpp server); expect `openai_compat`. Also check that KoboldCpp's Ollama-emulation build isn't reported as `ollama`, or accept that it is.
+
+**Residual risks:**
+- The estimate is uncalibrated until E0-LLM.6.
+- The server's context length isn't enforced by compose until E0-Platform.7.
+- Sprint-status sync was skipped per the orchestrator brief.
