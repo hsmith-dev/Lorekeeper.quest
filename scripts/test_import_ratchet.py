@@ -263,7 +263,7 @@ def test_planted_violation_fails(tmp_path, plant, contract, offender):
 
 @needs_linter
 def test_stale_ignore_line_fails(tmp_path):
-    r = lint(tmp_path, {"services/transcription_service.py": "# STT now goes through a sidecar\n"})
+    r = lint(tmp_path, {"services/nlp_service.py": "# NER now goes through app.clients.ml\n"})
     out = r.stdout + r.stderr
     assert r.returncode != 0, out
-    assert "app.services.transcription_service -> whisper" in out
+    assert "app.services.nlp_service -> spacy" in out

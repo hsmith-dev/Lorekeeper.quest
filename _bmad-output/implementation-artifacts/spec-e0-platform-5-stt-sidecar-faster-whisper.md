@@ -377,3 +377,20 @@ These have run only in CI's image build, never locally.
 - Compose bring-up with a real voice upload through the UI.
 
 **Cost:** the image is 1.59 GB. Debian's ffmpeg pulls in Mesa, LLVM and X11 through libavdevice. A slimmer decoder-only ffmpeg would need an owner-reviewed policy rule for a source-built binary.
+
+**Rebase 2 (onto main after #46–#57):**
+- The register is resolved 3-way by (name, version). Main's removals of fpdf2, easyocr and friends are kept, and so are this branch's whisper removals. 16 stt apt rows that duplicated main's new WeasyPrint rows were dropped, and those rows now list `stt` in `images`.
+- In compose, `worker`, `valkey`, `ml`, the ollama change and every limit are kept. CI-14's sum is 4.75 GiB.
+- The ratchets and baselines now drop both easyocr and whisper. `test_stale_ignore_line_fails` now targets `nlp_service -> spacy`.
+- CI-8 passes: the stt client and the voice route read no tables.
+
+**openai-whisper base vs the sidecar** (same 67 s clip, webm/opus; desktop x86, `--cpus 2`, 2 threads):
+
+| Engine | Full clip | 15 s chunk | WER vs script |
+|---|---|---|---|
+| openai-whisper base (fp32) | 13.1 s | 3.2–3.7 s | 0.097 |
+| faster-whisper base int8, no prompt | 6.6 s | 1.0–2.6 s | 0.121 |
+| faster-whisper base float32 | 10.2 s | 2.2–2.8 s | 0.112 |
+| faster-whisper base int8, with campaign names as `initial_prompt` | | | 0.049 |
+
+The WER between the two engines' transcripts is 0.049. int8 is faster than float32 on x86, as the spike predicted.
