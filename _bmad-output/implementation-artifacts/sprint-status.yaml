@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 10-31-2026 23:30
-last_updated: 11-01-2026 01:18
+last_updated: 11-01-2026 01:27
 project: Lorekeeper.quest
 project_key: NOKEY
 tracking_system: file-system
@@ -74,7 +74,7 @@ development_status:
   2-8-the-licence-check-scans-the-docker-images-we-actually-ship: done
   2-9-owner-confirms-or-replaces-the-three-licence-exceptions: backlog
   2-10-structural-ci-gates-layers-model-packages-table-owners-enum: done
-  2-11-ev-4-harness-scaffolding-route-enumeration-actors-and-probe: backlog
+  2-11-ev-4-harness-scaffolding-route-enumeration-actors-and-probe: done
   2-12-demo-seed-and-the-shared-eval-script-scaffold: done
   2-13-ev-4-probes-for-every-existing-route: backlog
   2-14-ev-4-is-a-zero-leak-hard-gate-with-chat-and-captured-context: backlog
