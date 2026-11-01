@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 10-31-2026 23:30
-last_updated: 11-01-2026 10:53
+last_updated: 11-01-2026 11:09
 project: Lorekeeper.quest
 project_key: NOKEY
 tracking_system: file-system
@@ -113,7 +113,7 @@ development_status:
 
   epic-5: in-progress  # E0-Jobs
   5-1-f2-jobs-files-revision-and-models: done
-  5-2-enqueue-with-outbox-push-and-the-kind-registry: backlog
+  5-2-enqueue-with-outbox-push-and-the-kind-registry: done
   5-3-lorekeeperworker-ctx-rebuild-llm-config-retries-and-the-work: backlog
   5-4-reaper-and-restart-recovery: backlog
   5-5-queue-priority-per-model-serialisation-cursor-backfills-and: backlog
