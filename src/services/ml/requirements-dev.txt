@@ -1,0 +1,4 @@
+# Test-only; never installed into the image. The HTTP tests use fake models,
+# so this plus fastapi is enough to run them (see tests/conftest.py).
+pytest==8.3.0
+httpx==0.27.2

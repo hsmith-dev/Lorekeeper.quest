@@ -79,6 +79,13 @@ class Settings(BaseSettings):
     # The file is deleted as soon as the install finishes or fails.
     llm_download_dir: str | None = None
 
+    # ── ml sidecar (src/services/ml) ────────────────────────────────────────
+    # Shared embeddings + NER service, reachable only on the compose
+    # `models` internal network. Read by app/clients/ml.py; under
+    # ENVIRONMENT=test get_ml_client() returns a deterministic fake instead.
+    ml_url: str = "http://ml:8000"
+    ml_timeout_s: float = 30.0
+
     # App
     environment: str = "development"
     cors_origins: list[str] = ["http://localhost:5173"]
