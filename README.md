@@ -47,7 +47,7 @@ Click **Register**. **The first account created on a fresh deployment automatica
 
 ### 4 · Install the AI model
 
-The app will tell you itself — a banner on the dashboard says no model is installed yet. Follow its link (or go to **Admin → System → Model Library**) and click **Download & install** on **Lorekeeper (fine-tuned)**. That pulls [Lorekeeper-Mistral-7B](https://huggingface.co/harrisonsmith/Lorekeeper-Mistral-7B-GGUF) (~4.4 GB) straight from Hugging Face into the stack with a live progress bar — no shell needed. Keep the tab open until it finishes.
+The app will tell you itself — a banner on the dashboard says no model is installed yet. Follow its link (or go to **Admin → System → Model Library**) and click **Download & install** on **Lorekeeper (fine-tuned)**. That downloads [Lorekeeper-Mistral-7B](https://huggingface.co/harrisonsmith/Lorekeeper-Mistral-7B-GGUF) (~4.4 GB GGUF) from Hugging Face and imports it into the stack's Ollama with a live progress bar — no shell needed. Keep the tab open until it finishes. The backend stages the file in its temp folder while it imports it, so it needs ~5 GB free there (set `LLM_DOWNLOAD_DIR` to use a different folder); the file is deleted afterwards.
 
 Optionally install the **base model** too — it enables the fine-tuned-vs-base comparison in Settings → Model Evaluation.
 
@@ -60,15 +60,25 @@ That's the whole setup.
 <details>
 <summary>Prefer to install models from the CLI instead?</summary>
 
+Don't use `ollama pull hf.co/harrisonsmith/Lorekeeper-Mistral-7B-GGUF`. That repo also holds the LoRA adapter, so Ollama rejects it with *"Repository is not GGUF or is not compatible with llama.cpp"*. Download the GGUF and its Modelfile instead, then build the model from them. Run this from the repo root (Linux/macOS):
+
 ```bash
-# fine-tuned model, straight from Hugging Face
-docker compose -f docker-compose.prod.yml exec ollama ollama pull hf.co/harrisonsmith/Lorekeeper-Mistral-7B-GGUF
-docker compose -f docker-compose.prod.yml exec ollama ollama cp hf.co/harrisonsmith/Lorekeeper-Mistral-7B-GGUF lorekeeper
+# fine-tuned model: download the GGUF (~4.4 GB) + Modelfile into src/ml/models,
+# which the ollama container sees as /import-models
+HF=https://huggingface.co/harrisonsmith/Lorekeeper-Mistral-7B-GGUF/resolve/main
+mkdir -p src/ml/models
+curl -fL -C - -o src/ml/models/lorekeeper-7b-q4.gguf "$HF/lorekeeper-7b-q4.gguf"
+curl -fL -o src/ml/models/lorekeeper-Modelfile "$HF/lorekeeper-Modelfile"
+docker compose -f docker-compose.prod.yml exec ollama ollama create lorekeeper -f /import-models/lorekeeper-Modelfile
 
 # optional base model
 docker compose -f docker-compose.prod.yml exec ollama ollama pull mistral:7b-instruct-q4_0
 docker compose -f docker-compose.prod.yml exec ollama ollama cp mistral:7b-instruct-q4_0 lorekeeper-base
 ```
+
+Running Ollama directly instead of in the stack? Download both files into one folder, `cd` into it, and run `ollama create lorekeeper -f lorekeeper-Modelfile`.
+
+**Windows (PowerShell):** use `curl.exe`, not `curl`. In PowerShell, `curl` is an alias for `Invoke-WebRequest`, which doesn't take these flags. Set the variable with `$HF = "https://huggingface.co/harrisonsmith/Lorekeeper-Mistral-7B-GGUF/resolve/main"`, create the folder with `mkdir -Force src\ml\models`, and use `curl.exe -fL -C - -o src\ml\models\lorekeeper-7b-q4.gguf "$HF/lorekeeper-7b-q4.gguf"` (and the same for the Modelfile). The `docker compose ... ollama create` line works unchanged.
 
 Prefer a different model entirely? Any instruct GGUF works — `ollama cp` any pulled Ollama model to the name `lorekeeper`, or drop a GGUF in `src/ml/models/` with a Modelfile and `ollama create lorekeeper -f /import-models/your-Modelfile`. The training pipeline that produced the fine-tune lives in `src/ml/`.
 </details>
