@@ -124,7 +124,7 @@ Out of the box the stack generates a **self-signed certificate** at startup (bro
 | Chat answer | 585 s | 76 s |
 | Journal entry | 379 s | 64 s |
 
-The old fixed 3-core cap generated about 0.7 tokens/s (E0-QA.15), which is what pushed long answers past the old 10-minute timeout. On a shared machine you can still cap the model server with `OLLAMA_CPUS` in `.env` (e.g. `OLLAMA_CPUS=6`), at the cost of proportionally slower replies; leave it unset or `0` for no cap (an empty `OLLAMA_CPUS=` is rejected by compose). Requests time out after `KOBOLD_TIMEOUT_SECONDS` (default 1200 s, with nginx's proxy timeout just above at 1260 s); raise both if slow hardware hits that. With a GPU, see below: answers take seconds.
+The old fixed 3-core cap generated about 0.7 tokens/s (E0-QA.15), which is what pushed long answers past the old 10-minute timeout. On a shared machine you can still cap the model server with `OLLAMA_CPUS` in `.env` (e.g. `OLLAMA_CPUS=6`), at the cost of proportionally slower replies; leave it unset, empty or `0` for no cap. Requests time out after `KOBOLD_TIMEOUT_SECONDS` (default 1200 s, with nginx's proxy timeout just above at 1260 s); raise both if slow hardware hits that. With a GPU, see below: answers take seconds.
 
 ### GPU (optional, big speedup)
 

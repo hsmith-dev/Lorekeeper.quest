@@ -127,8 +127,7 @@ services:
     # scales with cores, and the old fixed cpus "3.0" held a 24-core host to
     # ~0.7 tok/s, long enough for chat answers to hit KOBOLD_TIMEOUT_SECONDS.
     # Set OLLAMA_CPUS in .env (e.g. OLLAMA_CPUS=6) to reserve cores for other
-    # work on a shared host. An empty OLLAMA_CPUS= is rejected by compose;
-    # leave it unset or set a number.
+    # work on a shared host. Unset or empty falls back to 0 (the `:-`).
     deploy:
       resources:
         limits:

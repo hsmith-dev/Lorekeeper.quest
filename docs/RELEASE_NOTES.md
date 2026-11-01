@@ -42,7 +42,7 @@ A fixes-and-hardening release. No database migrations; your campaigns, journals 
 1. `git pull` (or check out `v1.1.0`).
 2. Optional: compare your `.env` with `.env.example`.
    - `KOBOLD_TIMEOUT_SECONDS` now defaults to `1200` (20 minutes). If your `.env` still sets `600`, raise it, especially on CPU. nginx's proxy timeouts are now `1260s`, just above it, so a slow answer ends with the app's own timeout message rather than a bare 504. If you raise the timeout further, raise `proxy_read_timeout` and `proxy_send_timeout` in `nginx/proxy_common.conf` to match.
-   - `OLLAMA_CPUS` is new and optional. Leave it unset (or `0`) to let the model server use every core; set a number such as `6` to cap it on a shared machine. Don't leave it empty (`OLLAMA_CPUS=`): compose rejects an empty CPU limit.
+   - `OLLAMA_CPUS` is new and optional. Leave it unset (or `0`) to let the model server use every core; set a number such as `6` to cap it on a shared machine.
 3. Rebuild and restart: `docker compose -f docker-compose.prod.yml up -d --build`. There are no database migrations in this release.
 4. If the fine-tuned model never installed on your earlier version, open **Admin → System → Model Library** and click **Download & install**.
 
