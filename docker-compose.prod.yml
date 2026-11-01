@@ -211,7 +211,7 @@ services:
           cpus: "2.0"
           memory: 14g
     # `default` for postgres/valkey/ollama/nginx, `models` to reach the ml
-    # sidecar.
+    # and stt sidecars.
     networks:
       - default
       - models
@@ -280,6 +280,37 @@ services:
           cpus: "1.0"
           memory: ${ML_MEM_LIMIT:-2560m}
 
+  # faster-whisper speech-to-text sidecar (src/services/stt): one copy of the
+  # model instead of openai-whisper in every gunicorn worker. Same rules as
+  # ml: no host port, no nginx route, only the internal `models` network,
+  # where the backend reaches it at STT_URL (default http://stt:8000).
+  # Weights are baked into the image; it runs offline. The model loads on
+  # the first request and unloads after STT_IDLE_UNLOAD_S idle.
+  stt:
+    image: lorekeeper-stt:latest
+    build:
+      context: ./src/services/stt
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      STT_COMPUTE_TYPE: ${STT_COMPUTE_TYPE:-int8}
+      STT_IDLE_UNLOAD_S: ${STT_IDLE_UNLOAD_S:-600}
+      STT_CPU_THREADS: ${STT_CPU_THREADS:-2}
+    networks:
+      - models
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=4)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    # AD-7 budget for stt: 1.25g. Override with STT_MEM_LIMIT in .env.
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: ${STT_MEM_LIMIT:-1280m}
+
   nginx:
     build:
       context: .
@@ -309,7 +340,7 @@ services:
 
 networks:
   # internal: no route out of the network and no host port publishing, so
-  # the ml sidecar can talk to the backend and nothing else.
+  # the ml and stt sidecars can talk to the backend and nothing else.
   models:
     internal: true
 

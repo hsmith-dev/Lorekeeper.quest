@@ -1,10 +1,11 @@
-"""Typed errors for sidecar model services (the `ml` sidecar today).
+"""Typed errors for sidecar model services (the `ml` and `stt` sidecars).
 
 Kept apart from app/core/errors.py's LLM family: these are internal-service
-failures, not user-facing LLM outcomes, and have no HTTP mapping of their own
-yet (E0-Platform.6 decides how callers surface them). Same shape, though:
-class-level `code`, and a RETRYABLE tuple for Jobs. The client itself never
-retries; whoever owns the work decides.
+failures, not user-facing LLM outcomes, and have no global HTTP mapping:
+each caller decides how to surface them (the voice upload route maps a 4xx
+to 422 and anything else to 503; E0-Platform.6 decides for the ml callers).
+Same shape, though: class-level `code`, and a RETRYABLE tuple for Jobs. The
+client itself never retries; whoever owns the work decides.
 """
 
 

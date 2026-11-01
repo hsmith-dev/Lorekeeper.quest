@@ -190,6 +190,37 @@ os_aggregate_allowlist = [
   "^libpam(0g|-modules(-bin)?|-runtime)$", "^zlib1g$",
   "^libssl(\\d+(t64)?|-dev)$", "^openssl(-provider-legacy)?$",
   "^libldap(2|-[\\d.]+-\\d+)$", "^libsasl2-(\\d+|modules-db)$", "^libpq(5|-dev)$",
+  # --- Debian (stt image: python:3.11-slim + ffmpeg) ---
+  # The `ffmpeg` CLI and the GPL/LGPL libraries of its dependency closure
+  # (codecs, libav*, Mesa/X11 pulled in by libavdevice). The stt sidecar runs
+  # ffmpeg as a separate program (subprocess) to decode uploads; no Lorekeeper
+  # process links or loads these libraries (PyAV is deliberately not
+  # installed), so shipping them is mere aggregation, the same as the shells
+  # and tools above. Exact names: a new closure member needs review.
+  "^ffmpeg$", "^fonts-dejavu-core$", "^fonts-dejavu-mono$", "^libasound2-data$",
+  "^libasound2t64$", "^libass9$", "^libasyncns0$", "^libavc1394-0$", "^libavcodec61$",
+  "^libavdevice61$", "^libavfilter10$", "^libavformat61$", "^libavutil59$", "^libbluray2$",
+  "^libbs2b0$", "^libcaca0$", "^libcairo-gobject2$", "^libcairo2$", "^libcdio-cdda2t64$",
+  "^libcdio-paranoia2t64$", "^libcdio19t64$", "^libchromaprint1$", "^libcodec2-1\\.2$",
+  "^libdatrie1$", "^libdbus-1-3$", "^libdc1394-25$", "^libdecor-0-0$", "^libdvdnav4$",
+  "^libdvdread8t64$", "^libelf1t64$", "^libfftw3-double3$", "^libflac14$", "^libflite1$",
+  "^libfreetype6$", "^libfribidi0$", "^libgbm1$", "^libgdk-pixbuf-2\\.0-0$",
+  "^libgdk-pixbuf2\\.0-common$", "^libgfortran5$", "^libgl1$", "^libgl1-mesa-dri$",
+  "^libglib2\\.0-0t64$", "^libglvnd0$", "^libglx-mesa0$", "^libglx0$", "^libgme0$",
+  "^libgnutls30t64$", "^libgraphite2-3$", "^libharfbuzz0b$", "^libidn2-0$", "^libiec61883-0$",
+  "^libjack-jackd2-0$", "^libjbig0$", "^liblcms2-2$", "^libmbedcrypto16$", "^libmpg123-0t64$",
+  "^libnuma1$", "^libopenal-data$", "^libopenal1$", "^libopenmpt0t64$", "^libp11-kit0$",
+  "^libpciaccess0$", "^libpgm-5\\.3-0t64$", "^libplacebo349$", "^libpng16-16t64$",
+  "^libpocketsphinx3$", "^libpostproc58$", "^libpulse0$", "^libraw1394-11$", "^librsvg2-2$",
+  "^librubberband2$", "^libsamplerate0$", "^libsensors-config$", "^libsensors5$", "^libshine3$",
+  "^libslang2$", "^libsndfile1$", "^libsodium23$", "^libsoxr0$", "^libspeex1$",
+  "^libsphinxbase3t64$", "^libsrt1\\.5-gnutls$", "^libssh-4$", "^libsvtav1enc2$",
+  "^libswresample5$", "^libswscale8$", "^libtasn1-6$", "^libthai-data$", "^libthai0$",
+  "^libtheoradec1$", "^libtheoraenc1$", "^libtwolame0$", "^libudfread0$", "^libunistring5$",
+  "^libusb-1\\.0-0$", "^libva-drm2$", "^libva-x11-2$", "^libva2$", "^libvidstab1\\.1$",
+  "^libx264-164$", "^libx265-215$", "^libxvidcore4$", "^libz3-4$", "^libzimg2$", "^libzmq5$",
+  "^libzvbi-common$", "^libzvbi0t64$", "^mesa-libgallium$", "^shared-mime-info$",
+  "^x11-common$",
 ]
 
 [artifacts]

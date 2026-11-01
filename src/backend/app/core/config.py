@@ -1,5 +1,7 @@
 import logging
 from pathlib import Path
+from typing import Literal
+
 from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings
 from functools import lru_cache
@@ -129,6 +131,19 @@ class Settings(BaseSettings):
     ml_url: str = "http://ml:8000"
     ml_timeout_s: float = 30.0
 
+    # ── stt sidecar (src/services/stt) ──────────────────────────────────────
+    # faster-whisper speech-to-text, also only on the `models` network. Read
+    # by app/clients/stt.py; under ENVIRONMENT=test get_stt_client() returns a
+    # deterministic fake. stt_timeout_s is the read timeout for one request:
+    # a 30 s segment on a slow CPU, or a whole voice upload.
+    stt_url: str = "http://stt:8000"
+    stt_timeout_s: float = 300.0
+    # Mirrors STT_COMPUTE_TYPE, which compose passes to the sidecar from the
+    # same .env; declared here so a typo fails backend startup too. Same set
+    # the sidecar accepts (stt_service/config.py COMPUTE_TYPES): int8 / float32
+    # on CPU, float16 / int8_float16 for a GPU build.
+    stt_compute_type: Literal["int8", "float32", "float16", "int8_float16"] = "int8"
+
     # App
     environment: str = "development"
     cors_origins: list[str] = ["http://localhost:5173"]
@@ -196,6 +211,15 @@ class Settings(BaseSettings):
         # not stop the backend from starting. The gate stays conservative at 1.
         if isinstance(v, (int, str)) and str(v).strip() == "0":
             return 1
+        return v
+
+    @field_validator("stt_compute_type", mode="before")
+    @classmethod
+    def _normalise_stt_compute_type(cls, v):
+        # Same normalisation as the sidecar's load_config: " INT8 " is int8,
+        # and an empty STT_COMPUTE_TYPE= line means the default.
+        if isinstance(v, str):
+            return v.strip().lower() or "int8"
         return v
 
     @model_validator(mode="after")

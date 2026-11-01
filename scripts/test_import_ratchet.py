@@ -35,13 +35,13 @@ REPO = Path(__file__).resolve().parent.parent
 CONFIG = REPO / "src/backend/.importlinter"
 
 # The ceiling. Remove a line here in the PR that removes it from .importlinter
-# (E0-Platform.6 removes the other three; E0-QA.9 removed vision_service ->
-# easyocr when OCR moved to ml /v1/ocr). Never add one.
+# (E0-Platform.6 removes the other two; E0-QA.9 removed vision_service ->
+# easyocr when OCR moved to ml /v1/ocr; E0-Platform.5 removed transcription_service
+# -> whisper when transcription moved to the stt sidecar). Never add one.
 FROZEN_IGNORES = {
     "models": frozenset({
         "app.services.nlp_service -> spacy",
         "app.services.embedding_service -> sentence_transformers",
-        "app.services.transcription_service -> whisper",
     }),
 }
 
@@ -185,7 +185,7 @@ needs_linter = pytest.mark.skipif(not HAVE_LINTER, reason="import-linter not ins
 TODAY = {
     "services/nlp_service.py": "import spacy\n",
     "services/embedding_service.py": "from sentence_transformers import SentenceTransformer\n",
-    "services/transcription_service.py": "import whisper\n",
+    "services/transcription_service.py": "from app.clients import stt\n",
     "services/vision_service.py": "from app.clients import ml\n",
     "services/journal_service.py": ("from app.access import context\nfrom app.db import base\n"
                                     "from app.schemas import journal\nfrom app.clients import ml\n"),

@@ -63,7 +63,8 @@ services:
       timeout: 5s
       retries: 5
       start_period: 60s
-    # `default` for postgres/valkey/frontend, `models` to reach the ml sidecar.
+    # `default` for postgres/valkey/frontend, `models` to reach the ml and
+    # stt sidecars.
     networks:
       - default
       - models
@@ -113,6 +114,27 @@ services:
       retries: 5
       start_period: 180s
 
+  # faster-whisper speech-to-text sidecar (src/services/stt). Same rules as
+  # ml: no ports, only the internal `models` network, reached by the backend
+  # at STT_URL (default http://stt:8000). Serves /api/ingest/voice.
+  stt:
+    image: lorekeeper-stt:latest
+    build:
+      context: ./src/services/stt
+      dockerfile: Dockerfile
+    environment:
+      STT_COMPUTE_TYPE: ${STT_COMPUTE_TYPE:-int8}
+      STT_IDLE_UNLOAD_S: ${STT_IDLE_UNLOAD_S:-600}
+      STT_CPU_THREADS: ${STT_CPU_THREADS:-2}
+    networks:
+      - models
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=4)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
   frontend:
     build:
       context: ./src/frontend
@@ -128,7 +150,7 @@ services:
 
 networks:
   # internal: no route out of the network and no host port publishing, so
-  # the ml sidecar can talk to the backend and nothing else.
+  # the ml and stt sidecars can talk to the backend and nothing else.
   models:
     internal: true
 

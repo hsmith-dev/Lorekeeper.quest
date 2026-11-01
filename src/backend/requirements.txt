@@ -20,7 +20,6 @@ slowapi==0.1.9
 pgvector==0.4.2
 sentence-transformers==5.5.1
 numpy<2.0
-openai-whisper==20250625
 pypdf==6.14.2
 weasyprint==70.0
 Jinja2==3.1.6
