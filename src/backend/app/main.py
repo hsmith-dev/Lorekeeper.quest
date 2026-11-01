@@ -19,6 +19,7 @@ from app.core.config import get_settings
 from app.core.errors import LLMError, llm_exception_handler
 from app.core.logging import configure_logging
 from app.core.valkey_client import init_valkey, close_valkey
+from app.core import pubsub
 from app.services.nlp_service import load_nlp_model
 from app.services.embedding_service import load_embedding_model
 from app.services.chat_service import check_kobold_health
@@ -48,6 +49,8 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down Lorekeeper API")
     # Let after-commit hook handlers (they only enqueue) finish first.
     await drain_hooks(timeout=HOOK_DRAIN_TIMEOUT_S)
+    # Pending trailing publishes (E0-Jobs.6) go out before the client closes.
+    await pubsub.flush_pending()
     await close_valkey()
 
 
