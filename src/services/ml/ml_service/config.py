@@ -30,19 +30,28 @@ NLI_MODEL_REVISION = "a150876415327c80daeff35ca6f68f5ed8cf5c24"
 NLI_MODEL_SHA256 = "4e4fc4977f8d29d2a164255c8f69b9d6c158deeb309bb5e70445b94666ccd9e9"
 DEFAULT_NLI_MODEL_PATH = "/models/nli-deberta-v3-xsmall"
 
-# OCR (lazy): EasyOCR "en" = CRAFT detector + english_g2 recogniser. The zips
-# are the registered downloads (licenses/register.yaml easyocr-craft-mlt-25k,
-# easyocr-english-g2); bake_models.py checks them and extracts the .pth files.
-OCR_MODEL_NAME = "easyocr-en"
-OCR_DETECTOR_URL = "https://github.com/JaidedAI/EasyOCR/releases/download/pre-v1.1.6/craft_mlt_25k.zip"
-OCR_DETECTOR_SHA256 = "8dc6a1c703a89ed56308ef742d26ebd45c656248cbbbda6e7fe60e569f873e65"
-OCR_RECOGNIZER_URL = "https://github.com/JaidedAI/EasyOCR/releases/download/v1.3/english_g2.zip"
-OCR_RECOGNIZER_SHA256 = "1b5eaebf1c062de6205560c97ffcfa8dc0e6f413c340e8adc5cfc57e159f61ff"
-OCR_ZIPS = (
-    (OCR_DETECTOR_URL, OCR_DETECTOR_SHA256),
-    (OCR_RECOGNIZER_URL, OCR_RECOGNIZER_SHA256),
+# OCR (lazy): RapidOCR (Apache-2.0) on onnxruntime with the PP-OCRv6 "small"
+# detector and recogniser (multilingual, Latin script included) plus the
+# PP-OCR mobile text-line orientation classifier: RapidOCR 3.10's defaults.
+# Each .onnx is a registered download (licenses/register.yaml rapidocr-*);
+# bake_models.py checks its sha256 and the reader loads it by path, so
+# RapidOCR never downloads. Replaced EasyOCR in E0-QA.9 (its python-bidi
+# dependency is LGPL-3.0).
+OCR_MODEL_NAME = "rapidocr-ppocrv6-small"
+_RAPIDOCR_BASE = "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.10.0/onnx"
+OCR_DET_FILE = "PP-OCRv6_det_small.onnx"
+OCR_CLS_FILE = "ch_ppocr_mobile_v2.0_cls_mobile.onnx"
+OCR_REC_FILE = "PP-OCRv6_rec_small.onnx"
+# (register name, file name, url, sha256), in det / cls / rec order.
+OCR_MODELS = (
+    ("rapidocr-ppocrv6-det-small", OCR_DET_FILE, _RAPIDOCR_BASE + "/PP-OCRv6/det/" + OCR_DET_FILE,
+     "090f04abcd9d9a7498bc4ebf677e4cb9bdce1fe4197ddb7e529f1ef44e1ff94f"),
+    ("rapidocr-ppocr-cls-mobile-v2", OCR_CLS_FILE, _RAPIDOCR_BASE + "/PP-OCRv4/cls/" + OCR_CLS_FILE,
+     "e47acedf663230f8863ff1ab0e64dd2d82b838fceb5957146dab185a89d6215c"),
+    ("rapidocr-ppocrv6-rec-small", OCR_REC_FILE, _RAPIDOCR_BASE + "/PP-OCRv6/rec/" + OCR_REC_FILE,
+     "6f327246b50388f3c176ae304bd95767ea6dc0c9ae92153ef8cbe210b3c14884"),
 )
-DEFAULT_OCR_MODEL_DIR = "/models/easyocr"
+DEFAULT_OCR_MODEL_DIR = "/models/rapidocr"
 
 # Upper bound on texts per /v1/embed request (larger bodies get a 422).
 MAX_EMBED_TEXTS = 256
@@ -60,7 +69,10 @@ MAX_OCR_BYTES = 10_485_760
 # cost. Declared, not measured: see budget.py.
 DEFAULT_RESIDENT_BUDGET_MB = 2000
 DEFAULT_NLI_COST_MB = 600
-DEFAULT_OCR_COST_MB = 900
+# OCR: RapidOCR PP-OCRv6 small measured +230 MB RSS resident after load and 55
+# inference calls in the ml image (E0-QA.9, desktop); 400 leaves headroom for
+# a large photo. EasyOCR was 900 declared (+330 MB measured).
+DEFAULT_OCR_COST_MB = 400
 
 
 @dataclass(frozen=True)

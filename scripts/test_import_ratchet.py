@@ -35,13 +35,13 @@ REPO = Path(__file__).resolve().parent.parent
 CONFIG = REPO / "src/backend/.importlinter"
 
 # The ceiling. Remove a line here in the PR that removes it from .importlinter
-# (E0-Platform.6 removes all four). Never add one.
+# (E0-Platform.6 removes the other three; E0-QA.9 removed vision_service ->
+# easyocr when OCR moved to ml /v1/ocr). Never add one.
 FROZEN_IGNORES = {
     "models": frozenset({
         "app.services.nlp_service -> spacy",
         "app.services.embedding_service -> sentence_transformers",
         "app.services.transcription_service -> whisper",
-        "app.services.vision_service -> easyocr",
     }),
 }
 
@@ -185,7 +185,7 @@ TODAY = {
     "services/nlp_service.py": "import spacy\n",
     "services/embedding_service.py": "from sentence_transformers import SentenceTransformer\n",
     "services/transcription_service.py": "import whisper\n",
-    "services/vision_service.py": "import easyocr\n",
+    "services/vision_service.py": "from app.clients import ml\n",
     "services/journal_service.py": ("from app.access import context\nfrom app.db import base\n"
                                     "from app.schemas import journal\nfrom app.clients import ml\n"),
     "access/context.py": ("from app.schemas import journal\nfrom app.db import base\nfrom app.core import config\n"
@@ -253,7 +253,7 @@ def test_planted_violation_fails(tmp_path, plant, contract, offender):
 
 @needs_linter
 def test_stale_ignore_line_fails(tmp_path):
-    r = lint(tmp_path, {"services/vision_service.py": "# OCR now goes through app.clients.ml\n"})
+    r = lint(tmp_path, {"services/transcription_service.py": "# STT now goes through a sidecar\n"})
     out = r.stdout + r.stderr
     assert r.returncode != 0, out
-    assert "app.services.vision_service -> easyocr" in out
+    assert "app.services.transcription_service -> whisper" in out

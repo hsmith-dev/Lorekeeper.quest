@@ -118,5 +118,3 @@ ignore_imports =
     app.services.embedding_service -> sentence_transformers
     # ratchet: in-process Whisper; E0-Platform.6 routes transcription to the stt sidecar
     app.services.transcription_service -> whisper
-    # ratchet: in-process EasyOCR; E0-Platform.6 routes OCR through ml /v1/ocr
-    app.services.vision_service -> easyocr

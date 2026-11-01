@@ -1,35 +1,19 @@
-import asyncio
-import io
-import logging
-from concurrent.futures import ThreadPoolExecutor
+"""Text from a photo of session notes, read by the ml sidecar's /v1/ocr.
 
-from PIL import Image
+OCR (RapidOCR, PP-OCR ONNX models) runs in the `ml` sidecar, not in this
+process: AD-1 forbids model packages in the web/worker image, and EasyOCR
+(with its LGPL python-bidi dependency) left both images in E0-QA.9. The
+sidecar applies the old in-process rule: the stripped non-empty lines,
+joined with "\\n".
 
-logger = logging.getLogger(__name__)
+Failures are the client's typed errors (app/clients/errors.py):
+ModelServiceUnavailable when the sidecar is down, loading past the timeout
+or over its memory budget; ModelServiceError (status_code 422 / 413) when it
+rejects the upload.
+"""
 
-_reader = None
-_executor = ThreadPoolExecutor(max_workers=1)
-
-
-def _load_reader() -> None:
-    global _reader
-    if _reader is not None:
-        return
-    import easyocr
-    logger.info("Loading EasyOCR text recognition model...")
-    _reader = easyocr.Reader(["en"], gpu=False, verbose=False)
-    logger.info("EasyOCR loaded.")
+from app.clients.ml import get_ml_client
 
 
-def _run_extraction(image_bytes: bytes) -> str:
-    _load_reader()
-    import numpy as np
-    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-    img_array = np.array(image)
-    results = _reader.readtext(img_array, detail=0, paragraph=True)
-    return "\n".join(line.strip() for line in results if line.strip())
-
-
-async def extract_notes_from_image(image_bytes: bytes) -> str:
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(_executor, _run_extraction, image_bytes)
+async def extract_notes_from_image(image_bytes: bytes, filename: str = "image") -> str:
+    return (await get_ml_client().ocr(image_bytes, filename)).strip()

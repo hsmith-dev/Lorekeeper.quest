@@ -2,8 +2,8 @@
 
 CPU-only torch from the PyTorch CPU index before requirements.txt, the CPU
 extra index on the requirements install, the CUDA/NVIDIA guard after the last
-pip install, offline env set, and the torch / torchvision pins equal to
-requirements.txt's (both CPU wheels, in the same layer).
+pip install, offline env set, and the torch pin equal to requirements.txt's
+(a CPU wheel). No torchvision: it left with EasyOCR (E0-QA.9).
 Runs without Docker.
 """
 
@@ -76,18 +76,18 @@ def test_guard_after_every_pip_install():
         assert any(_is_guard(t) for t in runs[i + 1:]), f"no CUDA/NVIDIA guard after RUN #{i}"
 
 
-@pytest.mark.parametrize("pkg", ["torch", "torchvision"])
-def test_torch_pins_match_requirements_lock(pkg):
-    pin = next(x for t in _runs() for x in t if x.startswith(f"{pkg}=="))
+def test_torch_pin_matches_requirements_lock():
+    pin = next(x for t in _runs() for x in t if x.startswith("torch=="))
     lock = (ROOT / "requirements.txt").read_text()
     assert re.search(rf"^{re.escape(pin)}$", lock, re.M), f"{pin} not in requirements.txt"
 
 
-def test_torchvision_from_cpu_index_with_torch():
-    runs = _runs()
-    torch_run = next(t for t in runs if any(x.startswith("torch==") for x in t))
-    pin = next((x for x in torch_run if x.startswith("torchvision==")), None)
-    assert pin and pin.endswith("+cpu"), "torchvision must be installed with torch from the CPU index"
+def test_no_torchvision_or_easyocr():
+    """OCR is RapidOCR on onnxruntime; nothing in the image needs torchvision."""
+    lock = (ROOT / "requirements.txt").read_text()
+    for pkg in ("torchvision", "easyocr", "python-bidi"):
+        assert not re.search(rf"^{pkg}==", lock, re.M), f"{pkg} is back in requirements.txt"
+        assert not any(x.startswith(f"{pkg}==") for t in _runs() for x in t), f"Dockerfile installs {pkg}"
 
 
 def test_lazy_model_paths_in_env():
