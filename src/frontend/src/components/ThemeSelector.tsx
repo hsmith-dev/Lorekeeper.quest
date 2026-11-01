@@ -60,7 +60,8 @@ export function ThemeSelector({ compact = false }: { compact?: boolean }) {
       <select
         value={theme.id}
         onChange={(e) => setTheme(e.target.value)}
-        className="text-xs rounded border border-input bg-background text-foreground px-2 py-1 focus:outline-none focus:ring-1 focus:ring-ring"
+        aria-label="Theme"
+        className="min-h-11 min-w-11 text-xs rounded border border-input bg-background text-foreground px-2 py-1 focus:outline-none focus:ring-1 focus:ring-ring md:min-h-0"
       >
         {themes.map((t) => (
           <option key={t.id} value={t.id}>{t.name}</option>
@@ -74,7 +75,7 @@ export function ThemeSelector({ compact = false }: { compact?: boolean }) {
       <select
         value={theme.id}
         onChange={(e) => setTheme(e.target.value)}
-        className="text-xs rounded border border-input bg-background text-foreground px-2 py-1 focus:outline-none focus:ring-1 focus:ring-ring"
+        className="min-h-11 min-w-11 md:min-h-0 text-xs rounded border border-input bg-background text-foreground px-2 py-1 focus:outline-none focus:ring-1 focus:ring-ring"
         title="Switch theme"
       >
         {themes.map((t) => (
@@ -85,7 +86,8 @@ export function ThemeSelector({ compact = false }: { compact?: boolean }) {
       <button
         onClick={handleExport}
         title="Export current theme as JSON"
-        className="text-xs px-2 py-1 rounded border border-input text-muted-foreground hover:text-foreground transition-colors"
+        aria-label="Export current theme as JSON"
+        className="relative tap-target text-xs px-2 py-1 rounded border border-input text-muted-foreground hover:text-foreground transition-colors"
       >
         ↓
       </button>
@@ -93,7 +95,8 @@ export function ThemeSelector({ compact = false }: { compact?: boolean }) {
       <button
         onClick={() => fileRef.current?.click()}
         title="Import theme from JSON file"
-        className="text-xs px-2 py-1 rounded border border-input text-muted-foreground hover:text-foreground transition-colors"
+        aria-label="Import theme from JSON file"
+        className="relative tap-target text-xs px-2 py-1 rounded border border-input text-muted-foreground hover:text-foreground transition-colors"
       >
         ↑
       </button>

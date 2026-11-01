@@ -48,3 +48,9 @@ jobs:
         run: node scripts/check-campaign-switcher.mjs
       - name: Route registry, nav sets, redirects, not-found and route announcer checks
         run: node scripts/check-routes.mjs
+      - name: Keyboard shortcut registry and help overlay checks
+        run: node scripts/check-shortcuts.mjs
+      - name: Touch-target audit (44 px at 375 px, no hover-only controls)
+        run: node scripts/check-touch-targets.mjs
+      - name: Touch-target audit self-test (fixtures)
+        run: node scripts/check-touch-targets.mjs --self-test
