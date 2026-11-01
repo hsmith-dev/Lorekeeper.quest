@@ -2,15 +2,39 @@
 title: 'E0-Access.6: Players are locked out of GM authoring and AI routes, and write rules are enforced'
 type: 'feature'
 created: '2026-11-01'
-status: 'in-review'
+status: 'done'
 baseline_revision: '0e71df48f047b03fa4f8ad48d76ec76a218ea8c0'
 review_loop_iteration: 0
-followup_review_recommended: false
+followup_review_recommended: true
 context:
   - '{project-root}/_bmad-output/planning-artifacts/epics.md'
   - '{project-root}/_bmad-output/implementation-artifacts/epic-4-context.md'
 warnings: ['oversized']
-deferred: []
+deferred:
+  - summary: >-
+      CharactersPage and QuestsPage still show NPC/Quest create and AI Suggest to Players, who get a 404.
+    evidence: |-
+      lib/routes.ts marks /characters and /quests roles BOTH. NPC/Quest create was already 404 for Players
+      since E0-Access.4 (always_gm), and Quest suggest has been gm since E0-Access.5, so this predates this story.
+    location: >-
+      src/frontend/src/pages/CharactersPage.tsx, src/frontend/src/pages/QuestsPage.tsx
+    severity: low
+  - summary: >-
+      Unpaid Players have no UI path to the Party reads the API now serves them; login sends them to /subscribe.
+    evidence: |-
+      src/frontend/src/hooks/useAuth.ts navigates to /subscribe when access_granted is false. This is a frontend
+      and billing UX change (E7 / billing).
+    location: >-
+      src/frontend/src/hooks/useAuth.ts
+    severity: low
+  - summary: >-
+      Join never applies the collaborate link's Role; every redeemed link creates a Player member.
+    evidence: |-
+      share.py join adds CampaignMember with the default role, and create_share_token never sets role. So no
+      co_gm link exists today and the non-Player account check is dormant. E0-Access.12 owns Roles on links.
+    location: >-
+      src/backend/app/api/routes/share.py
+    severity: low
 ---
 
 <intent-contract>
@@ -89,6 +113,38 @@ deferred: []
 
 ## Review Triage Log
 
+### 2026-11-01 — Review pass
+- verdicts: 28 findings — high 0, medium 5, low 16, false 7, maybe-false 0
+- findings:
+  - `[medium]` `[patch]` (blind) `/journals/generate`, share-link create (and campaign create) write rows outside the gate — `generate_journal` now calls `can_write(ctx, JournalEntry(..., kind=gm))` before the hash check and `create_share_token` calls `can_write(ctx, token)`. Campaign create (no ctx), leave, chat sessions and source chunks are listed in write.py's docstring as deliberate exemptions.
+  - `[low]` `[reject]` (blind) A Player's tag attach creates global `Tag` rows outside the gate — tags are names shared by design (a GM could already add them). A tag reaches a reader only through a visible link, so nothing leaks, and gating Tag creation adds a branch for no named harm.
+  - `[low]` `[patch]` (blind) `_UNSCOPED` rows pass for any GM (a global Tag) — fail closed: unscoped rows are writable only for `_PARENT_SCOPED = {journal_tags}`; the matrix now expects GM-on-Tag refused.
+  - `[low]` `[patch]` (blind) `can_write` is checked only before an update — today no update route admits a Player, so no harm. A docstring note in write.py now tells whoever widens the Player rule to re-check after applying the update.
+  - `[medium]` `[patch]` (blind) The PARTY_READ "no hosted AI" test misses inline `get_user_llm_config` — the test now also scans `inspect.getsource(inspect.unwrap(endpoint))` for `get_user_llm_config` / `llm_config_service`; the frozen route set stays.
+  - `[low]` `[defer]` (blind) CharactersPage / QuestsPage show create / AI Suggest to Players — pre-existing: NPC/Quest create was already 404 for Players (always_gm, E0-Access.4) and suggest gm (E0-Access.5); deferred.
+  - `[low]` `[reject]` (blind) `gm_context=ctx.is_gm` is now always True (dead branch) — the required keyword from E0-Access.5 is kept for E7 Player drafts. Removing it means service edits with no user-visible effect.
+  - `[false]` `[reject]` (blind) Join `CampaignRole(share.role)` can raise ValueError → 500 — `role` is a DB enum column (`CAMPAIGN_ROLE_ENUM`), so no other stored value can exist.
+  - `[false]` `[reject]` (blind) The GM-only refusal test misses shorthand / plan / source / tag-category / NPC / Quest writes — those routes' Player 404 (byte-identical to missing, row untouched) is asserted by their EV-4 probes (`authoring.py` `_item_write_probe` / `_create_probe`, npcs.py, quests.py), which ran and passed.
+  - `[low]` `[patch]` (blind) `probe_delete_template` lacks the co_gm actor — `actors=WITH_CO_GM`, and it asserts 204 with no canary and the row gone.
+  - `[low]` `[patch]` (blind) Stale test text (`_gm_routes` docstring/params; "export" vs analytics) — corrected; params dropped.
+  - `[low]` `[reject]` (blind) Spec verification names a scratchpad script; status unfinished — the fix edits this build's spec (rejected by rule); the status is finalized by this step.
+  - `[low]` `[reject]` (blind) PARTY_READ is a shared mutable dict, and its marker shows in OpenAPI — nothing mutates it. The marker only says which routes skip the subscription check, which is not secret, so this is not worth a new mechanism.
+  - `[low]` `[defer]` (blind) No UI path for unpaid Players (login sends them to /subscribe) — a frontend / billing UX change outside this story; deferred.
+  - `[medium]` `[patch]` (edge; also verification-gap other #2 and edge claim #9) An unpaid Owner / Co-GM is exempt on PARTY_READ and reads full GM projections — the intent (PRD FR-7, spine Q7, AC4) exempts Players only. `account_gate` now skips the paid check only when the user is GM in no Campaign (`role_map`), and `test_unpaid_gm_is_gated_on_party_reads` covers an unpaid Owner and an unpaid Player who owns another Campaign (both 402).
+  - `[low]` `[reject]` (edge) A co_gm link creates a Player member, so the 402 guards a grant never made — unreachable: `create_share_token` never sets `role`, so no co_gm link can exist today; applying the link Role is E0-Access.12.
+  - `[low]` `[reject]` (edge) An unpaid existing member re-redeeming a co_gm link gets 402 instead of `already_member` — unreachable for the same reason.
+  - `[medium]` `[patch]` (edge) A GM passes the gate on a global Tag — same root cause as the `_UNSCOPED` row above; fixed by `_PARENT_SCOPED`.
+  - `[low]` `[reject]` (edge) SourceChunk rows are created without the gate — they are written only after `check_create(doc, ctx)` (which ends with `can_write`) in the same transaction, and are now listed as a deliberate exemption.
+  - `[low]` `[patch]` (edge, claim) The share-link create skips the gate — same root cause as the first blind row; fixed there.
+  - `[low]` `[patch]` (edge, claim) leave / campaign create / chat create skip the gate — documented in write.py as deliberate exemptions (owner rows, no ctx yet). A Player leaving goes through grants.py.
+  - `[low]` `[defer]` (edge, claim) Join never applies the link's Role, so Co-GM links stay broken — pre-existing; E0-Access.12 (Roles on collaborate links); deferred.
+  - `[medium]` `[patch]` (edge, claim) `is_party_read` exempts every Role — same root cause as the unpaid-GM row; fixed there.
+  - `[false]` `[reject]` (verification-gap other #1) `/generate` and share create bypass `check_create` / `can_write` — duplicate of the first blind row (counted, same patch).
+  - `[false]` `[reject]` (intent) EntryDetailPage gives Players no new controls — by the AC a Player may write only own `kind=player` entries. No route creates those until E7, and the schema carries no `kind`. So the set of controls they may see on any reachable entry is empty, and hiding them is the correct gating.
+  - `[false]` `[reject]` (intent) The own-entry restore is reachable only with seeded rows — that is the AC's rule (`kind=player`); the routes honour it, and E7 adds the create path.
+  - `[false]` `[reject]` (intent) Preview probes sample a subset of write routes — preview refusal is central (`_narrow_for_preview` 404s every non-safe method, `can_write` refuses `read_only`), and both are unit-tested; the sample proves the wiring.
+  - `[false]` `[reject]` (intent) PARTY_READ on role-map routes goes beyond `require_campaign("player")` — those cross-Campaign lists are Party reads per Role. The contract names "or a role map", and the account rule is now Players-only.
+
 ## Design Notes
 
 The tech note asks for a per-route `require_campaign_paid()` on AI routes. Instead, the router-level gate stays and is fail-closed: a route is ungated only if it opts in with `PARTY_READ`. The effect on today's routes is the same: AI routes, GM authoring and management stay gated, and Party reads are open. The difference is that a new route is gated by default, which matches the spine's "the exemption covers Party routes only".
@@ -105,11 +161,27 @@ The tech note asks for a per-route `require_campaign_paid()` on AI routes. Inste
 
 ## Auto Run Result
 
-Status: in-review (implemented and verified; the step-04 review layers have not run yet, because the orchestrator asked for commit, rebase and PR first).
+Status: done (step-04 review ran after the PR opened; the branch was rebased onto E0-Access.10 / PR #60 first).
+
+**Review:** 28 findings — high 0, medium 5, low 16, false 7.
+- Patched, as 4 medium entries and 3 low:
+  - The unpaid-GM PARTY_READ exemption is now Players only.
+  - `/generate` and share-link create go through `can_write`.
+  - The PARTY_READ test also scans endpoint source for inline LLM config.
+  - Unscoped rows fail closed (`_PARENT_SCOPED`).
+  - write.py documents the exempt writes and the re-check-after-update note.
+  - The template-delete probe now runs the Co-GM.
+  - Stale test text is corrected.
+- Deferred (3, in frontmatter): CharactersPage / QuestsPage controls, the unpaid-Player UI path, and join applying link Roles (E0-Access.12).
+- Rejected: global Tag creation by Players (no leak), the dead `gm_context` branch (kept for E7), the scratchpad path in the spec (spec edit), the shared PARTY_READ dict and its OpenAPI marker, the unreachable co_gm-link cases, source chunks, and every `false` row with its refutation in the triage log.
+
+**Follow-up review recommended:** true. Four medium entries were patched on this first pass: the account-gate role check (one extra `role_map` query for unpaid users on Party reads), the two new `can_write` calls, the fail-closed unscoped rule, and the source-scan test. The new gate rule has only been through the targeted tests and the full suite, not a second review.
+
+**E0-Access.10 interplay:** share revoke, member removal (Owner and `/leave`) and Campaign delete keep their grants.py calls (`revoke_share_token`, `remove_member`, `campaign_grants_removed`) and owner role checks. `can_write` runs on the row first. No grants.py logic is duplicated, and `/leave` is a documented exemption: a Member removing their own grant.
 
 **Summary:** `access.can_write` / `may_write` (`app/access/write.py`) is the single write gate. It refuses reduced (read_only) and anon ctxs and rows from another Campaign. GMs may write any row. Players may write only their own `kind=player` entries; the linked-PC sheet check stays false until F3-world. `check_create` ends with `can_write`. The story's GM-only routes declare `gm` before any LLM config is resolved. Journal delete and tag attach / detach are `player` + `can_write`. Sheet and template writes go through `can_write`. `account_gate` fails closed and exempts only `PARTY_READ` safe-method routes. Join gates only non-Player links. Rebased onto origin/main (E0-Access.9, E0-Jobs.4/5, E0-QA.15, v1.1); the only conflict was the `app/access/__init__.py` exports.
 
-**Verification:** desktop full suite (cached image, isolated pg + valkey, removed afterwards): 1738 passed, 4 skipped; `EV-4: probes=91 exemptions=1 pending=44 leaks=0`. `check_scoped_queries.py` ok, with no baseline lines added and no script edits. Frontend `tsc --noEmit` and `npm run build` pass. CI runs on PR #61.
+**Verification:** after the rebase onto E0-Access.10 and the review patches, the desktop full suite (cached image, isolated pg + valkey, removed afterwards) gave 1803 passed, 4 skipped; `EV-4: probes=94 exemptions=1 pending=44 leaks=0`; lint-imports 5 contracts kept. Before the review the result was 1738 passed and probes=91. `check_scoped_queries.py` ok, with no baseline lines added and no script edits. Frontend `tsc --noEmit` and `npm run build` pass. CI runs on PR #61.
 
 **Needs desktop verification:** nothing specific (no Ollama, GPU, compose or nginx surface).
 

@@ -25,6 +25,22 @@ Rules, in order:
 Every refusal is the one `not_found()` (never 403), so a write the caller may
 not make answers exactly like a missing row.
 
+A row with no `campaign_id` is writable only when its table is in
+`_PARENT_SCOPED` (`journal_tags`: the route checked the parent entry with
+`can_write` first). Any other unscoped row (a global `Tag`, shared across
+Campaigns) is refused, for GMs too: fail closed.
+
+Writes deliberately outside the gate:
+  * `POST /api/campaigns/`: a new Campaign, so there is no ctx yet;
+  * a Member leaving (`/leave`): their own grant, removed through grants.py;
+  * chat sessions: owner rows, reached through `owned_get`;
+  * source chunks: they follow their gated source document.
+
+Whoever widens the Player rule (E7 Player Journals, F3 linked PCs) must call
+`can_write` again after applying an update, not only before it: an update
+could change `kind`, `user_id` or `pc_entity_id` and so move the row out of
+what the Player may write.
+
 It is sync and takes the loaded (or transient) row. It imports only the
 policy and the ctx: rows are recognised by their table name, so this module
 never pulls in the models package.
@@ -41,6 +57,8 @@ _UNSCOPED = object()
 _CAMPAIGNS = "campaigns"
 _JOURNAL_ENTRIES = "journal_entries"
 _CHARACTER_SHEETS = "character_sheets"
+# Unscoped tables whose rows follow a parent the route already gated.
+_PARENT_SCOPED = frozenset({"journal_tags"})
 _PLAYER_KIND = "player"  # app.domain.enums.EntryKind.PLAYER (a StrEnum compares equal)
 
 
@@ -50,8 +68,8 @@ def _table(obj: Any) -> str | None:
 
 def _row_campaign(obj: Any) -> Any:
     """The Campaign `obj` belongs to: a Campaign's own id, else its
-    `campaign_id`; `_UNSCOPED` for rows scoped through a parent (tags,
-    journal_tags), which follow the parent the route already checked."""
+    `campaign_id`; `_UNSCOPED` for rows with no Campaign column (tags,
+    journal_tags)."""
     if _table(obj) == _CAMPAIGNS:
         return getattr(obj, "id", None)
     if hasattr(type(obj), "campaign_id") or hasattr(obj, "campaign_id"):
@@ -77,7 +95,10 @@ def may_write(ctx: CampaignContext, obj: Any) -> bool:
     if ctx.read_only or ctx.role == ANON:
         return False
     cid = _row_campaign(obj)
-    if cid is not _UNSCOPED and cid != ctx.campaign_id:
+    if cid is _UNSCOPED:
+        if _table(obj) not in _PARENT_SCOPED:
+            return False
+    elif cid != ctx.campaign_id:
         return False
     if ctx.role == GM:
         return True

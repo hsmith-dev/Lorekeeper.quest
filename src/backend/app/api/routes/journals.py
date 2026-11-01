@@ -8,6 +8,7 @@ from app.core.limiter import limiter, user_or_ip
 from app.db.session import get_db
 from app.db.models.user import User
 from app.db.models.journal import JournalEntry
+from app.domain.enums import EntryKind
 from app.db.models.campaign import Campaign
 from app.db.models.tag import Tag, JournalTag
 from app.db.models.tag_category import TagCategory
@@ -96,6 +97,8 @@ async def generate_journal(
     # GM only (E0-Access.6). The duplicate check is keyed per (Campaign,
     # caller), so no 409 can reveal another author's row.
     ctx = await ctx_for_request(request, db, user, body.campaign_id, "gm")
+    # The service adds the entry itself: gate the row it will write.
+    can_write(ctx, JournalEntry(campaign_id=body.campaign_id, user_id=user.id, kind=EntryKind.GM))
     if await check_hash(body.campaign_id, user.id, body.entry_hash):
         raise HTTPException(status_code=409, detail="Duplicate entry detected")
 

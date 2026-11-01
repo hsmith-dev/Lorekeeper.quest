@@ -156,15 +156,22 @@ async def probe_update_template(ev4, actor):
                            CharacterSheetTemplate.id == template) == 0
 
 
-@ev4_probe("DELETE", "/api/character-sheets/templates/{template_id}")
+@ev4_probe("DELETE", "/api/character-sheets/templates/{template_id}", actors=WITH_CO_GM)
 async def probe_delete_template(ev4, actor):
     from app.db.models.character_sheet import CharacterSheetTemplate
 
     hidden = await outsider(ev4)
     await assert_hidden_equals_missing(actor, f"{BASE}/templates/{hidden.ids['character_sheet_templates'][0]}",
                                        f"{BASE}/templates/{MISSING}", method="DELETE")
-    # E0-Access.6: a visible template is not a Player's to delete.
     template = ev4.a.ids["character_sheet_templates"][0]
+    if is_gm_of_a(ev4, actor):
+        # A GM sees every sheet of the template, so the cascade is allowed.
+        r = await actor.delete(f"{BASE}/templates/{template}")
+        assert_no_canary(actor, r)
+        assert r.status_code == 204, r.text
+        assert await row_count(ev4, CharacterSheetTemplate, CharacterSheetTemplate.id == template) == 0
+        return
+    # E0-Access.6: a visible template is not a Player's to delete.
     await assert_hidden_equals_missing(actor, f"{BASE}/templates/{template}", f"{BASE}/templates/{MISSING}",
                                        method="DELETE")
     assert await row_count(ev4, CharacterSheetTemplate, CharacterSheetTemplate.id == template) == 1
