@@ -85,6 +85,11 @@ class Job(Base):
     llm_config = None
     # Not mapped: the wrapper's progress writer (see `report`).
     _reporter = None
+    # Not mapped (E0-Jobs.5): set by app.jobs.backfill.run_cursor when a
+    # cursor step succeeded and more remain. The wrapper then puts the row
+    # back in `queued` (with the step's writes) and pushes it again, instead
+    # of `done`.
+    _continue = False
 
     async def report(self, progress: float, stage: str | None = None, eta_seconds: int | None = None) -> None:
         """Write progress (0..1), stage and ETA to this Job's row at once, in

@@ -334,6 +334,22 @@ async def test_stale_row_its_live_worker_is_still_running_is_left_alone(db, conn
         w.register_death()
 
 
+async def test_stale_row_its_live_worker_runs_under_a_distinct_rq_id_is_left_alone(db, conn):
+    """A continuation or delayed push runs as `<job_id>_<hex>`: still this Job."""
+    c = await _campaign(db)
+    name = f"live-{uuid.uuid4().hex[:8]}"
+    row = await _job(db, c, age_s=600, status=JobStatus.RUNNING, attempts=1, worker_id=name,
+                     heartbeat_at=_now() - timedelta(seconds=300))
+    w = Worker(["interactive"], connection=conn, name=name)
+    w.register_birth()
+    try:
+        w.set_current_job_id(outbox.distinct_rq_id(row.id))
+        assert not await reap(_factory(db), conn)
+        assert (await _row(db, row.id)).status == JobStatus.RUNNING
+    finally:
+        w.register_death()
+
+
 @pytest.mark.parametrize("then", [None, "retryable", "terminal"])
 async def test_late_outcome_of_an_attempt_taken_back_is_dropped(db, then):
     c = await _campaign(db)

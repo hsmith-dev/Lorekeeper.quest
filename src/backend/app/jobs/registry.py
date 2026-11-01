@@ -19,7 +19,13 @@ in (app/core/llm_gate.py); None means the queue's class (`class_for_queue`).
 The worker imports every module in KIND_MODULES at start (`load_kind_modules`),
 so a kind registered at import time is known before the first Job runs. A
 module that calls `register` belongs in that tuple; tests/jobs/test_worker.py
-fails when one is missing.
+fails when one is missing. The same goes for `register_backfill`
+(app/jobs/backfill.py): the data_backfills runner in the worker only runs
+backfills whose module was imported.
+
+`resources` (E0-Jobs.5) drives admission (app/jobs/admission.py): nli, stt,
+tts, ocr and cpu_heavy are leased one Job at a time; llm, nli, tts and
+cpu_heavy pause for a Live Session unless the kind is `live_safe`.
 """
 from __future__ import annotations
 
@@ -109,8 +115,8 @@ def get_kind(name: str) -> JobKind:
     return kind
 
 
-# Modules that register kinds at import time, imported by the worker at start
-# (LorekeeperWorker). This module's own built-ins need no entry.
+# Modules that register kinds (and backfills) at import time, imported by the
+# worker at start (LorekeeperWorker). This module's own built-ins need no entry.
 KIND_MODULES: tuple[str, ...] = ()
 
 

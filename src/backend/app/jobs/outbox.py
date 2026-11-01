@@ -10,8 +10,9 @@ rolled-back Job is never pushed and a pushed Job always has its row:
   logged and swallowed: the row stays `queued` and the reaper (E0-Jobs.4)
   pushes it again.
 * JOBS_EAGER=1 (tests): `run_job` runs in-process before `commit()` returns,
-  through the same wrapper as the worker, so the row is final after commit.
-  Errors are logged, never raised from commit.
+  through the same wrapper as the worker, so the row is final after commit
+  (a cursor Job's steps all run there, E0-Jobs.5). Errors are logged, never
+  raised from commit.
 
 Dependents: `after_flush` notes every Job whose status is flushed to a
 terminal value (any ORM write: the worker, a cancel, the reaper). After
@@ -27,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import secrets
 import uuid
 from dataclasses import dataclass
 from typing import Any, Iterable
@@ -49,6 +51,8 @@ FINISHED_KEY = "lorekeeper.jobs.finished"
 PERFORM = "app.jobs.worker.perform"
 TERMINAL_STATUSES = frozenset({JobStatus.DONE, JobStatus.FAILED, JobStatus.CANCELLED})
 EAGER_WORKER_ID = "eager"
+# A runaway cursor Job under JOBS_EAGER stops (queued) after this many steps.
+EAGER_MAX_STEPS = 10_000
 
 
 @dataclass(frozen=True)
@@ -102,14 +106,32 @@ def rq_timeout(kind: str) -> int:
     return (job_kind.timeout_s if job_kind is not None else 180) + RQ_TIMEOUT_GRACE_S
 
 
-def push(job_id: uuid.UUID, queue: JobQueue | str, kind: str, connection: Any = None) -> None:
+def push(job_id: uuid.UUID, queue: JobQueue | str, kind: str, connection: Any = None, *,
+         rq_id: str | None = None) -> None:
     """Push one Job to RQ (on `connection`, default get_connection()). Sync
-    (redis-py): call it off the event loop."""
+    (redis-py): call it off the event loop. The RQ job id is the Job id,
+    unless `rq_id` (from `distinct_rq_id`) is given: a push of a Job from
+    inside its own running RQ job (a cursor continuation, E0-Jobs.5) or a
+    delayed push needs another id, since the running RQ job (id = Job id) is
+    deleted when it returns (result_ttl=0)."""
     from rq import Queue
 
     Queue(JobQueue(queue).value, connection=connection if connection is not None else get_connection()).enqueue(
-        PERFORM, str(job_id), job_id=str(job_id), result_ttl=0, job_timeout=rq_timeout(kind),
+        PERFORM, str(job_id), job_id=rq_id or str(job_id), result_ttl=0, job_timeout=rq_timeout(kind),
     )
+
+
+def distinct_rq_id(job_id: uuid.UUID) -> str:
+    """An RQ job id for `job_id` other than the Job id: `<job_id>_<hex>` (RQ
+    ids allow [A-Za-z0-9_-]; a UUID has no `_`)."""
+    return f"{job_id}_{secrets.token_hex(6)}"
+
+
+def job_id_of(rq_id: str | bytes) -> str:
+    """The Job id an RQ job id names (`<job_id>` or `<job_id>_<hex>`)."""
+    if isinstance(rq_id, bytes):
+        rq_id = rq_id.decode()
+    return rq_id.split("_", 1)[0]
 
 
 # ── Dispatch ───────────────────────────────────────────────────────────────
@@ -124,10 +146,17 @@ def _session_factory(bind: Engine | Connection | AsyncEngine) -> async_sessionma
 async def _dispatch_one(job_id: uuid.UUID, queue: JobQueue, kind: str,
                         session_factory: async_sessionmaker[AsyncSession]) -> None:
     if get_settings().jobs_eager:
-        from app.jobs.worker import run_job  # lazy: worker imports this module
+        from app.jobs.worker import run_job_step  # lazy: worker imports this module
 
         try:
-            await run_job(job_id, session_factory, EAGER_WORKER_ID)
+            # A cursor Job (app/jobs/backfill.py) continues on the same row:
+            # nothing is pushed under JOBS_EAGER, so run its next step here.
+            for _ in range(EAGER_MAX_STEPS):
+                if not (await run_job_step(job_id, session_factory, EAGER_WORKER_ID)).continued:
+                    break
+            else:
+                logger.warning("eager cursor job still continuing after %d steps; left queued", EAGER_MAX_STEPS,
+                               extra={"job_id": str(job_id)})
         except Exception:
             logger.exception("eager job run failed", extra={"job_id": str(job_id)})
         return
@@ -244,4 +273,4 @@ def _after_commit(session: Session) -> None:
         logger.exception("job dispatch after commit failed")
 
 
-__all__ = ["dispatch", "get_connection", "push", "record_pending", "set_connection"]
+__all__ = ["dispatch", "distinct_rq_id", "get_connection", "job_id_of", "push", "record_pending", "set_connection"]

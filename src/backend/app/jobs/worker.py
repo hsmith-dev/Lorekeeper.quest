@@ -15,10 +15,20 @@ run (app/jobs/outbox.py). For one `queued` row it:
    (llm_config_service.resolve_llm_config); none -> `failed`, `llm_config`.
    The handler gets it as `job.llm_config` and the User as `job.starter`, and
    meters with llm_config_service.meter;
-4. sets the LLM gate class (the kind's `gate_class`, else the queue's) and a
+4. admission (app/jobs/admission.py, E0-Jobs.5): while a Live Session holds
+   `lease:live` a non-`live_safe` kind using llm/nli/tts/cpu_heavy is
+   deferred 15 s; a kind using nli/stt/tts/ocr/cpu_heavy takes `res:<r>`
+   leases or is deferred 5 s. A deferral puts the row back in `queued`
+   (`next_run_at`, a "Waiting"/"Paused" stage, the attempt not counted)
+   and onto the delayed set; the leases are released after the outcome;
+5. sets the LLM gate class (the kind's `gate_class`, else the queue's) and a
    gate deadline of now + timeout_s, starts the heartbeat thread, injects
    `job.report`, and runs the handler under the kind's `timeout_s`;
-5. writes the outcome. Success: `done`, committed with the handler's writes.
+6. writes the outcome. Success: `done`, committed with the handler's writes;
+   or, for a cursor Job with more to do (`run_cursor`, app/jobs/backfill.py),
+   `queued` again with `attempts` 0, pushed at once with a distinct RQ id
+   (`<job_id>_<hex>`: the running RQ job, id = Job id, is deleted when it
+   returns), committed with the step's writes.
    Failure: the handler's writes roll back, and the error is classified
    (`_failure`). Codes in TERMINAL_CODES fail at once; others go back to
    `queued` with `next_run_at` = now + RETRY_DELAYS_S[attempts - 1] while
@@ -46,7 +56,10 @@ requeues (or fails, `interrupted`) `running` rows whose heartbeat is over
 RQ does not hold once they are runnable: `next_run_at` passed (retries;
 so a retry really waits its delay plus up to one interval),
 older than 60 s with no `next_run_at` (a lost push, a Valkey flush), or a
-dependent whose dependency ended by raw SQL or was deleted.
+dependent whose dependency ended by raw SQL or was deleted. RQ ids map back
+to Job ids (`outbox.job_id_of`). After each pass it runs the data_backfills
+runner (`backfill.run_backfills`). Its thread also drains the delayed set
+every second (`Reaper.drain`), pushing deferred Jobs when they are due.
 
 `_perform` swaps the process-wide Valkey client (app.core.valkey_client) for
 its own; that is safe only because RQ runs one Job per work horse.
@@ -88,6 +101,7 @@ from app.core.valkey_client import set_valkey
 from app.db.models.job import ACTIVE_STATUSES, Job
 from app.db.models.user import User
 from app.domain.enums import JobErrorCode, JobQueue, JobStatus
+from app.jobs import admission, backfill, outbox
 from app.jobs.errors import TERMINAL_CODES
 from app.jobs.registry import JobKind, get_kind, load_kind_modules
 from app.services import llm_config_service
@@ -110,6 +124,8 @@ LLM_CONFIG_MESSAGE = "No AI model is configured for your account"
 AI_OUTPUT_MESSAGE = "AI output unusable"
 TIMEOUT_MESSAGE = "This job took too long and was stopped"
 MODEL_UNAVAILABLE_MESSAGE = "An AI model service is not available right now"
+
+_DEFERRAL_STAGES = (admission.WAITING_STAGE, admission.PAUSED_STAGE)
 
 # The stored ctx_kind the starter must still meet (gm > player > anon).
 _ROLE_RANK = {ANON: 0, PLAYER: 1, GM: 2}
@@ -146,7 +162,10 @@ async def _claim(db: AsyncSession, job_id: uuid.UUID, worker_id: str) -> tuple[J
         .where(Job.id == job_id, Job.status == JobStatus.QUEUED,
                sa.or_(Job.next_run_at.is_(None), Job.next_run_at <= now))
         .values(status=JobStatus.RUNNING, started_at=now, heartbeat_at=now, attempts=Job.attempts + 1,
-                worker_id=worker_id)
+                worker_id=worker_id,
+                # A deferral's "Waiting"/"Paused" stage is over once the Job runs
+                # (a cursor Job's "Entry n of N" stays until its next step).
+                stage=sa.case((Job.stage.in_(_DEFERRAL_STAGES), None), else_=Job.stage))
         .returning(Job.id)
         .execution_options(synchronize_session=False)
     )
@@ -361,17 +380,33 @@ def _reporter(session_factory: async_sessionmaker[AsyncSession], job: Job, worke
 
 # ── The wrapper ────────────────────────────────────────────────────────────
 
+@dataclass(frozen=True)
+class RunResult:
+    """What one `run_job_step` left: the row's status (None: not runnable,
+    or gone), and whether a cursor Job asked to continue (`queued` again,
+    E0-Jobs.5)."""
+    status: JobStatus | None
+    continued: bool = False
+
+
 async def run_job(job_id: uuid.UUID | str, session_factory: async_sessionmaker[AsyncSession],
                   worker_id: str) -> JobStatus | None:
     """Run one attempt of a Job and return the status it was left in
-    (`done`, `failed`, or `queued` for a retry), or None when the Job was not
-    runnable (see `_claim`). Handler errors become the row's outcome; only
-    database errors propagate."""
+    (`done`, `failed`, or `queued` for a retry, a deferral or a cursor
+    continuation), or None when the Job was not runnable (see `_claim`).
+    Handler errors become the row's outcome; only database errors propagate."""
+    return (await run_job_step(job_id, session_factory, worker_id)).status
+
+
+async def run_job_step(job_id: uuid.UUID | str, session_factory: async_sessionmaker[AsyncSession],
+                       worker_id: str) -> RunResult:
+    """`run_job`, also saying whether a cursor Job continues (the JOBS_EAGER
+    dispatch runs the next step at once: app/jobs/outbox.py)."""
     job_id = job_id if isinstance(job_id, uuid.UUID) else uuid.UUID(str(job_id))
     async with session_factory() as db:
         claimed = await _claim(db, job_id, worker_id)
         if claimed is None:
-            return None
+            return RunResult(None)
         job, dependency_status = claimed
         job.dependency_status = dependency_status
         extra = _log_extra(job)
@@ -423,27 +458,106 @@ async def _prepare(db: AsyncSession, job: Job, kind: JobKind, worker_id: str,
     return ctx, kind.gate_class or llm_gate.class_for_queue(job.queue)
 
 
+async def _defer(db: AsyncSession, job_id: uuid.UUID, worker_id: str, deferral: admission.Deferral,
+                 extra: dict[str, str]) -> JobStatus | None:
+    """Not admitted (app/jobs/admission.py): back to `queued` with
+    `next_run_at` = now + the deferral's delay and its stage. The attempt is
+    not used up (`attempts` restored) and the run state is cleared, except
+    `progress` (a cursor Job keeps showing how far it got); a previous retry's
+    error stays. Pushed again when due (the delayed set)."""
+    await db.rollback()  # only the rights check's reads
+    job = await _owned(db, job_id, worker_id)
+    if job is None or isinstance(job, JobStatus):
+        return job
+    due = _now() + timedelta(seconds=deferral.delay_s)
+    queue, kind = job.queue, job.kind
+    job.status = JobStatus.QUEUED
+    job.next_run_at = due
+    job.stage = deferral.stage
+    job.attempts = max(job.attempts - 1, 0)
+    job.eta_seconds = job.worker_id = job.heartbeat_at = job.started_at = None
+    await db.commit()
+    logger.info("job deferred: %s (%ss)", deferral.stage, deferral.delay_s, extra=extra)
+    try:
+        await asyncio.to_thread(admission.defer_push, job_id, queue, kind, due)
+    except Exception:
+        logger.warning("job deferred push failed; the reaper pushes it when due", exc_info=True, extra=extra)
+    return JobStatus.QUEUED
+
+
+async def _continue(db: AsyncSession, job_id: uuid.UUID, worker_id: str) -> JobStatus | None:
+    """A cursor Job's step succeeded and there is more (app/jobs/backfill.py):
+    the step's writes (and its cursor, progress and stage) commit with the row
+    back in `queued`, due now, `attempts` reset to 0 and the error cleared.
+    Only while this worker still owns the attempt (`_owned`)."""
+    job = await _owned(db, job_id, worker_id)
+    if job is None or isinstance(job, JobStatus):
+        return job
+    job.status = JobStatus.QUEUED
+    job.attempts = 0
+    job.error_code = job.error_message = None
+    job.next_run_at = job.finished_at = None
+    job.eta_seconds = job.worker_id = job.heartbeat_at = None
+    await db.commit()
+    return JobStatus.QUEUED
+
+
+async def _push_continuation(job_id: uuid.UUID, queue: JobQueue, kind: str, extra: dict[str, str]) -> None:
+    """Push a continued cursor Job at once, with an RQ id other than the
+    running RQ job's (that one is deleted when it returns). Nothing under
+    JOBS_EAGER (the eager dispatch loops instead)."""
+    if get_settings().jobs_eager:
+        return
+    try:
+        await asyncio.to_thread(outbox.push, job_id, queue, kind, None, rq_id=outbox.distinct_rq_id(job_id))
+    except Exception:
+        logger.warning("cursor job push failed; left queued for the reaper", exc_info=True, extra=extra)
+
+
 async def _run_claimed(db: AsyncSession, session_factory: async_sessionmaker[AsyncSession], job: Job,
-                       worker_id: str, extra: dict[str, str]) -> JobStatus:
+                       worker_id: str, extra: dict[str, str]) -> RunResult:
     job_id = job.id
     try:
         kind: JobKind = get_kind(job.kind)
         handler = kind.load_handler()
     except Exception:
         logger.exception("job kind cannot be loaded", extra=extra)
-        return await _finish(db, job_id, JobStatus.FAILED, worker_id, JobErrorCode.INTERNAL, UNKNOWN_KIND_MESSAGE)
+        return RunResult(await _finish(db, job_id, JobStatus.FAILED, worker_id, JobErrorCode.INTERNAL,
+                                       UNKNOWN_KIND_MESSAGE))
 
     try:
         prepared = await _prepare(db, job, kind, worker_id, extra)
     except Exception:
         logger.exception("job setup failed", extra=extra)
         job.starter = job.llm_config = None
-        return await _fail_attempt(db, session_factory, job_id, JobErrorCode.INTERNAL, INTERNAL_MESSAGE, extra, worker_id)
+        return RunResult(await _fail_attempt(db, session_factory, job_id, JobErrorCode.INTERNAL, INTERNAL_MESSAGE,
+                                             extra, worker_id))
     if isinstance(prepared, JobStatus):
         job.starter = job.llm_config = None
-        return prepared
+        return RunResult(prepared)
     ctx, gate_class = prepared
 
+    # Admission (E0-Jobs.5): a Live Session's pause, then the heavy-model
+    # leases. Fails open when Valkey is unavailable.
+    decision = await admission.admit(job_id, kind)
+    if isinstance(decision, admission.Deferral):
+        job.starter = job.llm_config = None
+        return RunResult(await _defer(db, job_id, worker_id, decision, extra))
+    try:
+        result = await _run_admitted(db, session_factory, job, kind, handler, ctx, gate_class, worker_id, extra)
+    finally:
+        # After the outcome is written; never another Job's lease.
+        await admission.release_resources(job_id, decision)
+    if result.continued:
+        # After the release, so the next step can take the same leases.
+        await _push_continuation(job_id, kind.queue, kind.name, extra)
+    return result
+
+
+async def _run_admitted(db: AsyncSession, session_factory: async_sessionmaker[AsyncSession], job: Job,
+                        kind: JobKind, handler: Any, ctx: CampaignContext, gate_class: llm_gate.GateClass,
+                        worker_id: str, extra: dict[str, str]) -> RunResult:
+    job_id = job.id
     job._reporter = _reporter(session_factory, job, worker_id, extra)
     gate_token = llm_gate.current_class.set(gate_class)
     deadline_token = llm_gate.current_deadline.set(time.monotonic() + kind.timeout_s)
@@ -470,19 +584,27 @@ async def _run_claimed(db: AsyncSession, session_factory: async_sessionmaker[Asy
         job._reporter = job.starter = job.llm_config = None
 
     if error is None:
+        continuing = bool(job._continue)
         try:
-            # The handler's writes and `done` commit together.
-            status = await _finish(db, job_id, JobStatus.DONE, worker_id)
+            # The handler's writes and the outcome commit together.
+            if continuing:
+                status = await _continue(db, job_id, worker_id)
+            else:
+                status = await _finish(db, job_id, JobStatus.DONE, worker_id)
         except Exception:
             logger.exception("job done commit failed", extra=extra)
-            return await _fail_attempt(db, session_factory, job_id, JobErrorCode.INTERNAL, INTERNAL_MESSAGE, extra, worker_id)
+            return RunResult(await _fail_attempt(db, session_factory, job_id, JobErrorCode.INTERNAL,
+                                                 INTERNAL_MESSAGE, extra, worker_id))
+        if continuing and status == JobStatus.QUEUED:
+            logger.info("job step done; continuing", extra=extra)
+            return RunResult(status, continued=True)
         logger.info("job done", extra=extra)
-        return status
+        return RunResult(status)
 
     code, message = _failure(error, timed_out)
     if code == JobErrorCode.INTERNAL:
         logger.error("job handler raised %s", type(error).__name__, exc_info=error, extra=extra)
-    return await _fail_attempt(db, session_factory, job_id, code, message, extra, worker_id)
+    return RunResult(await _fail_attempt(db, session_factory, job_id, code, message, extra, worker_id))
 
 
 # ── The reaper (E0-Jobs.4) ─────────────────────────────────────────────────
@@ -494,6 +616,8 @@ async def _run_claimed(db: AsyncSession, session_factory: async_sessionmaker[Asy
 # RQ's timeout backstop, a deploy or the OOM killer.
 
 REAPER_INTERVAL_S: float = 30
+# How often each reaper thread drains the delayed set (admission deferrals).
+DRAIN_INTERVAL_S: float = 1
 # A `running` row is dead when its heartbeat is older than this and no live
 # RQ worker is running it.
 STALE_AFTER_S: float = 60
@@ -516,15 +640,18 @@ class ReapResult:
 
 
 def _live_workers(connection: Any) -> dict[str, str | None]:
-    """RQ's worker registry: worker name -> the RQ job id it is running now.
+    """RQ's worker registry: worker name -> the Job id it is running now
+    (mapped from the RQ job id, which may be `<job_id>_<hex>`).
     A worker that died without deregistering drops out when its key expires
     (RQ heartbeats a busy worker with a 90 s TTL)."""
-    return {w.name: w.get_current_job_id() for w in Worker.all(connection=connection)}
+    workers = {w.name: w.get_current_job_id() for w in Worker.all(connection=connection)}
+    return {name: outbox.job_id_of(rq_id) if rq_id else None for name, rq_id in workers.items()}
 
 
 def _rq_queued_ids(connection: Any, queue: str) -> set[str]:
-    """The job ids waiting in one RQ queue's list (read once per pass)."""
-    return set(RQQueue(queue, connection=connection).get_job_ids())
+    """The Job ids waiting in one RQ queue's list (read once per pass),
+    mapped from their RQ ids."""
+    return {outbox.job_id_of(rq_id) for rq_id in RQQueue(queue, connection=connection).get_job_ids()}
 
 
 async def _recover_running(db: AsyncSession, live: dict[str, str | None], now: datetime,
@@ -624,9 +751,11 @@ async def reap(session_factory: async_sessionmaker[AsyncSession], connection: An
 
 
 class Reaper:
-    """Runs `reap` every REAPER_INTERVAL_S from a daemon thread of a
-    LorekeeperWorker (every worker process has one), starting at once so a
-    restart's leftovers are recovered early. A Valkey lock (SET NX with a TTL
+    """Runs `reap`, then the data_backfills runner (app/jobs/backfill.py),
+    every REAPER_INTERVAL_S from a daemon thread of a LorekeeperWorker (every
+    worker process has one), starting at once so a restart's leftovers are
+    recovered early. The same thread drains the delayed set every
+    DRAIN_INTERVAL_S (`drain`, no lock). A Valkey lock (SET NX with a TTL
     just under the interval, never released early) starts one pass per
     interval across all workers and containers. A pass slower than the TTL
     can overlap the next one; that is safe (running rows are taken with SKIP
@@ -667,9 +796,23 @@ class Reaper:
             self._connection = None
 
     def _run(self) -> None:
+        next_pass = 0.0
         while not self._stop.is_set():
-            self.tick()
-            self._stop.wait(self._interval)
+            if time.monotonic() >= next_pass:
+                self.tick()
+                next_pass = time.monotonic() + self._interval
+            self.drain()
+            self._stop.wait(min(DRAIN_INTERVAL_S, self._interval))
+
+    def drain(self) -> list[uuid.UUID]:
+        """Push the deferred Jobs that are due (app/jobs/admission.py). Every
+        reaper thread drains (no lock: each entry is pushed by whichever
+        thread removes it). Never raises."""
+        try:
+            return admission.drain_delayed(self._redis())
+        except Exception:
+            logger.exception("job delayed-set drain failed")
+            return []
 
     def tick(self) -> ReapResult | None:
         """One pass if this worker wins the lock, else None. Never raises."""
@@ -685,7 +828,14 @@ class Reaper:
     async def _reap(self) -> ReapResult:
         engine = create_async_engine(get_settings().database_url, poolclass=NullPool)
         try:
-            return await reap(async_sessionmaker(engine, expire_on_commit=False), self._redis())
+            factory = async_sessionmaker(engine, expire_on_commit=False)
+            result = await reap(factory, self._redis())
+            try:
+                # The data_backfills runner (E0-Jobs.5) on every pass.
+                await backfill.run_backfills(factory)
+            except Exception:
+                logger.exception("data backfill runner failed")
+            return result
         finally:
             await engine.dispose()
 
@@ -764,8 +914,8 @@ def main() -> None:
     pool.start(burst=False, logging_level=settings.log_level.upper())
 
 
-__all__ = ["HEARTBEAT_INTERVAL_S", "REAPER_INTERVAL_S", "RETRY_DELAYS_S", "LorekeeperWorker", "ReapResult", "Reaper",
-           "main", "perform", "reap", "run_job"]
+__all__ = ["DRAIN_INTERVAL_S", "HEARTBEAT_INTERVAL_S", "REAPER_INTERVAL_S", "RETRY_DELAYS_S", "LorekeeperWorker",
+           "ReapResult", "Reaper", "RunResult", "main", "perform", "reap", "run_job", "run_job_step"]
 
 
 if __name__ == "__main__":
