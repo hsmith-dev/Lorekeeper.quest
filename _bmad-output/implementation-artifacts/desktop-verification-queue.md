@@ -51,3 +51,6 @@ Stories were merged on green GitHub CI while the desktop was offline (owner deci
 - [ ] Scaffold smoke vs desktop Ollama: `cd src/backend && python scripts/eval_common.py --database-url <url> --llm-url http://100.119.62.5:11434 --llm-model lorekeeper` → 4 windows, all `ok yes`
 - [ ] Seed a real DB twice: `python scripts/seed_demo.py --database-url <url> --embeddings require` → second run `created 0`, same Campaign id; also under `docker compose run --network none`
 - [ ] **Capstone-relevant:** re-measure retrieval on the rebuilt seed: `python scripts/eval_retrieval.py --database-url <url> --campaign-id <id> --embeddings require --out docs/RETRIEVAL_EVAL.md`. Target hybrid@0.65 = 14/16 ±1 hit@3 and **5/5 gate-holds**. Local Mac run got 4/5 (the off-topic "queen of the elven court?" passes the gate via rebuilt entry e09 "Sunless Throne"). If confirmed: re-publish the doc's numbers or reword e09. (The original 9 demo entries were never committed; the seed was rebuilt to match the eval's phrases.)
+
+## E0-UX.8 — Nav restructure, redirects, not-found, route announce (PR #31)
+- [ ] UI pass with `npm run dev` + one owned and one joined campaign: open `/analytics`, `/record?x=1`, `/nope`, and `/sources` with the joined campaign selected; check the route announcement with VoiceOver
