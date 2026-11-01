@@ -174,6 +174,20 @@ return 0
 """
 
 
+# Strong refs for shielded cleanup tasks, so they can't be garbage collected
+# while the cancelled caller has stopped awaiting them.
+_cleanup_tasks: set[asyncio.Task] = set()
+
+
+async def _shielded(coro) -> None:
+    """Run coro to completion even if the awaiting task is cancelled (the
+    caller still sees its CancelledError)."""
+    task = asyncio.ensure_future(coro)
+    _cleanup_tasks.add(task)
+    task.add_done_callback(_cleanup_tasks.discard)
+    await asyncio.shield(task)
+
+
 class Slot:
     """A granted slot. `release()` is idempotent and safe to call from a
     `finally`; `held()` marks the current context as holding it so nested
@@ -203,7 +217,10 @@ class Slot:
             self._renewal.cancel()
             self._renewal = None
         assert self._gate is not None and self._token is not None
-        await self._gate._release(self._token)
+        # Shielded: a cancelled caller (SSE client disconnect under an anyio
+        # cancel scope) must not abort the removal and leave the holder
+        # lingering until its TTL.
+        await _shielded(self._gate._release(self._token))
 
     @contextmanager
     def held(self) -> Iterator[Slot]:
@@ -284,13 +301,15 @@ class LLMGate:
                 polls += 1
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    await self._remove_waiter(token)
+                    await self._discard_quietly(token)
                     _log("llm_gate_busy", logging.WARNING, gate_class=str(cls),
                          waited_ms=int((time.monotonic() - started) * 1000))
                     raise LLMBusy("The AI model is busy right now. Please try again in a moment.")
                 await asyncio.sleep(min(self.poll_s, remaining))
         except (asyncio.CancelledError, RedisError, OSError):
-            await self._remove_waiter_quietly(token)
+            # The Lua grant may already have run server-side, so remove the
+            # token from holders too, or it would be an orphan with no renewal.
+            await self._discard_quietly(token)
             raise
         if polls:
             _log("llm_gate_granted", gate_class=str(cls), waited_ms=int((time.monotonic() - started) * 1000))
@@ -298,17 +317,11 @@ class LLMGate:
         slot._start_renewal()
         return slot
 
-    async def _remove_waiter(self, token: str) -> None:
-        pipe = self.redis.pipeline(transaction=True)
-        pipe.zrem(self.waiters_key, token)
-        pipe.zrem(self.seen_key, token)
-        await pipe.execute()
-
-    async def _remove_waiter_quietly(self, token: str) -> None:
-        try:
-            await self._remove_waiter(token)
-        except Exception:  # the stale-waiter purge cleans up after us anyway
-            pass
+    async def _discard_quietly(self, token: str) -> None:
+        """Remove token from all three keys, shielded from cancellation;
+        errors are logged and swallowed (the stale-waiter purge and holder
+        TTL clean up after us anyway)."""
+        await _shielded(self._release(token))
 
     async def _release(self, token: str) -> None:
         try:

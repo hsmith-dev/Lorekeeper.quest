@@ -1,5 +1,5 @@
 from pathlib import Path
-from pydantic import AliasChoices, Field, model_validator
+from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings
 from functools import lru_cache
 
@@ -64,7 +64,7 @@ class Settings(BaseSettings):
     local_llm_model: str = ""
     # How long a request waits for a local-LLM slot (app/core/llm_gate.py)
     # before giving up with LLMBusy (503 llm_busy) instead of hanging.
-    llm_gate_wait_s: float = 60.0
+    llm_gate_wait_s: float = Field(60.0, ge=0)
     # Concurrent local-LLM calls the gate admits. Matches Ollama's own
     # OLLAMA_NUM_PARALLEL (1 on the Reference Box), so the gate decides the
     # order and Ollama never queues behind our back.
@@ -138,6 +138,15 @@ class Settings(BaseSettings):
     # this instance. Unset by default so admin routes 403 for everyone until
     # deliberately configured; case-insensitive since email addresses are.
     admin_email: str | None = None
+
+    @field_validator("llm_gate_capacity", mode="before")
+    @classmethod
+    def _auto_capacity_is_one(cls, v):
+        # OLLAMA_NUM_PARALLEL=0 is Ollama's "auto"; a shared .env with it must
+        # not stop the backend from starting. The gate stays conservative at 1.
+        if isinstance(v, (int, str)) and str(v).strip() == "0":
+            return 1
+        return v
 
     @model_validator(mode="after")
     def _default_local_llm_model(self) -> "Settings":

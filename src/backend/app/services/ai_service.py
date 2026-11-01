@@ -161,7 +161,8 @@ async def _generate_kobold_native(
         "rep_pen": 1.1,
     }
 
-    async with httpx.AsyncClient(timeout=settings.kobold_timeout_seconds) as client:
+    # llm_provider's client, so tests' MockTransport covers this path too.
+    async with llm_provider._client(settings.kobold_timeout_seconds) as client:
         for attempt in range(3):
             try:
                 r = await client.post(f"{base}/api/v1/generate", json=payload)

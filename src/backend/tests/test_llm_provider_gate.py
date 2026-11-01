@@ -38,16 +38,25 @@ def platform_cfg(**kwargs) -> LLMConfig:
 
 
 class Backend:
-    """OpenAI-compatible chat completions, plain and streamed."""
+    """OpenAI-compatible chat completions, plain and streamed. KoboldCpp's
+    native /api/v1/generate always 404s (as on Ollama), and `status` can make
+    chat completions fail too."""
 
     def __init__(self):
         self.payloads: list[dict] = []
         self.hosts: list[str] = []
+        self.native_calls = 0
+        self.status = 200
 
     async def handler(self, request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v1/generate":
+            self.native_calls += 1
+            return httpx.Response(404, text="404 page not found")
         payload = json.loads(await request.aread())
         self.payloads.append(payload)
         self.hosts.append(request.url.host)
+        if self.status != 200:
+            return httpx.Response(self.status, json={"error": "model loading"})
         if payload.get("stream"):
             lines = [
                 "data: " + json.dumps({"choices": [{"delta": {"content": c}}]})
@@ -176,23 +185,104 @@ def test_uses_platform_llm():
 # --- fixed local model -------------------------------------------------------
 
 
-def test_model_for():
+@pytest.fixture
+def distinct_local_model(monkeypatch) -> str:
+    """LOCAL_LLM_MODEL set to something other than KOBOLD_MODEL."""
+    monkeypatch.setattr(get_settings(), "local_llm_model", "fixed-local-model")
+    return "fixed-local-model"
+
+
+def test_model_for(distinct_local_model):
     s = get_settings()
     base = platform_cfg(model=s.kobold_base_model)
-    assert model_for(None, platform_cfg(model=s.kobold_model)) == s.local_llm_model
-    assert model_for("chat", base) == s.local_llm_model
+    fine_tuned = platform_cfg(model=s.kobold_model)  # what the default config carries
+    assert model_for(None, fine_tuned) == distinct_local_model
+    assert model_for("chat", base) == distinct_local_model
     assert model_for("narrative", base) == s.kobold_base_model
-    assert model_for("narrative", platform_cfg()) == s.local_llm_model
+    assert model_for("narrative", fine_tuned) == distinct_local_model
+    assert model_for("narrative", platform_cfg()) == distinct_local_model
+    assert model_for("narrative", platform_cfg(model="something-else")) == distinct_local_model
     assert model_for("chat", LLMConfig(provider="openai", model="gpt-4o")) == "gpt-4o"
     assert model_for("chat", LLMConfig(provider="kobold", api_url="http://own.test", model="mine")) == "mine"
     assert model_for("chat", LLMConfig(provider="anthropic")) is None
 
 
-def test_local_llm_model_defaults_to_kobold_model():
+def _settings(monkeypatch, **kwargs):
+    from app.core.config import Settings
+
+    for var in ("LLM_GATE_CAPACITY", "OLLAMA_NUM_PARALLEL", "LOCAL_LLM_MODEL"):
+        monkeypatch.delenv(var, raising=False)
+    return Settings(
+        _env_file=None, database_url="postgresql+asyncpg://u:p@localhost/x_test",
+        postgres_password="p", secret_key="s", **kwargs,
+    )
+
+
+def test_local_llm_model_defaults_to_kobold_model(monkeypatch):
+    s = _settings(monkeypatch, local_llm_model="", kobold_model="km-test")
+    assert s.local_llm_model == "km-test"
+    assert _settings(monkeypatch, local_llm_model="lm-test").local_llm_model == "lm-test"
+
+
+def test_gate_capacity_from_ollama_num_parallel(monkeypatch):
+    monkeypatch.setenv("OLLAMA_NUM_PARALLEL", "2")
+    from app.core.config import Settings
+
+    base = dict(_env_file=None, database_url="postgresql+asyncpg://u:p@localhost/x_test",
+                postgres_password="p", secret_key="s")
+    assert Settings(**base).llm_gate_capacity == 2
+    monkeypatch.setenv("OLLAMA_NUM_PARALLEL", "0")  # Ollama's "auto"
+    assert Settings(**base).llm_gate_capacity == 1
+    monkeypatch.delenv("OLLAMA_NUM_PARALLEL")
+    assert Settings(**base).llm_gate_capacity == 1
+
+
+async def test_platform_payload_names_distinct_local_model(backend, gate, distinct_local_model):
     s = get_settings()
-    assert s.local_llm_model
-    if not s.model_fields_set & {"local_llm_model"}:
-        assert s.local_llm_model == s.kobold_model
+    await complete_messages(MESSAGES, platform_cfg(model=s.kobold_model))
+    await complete_messages(MESSAGES, platform_cfg(model=s.kobold_model), task="narrative")
+    [c async for c in stream_messages(MESSAGES, platform_cfg(model=s.kobold_model))]
+    assert [p["model"] for p in backend.payloads] == [distinct_local_model] * 3
+
+
+async def test_non_streaming_payload_never_streams(backend, gate):
+    assert await complete_messages(MESSAGES, platform_cfg(), options={"stream": True}) == "OK"
+    assert backend.payloads[0]["stream"] is False
+
+
+# --- narrative call sites keep the base variant, in one slot ----------------
+
+
+async def test_generate_narrative_one_slot_base_model(backend, gate):
+    from app.services import ai_service
+
+    s = get_settings()
+    out = await ai_service.generate_narrative("We met a dragon.", config=platform_cfg(model=s.kobold_base_model))
+    assert out == "OK"
+    assert backend.native_calls == 3  # native attempt failed, fell back
+    assert [p["model"] for p in backend.payloads] == [s.kobold_base_model]
+    assert gate.acquired == [GateClass.gm_interactive]
+    assert await gate.holder_count() == 0
+
+
+async def test_provider_connection_names_base_model(backend, gate):
+    s = get_settings()
+    assert await llm_provider.test_provider_connection(platform_cfg(model=s.kobold_base_model)) == "OK"
+    assert backend.payloads[0]["model"] == s.kobold_base_model
+
+
+async def test_run_evaluation_names_base_model(backend, gate, monkeypatch):
+    from app.services import eval_service
+
+    s = get_settings()
+    record = {"instruction": "Expand the notes.", "input": "dragon", "output": "A dragon appeared."}
+    monkeypatch.setattr(eval_service, "_load_validation_set", lambda: [record])
+    monkeypatch.setattr(eval_service, "_score", lambda ref, gen: {
+        "length": len(gen), "word_overlap": 0.0, "semantic_similarity": 0.0, "has_content": False,
+    })
+    result = await eval_service.run_evaluation(platform_cfg(model=s.kobold_base_model), 1)
+    assert result["error_count"] == 0
+    assert [p["model"] for p in backend.payloads] == [s.kobold_base_model]
 
 
 async def test_payload_uses_fixed_model_except_narrative(backend, gate):
@@ -262,6 +352,18 @@ async def test_stream_releases_on_aclose_mid_stream(backend, gate):
     assert gate.acquired == [GateClass.player_interactive]
 
 
+async def test_stream_slot_not_held_in_consumer_context(backend, gate):
+    # The stream's slot belongs to the stream, not to whoever iterates it: a
+    # call the consumer makes mid-stream must queue (busy at capacity 1), not
+    # silently bypass the gate as a reentrant no-op.
+    agen = stream_messages(MESSAGES, platform_cfg())
+    await agen.__anext__()
+    with pytest.raises(LLMBusy):
+        await llm_gate.acquire(GateClass.live_recap, wait_s=0)
+    await agen.aclose()
+    assert await gate.holder_count() == 0
+
+
 async def test_reserved_slot_covers_stream(backend, gate):
     slot = await llm_provider.reserve_slot(platform_cfg(), GateClass.live_recap)
     try:
@@ -288,7 +390,7 @@ def fake_prep():
     )
 
 
-async def post_chat_stream(monkeypatch):
+async def post_chat_stream(monkeypatch, persisted: list | None = None):
     from app.api.deps import get_current_user, get_user_llm_config
     from app.api.routes import chat as chat_routes
     from app.core.limiter import limiter
@@ -299,7 +401,8 @@ async def post_chat_stream(monkeypatch):
         return fake_prep()
 
     async def persist(*args, **kwargs):
-        return None
+        if persisted is not None:
+            persisted.append(args)
 
     monkeypatch.setattr(chat_routes, "_prepare_chat", prepare)
     monkeypatch.setattr(chat_routes, "_persist_chat_turn", persist)
@@ -316,10 +419,23 @@ async def post_chat_stream(monkeypatch):
 
 
 async def test_chat_stream_takes_one_slot_and_releases_it(backend, gate, monkeypatch):
-    r = await post_chat_stream(monkeypatch)
+    persisted: list = []
+    r = await post_chat_stream(monkeypatch, persisted)
     assert r.status_code == 200
     assert "event: done" in r.text and "upon" in r.text
+    assert len(persisted) == 1
     assert gate.acquired == [GateClass.gm_interactive]  # stream_messages reused the reserved slot
+    assert await gate.holder_count() == 0
+
+
+async def test_chat_stream_upstream_error_event(backend, gate, monkeypatch):
+    backend.status = 503
+    persisted: list = []
+    r = await post_chat_stream(monkeypatch, persisted)
+    assert r.status_code == 200  # the stream had already started
+    assert "event: error" in r.text
+    assert "event: done" not in r.text
+    assert persisted == []
     assert await gate.holder_count() == 0
 
 

@@ -78,14 +78,16 @@ def uses_platform_llm(cfg: LLMConfig) -> bool:
 
 def model_for(task: str | None, cfg: LLMConfig) -> str | None:
     """The model a call names. Platform LLM: settings.local_llm_model for
-    every task, so Ollama keeps one model resident; only `narrative` keeps
-    cfg.model (the resolver swaps it to kobold_base_model for the "base"
-    variant, and that reload is accepted). BYOK: cfg.model, unchanged (None
-    lets the provider branch pick its own default)."""
+    every task, so Ollama keeps one model resident. The one exception is a
+    `narrative` call on the "base" variant (the resolver sets cfg.model to
+    kobold_base_model): it names that model and accepts the reload. Any other
+    cfg.model (the default config always fills in kobold_model) is ignored.
+    BYOK: cfg.model, unchanged (None lets the provider branch pick its own
+    default)."""
     if uses_platform_llm(cfg):
         s = get_settings()
-        if task == "narrative":
-            return cfg.model or s.local_llm_model
+        if task == "narrative" and cfg.model and cfg.model == s.kobold_base_model:
+            return s.kobold_base_model
         return s.local_llm_model
     return cfg.model
 
@@ -197,15 +199,22 @@ async def stream_messages(
             task=task, gate_class=gate_class, options=options,
         )
         return
-    # aclosing: on an early close the upstream HTTP stream is shut before the
-    # slot is released, not whenever the inner generator is garbage collected.
-    async with gated(cfg, gate_class):
+    # A plain reserve/release, not gated(): held() would set the _held
+    # contextvar inside this generator, leaking it into the consumer's
+    # context between yields. Reentrancy still holds: reserve_slot returns a
+    # no-op Slot when the caller already holds one.
+    slot = await reserve_slot(cfg, gate_class)
+    try:
+        # aclosing: on an early close the upstream HTTP stream is shut before
+        # the slot is released, not whenever the inner generator is collected.
         async with aclosing(_stream_openai_compat(
             messages, cfg, max_tokens, temperature, timeout,
             task=task, options=strip_local_options(options),
         )) as upstream:
             async for delta in upstream:
                 yield delta
+    finally:
+        await slot.release()
 
 
 async def _stream_openai_compat(
@@ -288,6 +297,7 @@ async def _openai_compat(
         "messages": messages,
         "max_tokens": max_tokens,
         "temperature": temperature,
+        "stream": False,  # options must not turn this into an SSE response
     }
 
     try:

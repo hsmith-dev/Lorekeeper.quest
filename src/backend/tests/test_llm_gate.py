@@ -242,6 +242,21 @@ async def test_release_is_idempotent_and_stops_renewal(make_gate):
     assert await gate.redis.zcard(gate.holders_key) == 0
 
 
+async def test_release_completes_when_caller_cancelled(make_gate):
+    gate = make_gate()
+    slot = await gate.acquire(GateClass.gm_interactive)
+    task = asyncio.create_task(slot.release())
+    await asyncio.sleep(0)  # release() is now awaiting Redis
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    async def freed():
+        return await gate.redis.zcard(gate.holders_key) == 0
+
+    await wait_until(freed)
+
+
 async def test_snapshot_counts(make_gate):
     gate = make_gate()
     holder = await gate.acquire(GateClass.gm_interactive)

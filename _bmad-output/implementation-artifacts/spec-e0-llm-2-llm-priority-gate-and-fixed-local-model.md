@@ -2,7 +2,7 @@
 title: 'E0-LLM.2: One priority gate for the local LLM, and one fixed local model'
 type: 'feature'
 created: '2026-10-31'
-status: 'in-progress'
+status: 'in-review'
 baseline_revision: 'fc1806a9a15f2da98765b946e20d733d46fb2114'
 review_loop_iteration: 0
 followup_review_recommended: false
