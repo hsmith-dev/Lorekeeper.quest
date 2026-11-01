@@ -19,7 +19,9 @@ _spec.loader.exec_module(cmp)
 
 # The ceiling: the baseline may lose entries, never gain them. Shrink this set
 # in the same PR that removes a line from model_packages_baseline.txt.
-FROZEN_BASELINE = frozenset({"torch", "spacy", "sentence-transformers", "openai-whisper", "easyocr"})
+FROZEN_BASELINE = frozenset({
+    "torch", "torchvision", "spacy", "en-core-web-trf", "sentence-transformers", "openai-whisper", "easyocr",
+})
 
 
 def write(tmp_path: Path, name: str, body: str) -> Path:
@@ -70,14 +72,31 @@ def test_dockerfile_pip_install_not_in_baseline_fails(tmp_path):
                 torch==2.15.0+cpu torchvision==0.29.2+cpu
         """
     errors = run(tmp_path, dockerfile=dockerfile)
-    assert len(errors) == 1
-    assert "Dockerfile:2" in errors[0] and "'torch'" in errors[0]
+    assert len(errors) == 2
+    assert all("Dockerfile:2" in e for e in errors)
+    assert any("'torch'" in e for e in errors) and any("'torchvision'" in e for e in errors)
+
+
+def test_spacy_download_installs_a_model_package(tmp_path):
+    errors = run(tmp_path, dockerfile="RUN python -m spacy download en_core_web_sm\n")
+    assert len(errors) == 1 and "'en-core-web-sm'" in errors[0] and "Dockerfile:1" in errors[0]
+
+
+@pytest.mark.parametrize("name", ["en_core_web_trf", "de-core-news-lg", "xx_ent_wiki_sm"])
+def test_spacy_pipeline_packages_are_forbidden(tmp_path, name):
+    errors = run(tmp_path, requirements=f"{name}==3.7.1\n")
+    assert len(errors) == 1, errors
+
+
+def test_direct_reference_is_parsed(tmp_path):
+    errors = run(tmp_path, requirements="torch @ https://download.pytorch.org/whl/cpu/torch-2.15.0.whl\n")
+    assert len(errors) == 1 and "'torch'" in errors[0]
 
 
 @pytest.mark.parametrize("spec", [
     "Sentence_Transformers==5.5.1", "sentence.transformers>=5", "SpaCy[cuda]==3.7.6",
     "kokoro-onnx==0.4", "Misaki", "phonemizer", "espeakng_loader", "TTS==0.22", "faster-whisper",
-    "onnxruntime==1.20; platform_machine == 'x86_64'",
+    "onnxruntime==1.20; platform_machine == 'x86_64'", "torchaudio==2.15", "TorchVision",
 ])
 def test_names_are_pep503_normalized(tmp_path, spec):
     errors = run(tmp_path, requirements=spec + "\n")
@@ -118,7 +137,7 @@ def test_non_model_lines_are_ignored(tmp_path):
         RUN pip install --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cpu \\
                 -r requirements.txt
         # RUN pip install torch
-        RUN python -m spacy download en_core_web_trf
+        RUN python -m spacy validate
         RUN python -c "import torch" && ! pip list --format=freeze | grep -iE '^(nvidia|cuda)[-_]'
         """
     requirements = "# torch is not here\nnumpy<2.0\nuvicorn[standard]==0.30.0  # spacy in a comment\n"

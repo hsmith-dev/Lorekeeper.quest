@@ -193,3 +193,44 @@ def test_missing_section_is_an_error(tmp_path):
     (tmp_path / "spine.md").write_text("# nothing here\n")
     with pytest.raises(ValueError, match="AD-19"):
         cto.parse_owners((tmp_path / "spine.md").read_text(), EPICS.format(extra_rows=""))
+
+
+@pytest.mark.parametrize("source, expected", [
+    ('"""Create table for maps (and pins)."""\nop.execute("CREATE TABLE widgets (id uuid)")\n', ["widgets"]),
+    ('# CREATE TABLE gadgets (id uuid)\nop.execute("""CREATE TABLE "public"."widgets" (id uuid)""")\n', ["widgets"]),
+    ('op.execute("create table if not exists public.widgets(id uuid)")\n', ["widgets"]),
+    ('op.execute("CREATE TABLE widgets AS SELECT 1")\n', []),
+    ('def upgrade():\n    """Create table for the maps (x)."""\n    op.create_table(table_name="maps")\n', ["maps"]),
+    ("op.rename_table('npcs_old', 'npcs_new')\n", ["npcs_new"]),
+    ("op.rename_table('a', new_table_name='b')\n", ["b"]),
+])
+def test_tables_created_in(source, expected):
+    assert cto.tables_created_in(source) == expected
+
+
+def test_prose_create_table_is_not_a_table(tmp_path):
+    errors, _ = make(tmp_path, migrations={"0006.py": '"""Create table for maps (and pins)."""\n# CREATE TABLE x (\n'})
+    assert errors == []
+
+
+def test_rename_to_unowned_table_fails(tmp_path):
+    errors, _ = make(tmp_path, legacy="users: core\nnpcs: legacy\n", migrations={
+        "0007.py": "op.create_table('npcs')\nop.rename_table('npcs', 'npc_archive')\n"})
+    assert len(errors) == 1 and "0007.py" in errors[0] and "'npc_archive'" in errors[0]
+
+
+def test_unparseable_migration_is_an_error():
+    with pytest.raises(ValueError, match="bad.py"):
+        cto.tables_created_in("def (:\n", "bad.py")
+
+
+def test_epics_table_without_table_column_is_an_error():
+    epics = ("### New tables and columns beyond the spine\n\n| Owner | Story |\n| --- | --- |\n| E4 | E4.5 |\n"
+             "### Next\n")
+    with pytest.raises(ValueError, match="Table / column"):
+        cto.parse_owners(SPINE.format(extra_rows=""), epics)
+
+
+def test_epics_short_rows_are_skipped(tmp_path):
+    errors, owners = make(tmp_path, epics_rows="| E10 |\n")
+    assert errors == [] and "maps" not in owners

@@ -46,11 +46,20 @@ FROZEN_IGNORES = {
 }
 
 # Contracts the E0-QA.10 AC names: id -> type.
-REQUIRED_CONTRACTS = {"layers": "layers", "domain": "forbidden", "clients": "forbidden", "models": "forbidden"}
+REQUIRED_CONTRACTS = {"layers": "layers", "domain": "forbidden", "clients": "forbidden",
+                      "clients_callers": "forbidden", "models": "forbidden"}
 
 REQUIRED_LAYERS = ["app.api", "app.services", "app.schemas", "app.db", "app.core", "(app.domain)"]
-REQUIRED_MODEL_PACKAGES = {"torch", "spacy", "sentence_transformers", "whisper", "faster_whisper",
-                           "easyocr", "onnxruntime", "kokoro", "misaki", "phonemizer"}
+# The models contract, frozen whole: dropping a source module or a forbidden
+# package is a weakening and must show up here in review.
+FROZEN_MODEL_SOURCES = frozenset({
+    "app.api", "app.clients", "app.services", "app.schemas", "app.db", "app.core", "app.domain", "app.main",
+})
+FROZEN_MODEL_PACKAGES = frozenset({
+    "torch", "torchaudio", "torchvision", "transformers", "sentence_transformers", "spacy", "whisper",
+    "faster_whisper", "ctranslate2", "easyocr", "onnxruntime", "kokoro", "kokoro_onnx", "misaki",
+    "phonemizer", "espeakng_loader",
+})
 
 
 def ignore_entries(text: str) -> dict[str, list[tuple[str, str | None]]]:
@@ -65,8 +74,11 @@ def ignore_entries(text: str) -> dict[str, list[tuple[str, str | None]]]:
             contract, in_ignores, reason = m.group(1), False, None
             continue
         if re.match(r"^\S", raw):  # a new key (or section) ends the value
-            in_ignores = contract is not None and re.match(r"^ignore_imports\s*[=:]", raw) is not None
+            key = re.match(r"^ignore_imports\s*[=:](.*)$", raw)
+            in_ignores = contract is not None and key is not None
             reason = None
+            if in_ignores and key.group(1).strip():  # a value on the key line has no ratchet reason
+                out.setdefault(contract, []).append((key.group(1).strip(), None))
             continue
         if not in_ignores:
             continue
@@ -140,8 +152,11 @@ def test_contract_shapes():
     assert {"app.api", "app.services", "app.schemas", "app.db", "app.main"} <= set(
         values(cp, "importlinter:contract:clients", "forbidden_modules"))
     models = "importlinter:contract:models"
-    assert "app.clients" not in values(cp, models, "source_modules")
-    assert REQUIRED_MODEL_PACKAGES <= set(values(cp, models, "forbidden_modules"))
+    assert set(values(cp, models, "source_modules")) == FROZEN_MODEL_SOURCES
+    assert set(values(cp, models, "forbidden_modules")) == FROZEN_MODEL_PACKAGES
+    callers = "importlinter:contract:clients_callers"
+    assert set(values(cp, callers, "source_modules")) == {"app.schemas", "app.db", "app.core", "app.domain"}
+    assert values(cp, callers, "forbidden_modules") == ["app.clients"]
     assert cp.get(models, "unmatched_ignore_imports_alerting", fallback="error") == "error"
 
 
@@ -151,6 +166,11 @@ def test_parser_reads_reasons():
         "name = later key\n[importlinter:contract:y]\nignore_imports =\n    # plain comment\n    e -> f\n"
     )
     assert ignore_entries(text) == {"x": [("a -> b", "because"), ("c -> d", None)], "y": [("e -> f", None)]}
+
+
+def test_parser_reads_value_on_key_line():
+    text = "[importlinter:contract:x]\nignore_imports = app.x -> torch\n    # ratchet: r\n    a -> b\n"
+    assert ignore_entries(text) == {"x": [("app.x -> torch", None), ("a -> b", "r")]}
 
 
 # ---- planted violations (real lint-imports on a throwaway package) --------
@@ -204,7 +224,9 @@ def test_layout_like_today_passes(tmp_path):
     ({"core/bad.py": "import app.api.routes\n"}, "AD-1 layers", "app.core.bad -> app.api"),
     ({"domain/bad.py": "from app.clients import ml\n"}, "AD-1 app.domain imports no other app package", "app.domain.bad -> app.clients"),
     ({"clients/bad.py": "from app.db import base\n"}, "AD-1 app.clients imports only", "app.clients.bad -> app.db"),
+    ({"schemas/bad.py": "from app.clients import ml\n"}, "AD-1 only services and above import app.clients", "app.schemas.bad -> app.clients"),
     ({"api/bad.py": "import torch\n"}, "AD-1 no model packages", "app.api.bad -> torch"),
+    ({"clients/stt.py": "import faster_whisper\n"}, "AD-1 no model packages", "app.clients.stt -> faster_whisper"),
     ({"services/new_tts.py": "from kokoro_onnx import Kokoro\n"}, "AD-1 no model packages", "app.services.new_tts -> kokoro_onnx"),
 ])
 def test_planted_violation_fails(tmp_path, plant, contract, offender):

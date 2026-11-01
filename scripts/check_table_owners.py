@@ -19,8 +19,10 @@ Backticked names are tables, except:
 Fails when:
   * a table has two owning epics;
   * a migration (src/backend/migrations/versions/*.py) creates a table, by
-    op.create_table(...) or CREATE TABLE, that no epic owns and that is not a
-    pre-expansion table in scripts/table_owners_legacy.txt;
+    op.create_table(...), op.rename_table(old, new) or a CREATE TABLE string
+    (found through the AST, so prose and docstrings never count), that no
+    epic owns and that is not a pre-expansion table in
+    scripts/table_owners_legacy.txt;
   * a legacy entry is also owned by an epic, or no migration creates it any
     more (remove it from the legacy list), or has no reason;
   * the map cites a Foundation revision that AD-19 gives to another epic.
@@ -32,6 +34,7 @@ Run: python scripts/check_table_owners.py   (stdlib only; exit 0 clean, 1 on fai
 from __future__ import annotations
 
 import argparse
+import ast
 import re
 import sys
 from pathlib import Path
@@ -53,8 +56,11 @@ JOINER = re.compile(r"^\s*(,|\+|and|,\s*and|&)?\s*$")
 NOT_TABLE_NEXT = re.compile(r"^\s*(enums?|columns?|uniqueness|index(es)?)\b", re.I)
 INDEX_WORD = re.compile(r"\bindex(es)?\b", re.I)
 
-CREATE_TABLE_OP = re.compile(r"""\bcreate_table\(\s*['"]([A-Za-z_][\w]*)['"]""")
-CREATE_TABLE_SQL = re.compile(r"""\bCREATE\s+(?:UNLOGGED\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:public\.)?["']?([A-Za-z_]\w*)""", re.I)
+# Applied only to string constants in a migration (not docstrings or
+# comments): CREATE [UNLOGGED] TABLE [IF NOT EXISTS] [schema.]name (
+CREATE_TABLE_SQL = re.compile(
+    r"""\bCREATE\s+(?:UNLOGGED\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?"""
+    r"""(?:"?[A-Za-z_]\w*"?\s*\.\s*)?"?([A-Za-z_]\w*)"?\s*\(""", re.I)
 
 Owners = dict[str, dict[str, str]]  # table -> {epic: where}
 
@@ -162,22 +168,56 @@ def parse_owners(spine: str, epics: str) -> tuple[Owners, list[str]]:
             add(owners, t, epic, "spine boundary map")
 
     header, rows = table_rows(section(epics, EPICS_HEADING, "epics.md additions"))
-    owner_col = header.index("Owner")
-    table_col = next(i for i, h in enumerate(header) if h.lower().startswith("table"))
+    owner_col = header.index("Owner") if "Owner" in header else None
+    table_col = next((i for i, h in enumerate(header) if h.lower().startswith("table")), None)
+    if owner_col is None or table_col is None:
+        raise ValueError("epics.md additions table needs an 'Owner' and a 'Table / column' column")
     for row in rows:
+        if len(row) <= max(owner_col, table_col):
+            continue
         epic = epic_id(row[owner_col])
         for t in tables_in(row[table_col], "cell"):
             add(owners, t, epic, "epics.md additions")
     return owners, errors
 
 
+def _str_arg(call: ast.Call, pos: int, kw: str) -> str | None:
+    node = call.args[pos] if len(call.args) > pos else next((k.value for k in call.keywords if k.arg == kw), None)
+    return node.value if isinstance(node, ast.Constant) and isinstance(node.value, str) else None
+
+
+def tables_created_in(source: str, filename: str = "<migration>") -> list[str]:
+    """Tables a migration creates: op.create_table(name), the new name of
+    op.rename_table(old, new), and CREATE TABLE ... ( in string constants."""
+    try:
+        tree = ast.parse(source, filename)
+    except SyntaxError as exc:
+        raise ValueError(f"{filename}: cannot parse ({exc.msg}, line {exc.lineno})") from None
+    docstrings = {id(n.body[0].value) for n in ast.walk(tree)
+                  if isinstance(n, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                  and n.body and isinstance(n.body[0], ast.Expr) and isinstance(n.body[0].value, ast.Constant)}
+    names: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            func = node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", None)
+            name = None
+            if func == "create_table":
+                name = _str_arg(node, 0, "table_name")
+            elif func == "rename_table":
+                name = _str_arg(node, 1, "new_table_name")
+            if name:
+                names.append(name)
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in docstrings:
+            names += [m.group(1) for m in CREATE_TABLE_SQL.finditer(node.value)]
+    return names
+
+
 def created_tables(migrations: Path) -> dict[str, list[str]]:
-    """{table: [migration file names]} for every CREATE TABLE in the migrations."""
+    """{table: [migration file names]} for every table the migrations create."""
     out: dict[str, list[str]] = {}
     for path in sorted(migrations.glob("*.py")):
-        text = path.read_text()
-        for m in [*CREATE_TABLE_OP.finditer(text), *CREATE_TABLE_SQL.finditer(text)]:
-            files = out.setdefault(m.group(1), [])
+        for name in tables_created_in(path.read_text(), path.name):
+            files = out.setdefault(name, [])
             if path.name not in files:
                 files.append(path.name)
     return out
@@ -241,7 +281,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         errors, owners = check(args.spine, args.epics, args.migrations, args.legacy)
     except ValueError as exc:
-        print(f"ERROR could not parse the boundary map: {exc}", file=sys.stderr)
+        print(f"ERROR could not parse the planning docs or migrations: {exc}", file=sys.stderr)
         return 1
     if args.verbose:
         for t in sorted(owners):

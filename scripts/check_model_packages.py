@@ -39,9 +39,13 @@ DOCKERFILES = [REPO / "src/backend/Dockerfile", REPO / "src/backend/Dockerfile.p
 # PEP 503 names. AD-1 / spine "Design Paradigm" list, the E0-QA.10 AC list,
 # and AD-16's TTS packages (kokoro, kokoro-onnx, misaki, phonemizer,
 # espeakng-loader; TTS is Coqui). transformers and ctranslate2 are the engines
-# under sentence-transformers and faster-whisper.
+# under sentence-transformers and faster-whisper; torchvision and torchaudio
+# pull in torch. spaCy pipelines are pip packages too (`spacy download`
+# installs one), matched by SPACY_MODEL below.
 FORBIDDEN = frozenset({
     "torch",
+    "torchvision",
+    "torchaudio",
     "transformers",
     "sentence-transformers",
     "spacy",
@@ -58,6 +62,14 @@ FORBIDDEN = frozenset({
     "espeakng-loader",
     "tts",
 })
+
+# spaCy pipeline packages: en-core-web-trf, de-core-news-sm, xx-ent-wiki-sm, ...
+SPACY_MODEL = re.compile(r"^[a-z]{2,3}-(core|dep|ent)-[a-z0-9]+-(sm|md|lg|trf)$")
+
+
+def is_forbidden(name: str) -> bool:
+    return name in FORBIDDEN or SPACY_MODEL.match(name) is not None
+
 
 FIX = ("move the model into a sidecar (src/services/ml or stt) and call it "
        "through app/clients (AD-1, AD-6)")
@@ -83,6 +95,8 @@ def normalize(name: str) -> str:
 def requirement_name(spec: str) -> str | None:
     """Project name of a requirement specifier, or None for paths and URLs."""
     spec = spec.strip().strip("'\"")
+    if "@" in spec:  # PEP 508 direct reference: `torch @ https://.../torch.whl`
+        spec = spec.split("@", 1)[0]
     if not spec or "/" in spec or spec.startswith((".", "-")) or "://" in spec:
         return None
     m = _NAME_RE.match(spec)
@@ -162,6 +176,10 @@ def pip_install_packages(command: str) -> list[str]:
                 if tokens[i + 1] == "install":
                     names += _install_args(tokens[i + 2:])
                     break
+            # `python -m spacy download en_core_web_trf` pip-installs the pipeline package
+            if tokens[i] == "spacy" and tokens[i + 1] == "download":
+                names += [n for n in (requirement_name(t) for t in tokens[i + 2:] if not t.startswith("-")) if n]
+                break
     return names
 
 
@@ -205,7 +223,7 @@ def load_baseline(path: Path) -> tuple[dict[str, str], list[str]]:
             errors.append(f"{path.name}:{n}: '{pkg}' has no reason; write `{pkg}: <why it is still here, which story removes it>`")
         if pkg in entries:
             errors.append(f"{path.name}:{n}: '{pkg}' is listed twice; keep one line")
-        if pkg not in FORBIDDEN:
+        if not is_forbidden(pkg):
             errors.append(f"{path.name}:{n}: '{pkg}' is not a forbidden model package; remove it from the baseline")
         entries[pkg] = reason.strip()
     return entries, errors
@@ -222,7 +240,7 @@ def check(requirements: list[Path], dockerfiles: list[Path], baseline_path: Path
 
     found: dict[str, list[Hit]] = {}
     for h in hits:
-        if h.package in FORBIDDEN:
+        if is_forbidden(h.package):
             found.setdefault(h.package, []).append(h)
 
     for pkg in sorted(found):
@@ -230,7 +248,7 @@ def check(requirements: list[Path], dockerfiles: list[Path], baseline_path: Path
             for h in found[pkg]:
                 errors.append(f"{h.where(root)}: installs model package '{pkg}' in the web/worker image; {FIX}")
     for pkg in sorted(set(baseline) - set(found)):
-        if pkg in FORBIDDEN:
+        if is_forbidden(pkg):
             errors.append(
                 f"{baseline_path.name}: '{pkg}' is no longer installed by the web/worker image; "
                 f"remove it from the baseline ({baseline_path.name}) so it cannot come back")

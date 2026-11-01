@@ -37,8 +37,9 @@ jobs:
           pip install -r <(grep -iE '^(pyyaml|pytest|import-linter|grimp)==' src/backend/requirements-dev.txt)
 
       # CI-2 (AD-1): api > services > schemas > db > core > domain; domain
-      # imports no app package; clients only core/domain; no model package
-      # imported outside app/clients. Contracts: src/backend/.importlinter.
+      # imports no app package; clients only core/domain, and only services
+      # and above import clients; no model package imported anywhere in app
+      # (clients included). Contracts: src/backend/.importlinter.
       - name: "CI-2 AD-1 import contracts (lint-imports)"
         working-directory: src/backend
         env:
@@ -66,8 +67,11 @@ jobs:
       - name: "CI-7 AD-19 one owner per table"
         run: python scripts/check_table_owners.py
 
-      # CI-14 (AD-7): the *_MEM_LIMIT sum in .env.example is <= 14.5 GiB and
-      # the compose files use the same defaults.
+      # CI-14 (AD-7): the sum of the *_MEM_LIMIT variables in .env.example is
+      # <= 14.5 GiB (Docker units are binary) and the compose files reference
+      # them with the same defaults. Hard-coded compose limits are NOT summed;
+      # each must be in scripts/memory_literal_limits_baseline.txt
+      # (shrink-only; E0-Platform.7 moves them to variables).
       - name: "CI-14 AD-7 memory budget"
         run: python scripts/check_memory_budget.py
 

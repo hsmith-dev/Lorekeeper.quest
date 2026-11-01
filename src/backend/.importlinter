@@ -57,14 +57,29 @@ forbidden_modules =
     app.db
     app.main
 
-# All inference goes through app/clients (HTTP to the sidecars). No other app
-# code imports a model package directly. Indirect imports are allowed: only
-# the direct import loads the model in the web or worker process.
+# Only services (and transport above them) use the model clients; the layers
+# below services never reach a sidecar.
+[importlinter:contract:clients_callers]
+name = AD-1 only services and above import app.clients
+type = forbidden
+source_modules =
+    app.schemas
+    app.db
+    app.core
+    app.domain
+forbidden_modules =
+    app.clients
+
+# All inference goes through app/clients, which talk to the sidecars over
+# HTTP. No app code, app/clients included, imports a model package directly.
+# Indirect imports are allowed: only the direct import loads the model in the
+# web or worker process.
 [importlinter:contract:models]
-name = AD-1 no model packages imported outside app.clients
+name = AD-1 no model packages imported in the web/worker process
 type = forbidden
 source_modules =
     app.api
+    app.clients
     app.services
     app.schemas
     app.db
