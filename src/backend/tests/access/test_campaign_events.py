@@ -217,6 +217,50 @@ async def test_a_check_that_cannot_run_fails_loudly(world):
         await deliverable(Broken(), player, inv("entities", world.party_entity))
 
 
+async def test_unkeyed_event_of_a_gm_only_membership_domain_reaches_no_player(world, monkeypatch):
+    """A domain whose predicate is false() for the viewer (here a GM-only
+    membership table) is withheld unkeyed too, not just always_gm models."""
+    from app.db.models.share_token import CampaignShareToken
+
+    monkeypatch.setitem(access_events._DOMAINS, "share_links",
+                        access_events.EventDomain("share_links", CampaignShareToken))
+    player = await world.ctx(world.player)
+    assert await deliverable(None, player, inv("share_links")) is None
+    assert await deliverable(None, await world.ctx(world.owner), inv("share_links")) == inv("share_links")
+
+
+async def test_a_failed_check_ends_the_stream(world, valkey, monkeypatch):
+    """Fail closed without dropping silently: the generator ends right after
+    the failing event, so the client reconnects and resyncs."""
+    player = await world.ctx(world.player)
+
+    async def broken(session, ctx, data):
+        raise EventCheckFailed("db down")
+
+    monkeypatch.setattr(access_events, "deliverable", broken)
+    gen = access_events.campaign_event_stream(player, bind=world.db.bind)
+    assert await asyncio.wait_for(gen.__anext__(), 5) == ("subscribed", {})
+    await _raw(valkey, world.cid, inv("entities", world.party_entity))
+    await _raw(valkey, world.cid, inv("visibility"))
+    with pytest.raises(StopAsyncIteration):
+        await asyncio.wait_for(gen.__anext__(), 5)
+
+
+async def test_visibility_is_published_after_the_cache_generation_moves(world, monkeypatch):
+    order = []
+
+    async def bump(campaign_id):
+        order.append(("cache", campaign_id))
+
+    async def publish(campaign_id, domain, id=None):  # noqa: A002
+        order.append(("publish", domain))
+
+    monkeypatch.setattr(access_events.cache, "invalidate_campaign_cache", bump)
+    monkeypatch.setattr(pubsub, "publish_campaign_event", publish)
+    await access_events._publish_visibility(world.cid, [], None)
+    assert order == [("cache", world.cid), ("publish", "visibility")]
+
+
 def test_register_event_domain_guards():
     assert {"entities", "relationships", "journal"} <= set(access_events.event_domains())
     assert register_event_domain("entities", Entity).model is Entity  # same model: a no-op

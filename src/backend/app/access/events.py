@@ -13,7 +13,9 @@ viewer, at delivery time:
 * a **broadcast** domain (`visibility`, `role`) reaches every viewer, always
   with `id: null` (it says "refetch", never which record);
 * a **keyed** event of a registered domain reaches a non-GM only when
-  `scoped_select(model, ctx)` finds that id *now* (visible after the change);
+  `scoped_select(model, ctx)` finds that id *now* (visible after the change).
+  So a keyed event for a deleted or newly hidden row reaches no Player:
+  publishers send deletes and downgrades unkeyed (`id=None`, AD-5);
 * an **unkeyed** event of a registered domain reaches a non-GM unless the
   domain's model can never be visible to them (always-GM);
 * anything else (an unknown domain, a malformed message) reaches no
@@ -43,10 +45,12 @@ from typing import Any, AsyncIterator
 import sqlalchemy as sa
 from fastapi import Request
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import False_
 
+from app.access import cache
 from app.access.context import CampaignContext, _narrow_for_preview
 from app.access.policy import GM
-from app.access.registry import AlwaysGM, registration, scoped_select
+from app.access.registry import AlwaysGM, registration, scoped_select, visible_clause
 from app.access.visibility import register_visibility_listener
 from app.core import pubsub
 from app.db.models.character_sheet import CharacterSheet
@@ -141,9 +145,16 @@ def _uuid(value: str) -> uuid.UUID | None:
 
 
 def _never_visible(model: type, ctx: CampaignContext) -> bool:
-    """True when no row of `model` can be visible to the (non-GM) ctx."""
+    """True when no row of `model` can be visible to the (non-GM) ctx: an
+    always-GM model without an owner, or any predicate that is `false()`
+    for this ctx (e.g. a GM-only membership table)."""
     reg = registration(model)
-    return isinstance(reg, AlwaysGM) and reg.owner_field is None
+    if isinstance(reg, AlwaysGM) and reg.owner_field is None:
+        return True
+    try:
+        return isinstance(visible_clause(model, ctx), False_)
+    except Exception:
+        return True  # cannot tell: fail closed
 
 
 def _needs_query(ctx: CampaignContext, data: Any) -> bool:
@@ -227,6 +238,10 @@ async def campaign_event_stream(ctx: CampaignContext, *, bind: Any = None) -> As
 # ── Publishing `visibility` after a set_visibility commit ──────────────────
 
 async def _publish_visibility(campaign_id: uuid.UUID, refs: list, actor_ctx: Any) -> None:
+    # set_visibility runs listeners before its own cache invalidation: bump
+    # the generation first, so a refetch this event triggers never reads a
+    # cached answer from before the change (the second bump is harmless).
+    await cache.invalidate_campaign_cache(campaign_id)
     await pubsub.publish_campaign_event(campaign_id, VISIBILITY_DOMAIN, None)
 
 

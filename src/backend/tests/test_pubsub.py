@@ -245,6 +245,71 @@ async def test_without_announce_there_is_no_subscribed(valkey):
     await got.close()
 
 
+class _StubPubSub:
+    """A pubsub whose SUBSCRIBE confirmation the test releases by hand."""
+
+    def __init__(self, confirm: asyncio.Event | None, fail: bool = False):
+        self.confirm, self.fail, self.confirmed = confirm, fail, False
+
+    async def subscribe(self, *channels):
+        pass
+
+    async def get_message(self, ignore_subscribe_messages=False, timeout=None):
+        if self.fail:
+            raise ConnectionError("gone")
+        if not self.confirmed and not ignore_subscribe_messages and self.confirm is not None:
+            try:
+                await asyncio.wait_for(self.confirm.wait(), timeout)
+            except asyncio.TimeoutError:
+                return None
+            self.confirmed = True
+            return {"type": "subscribe", "channel": "x", "data": 1}
+        await asyncio.sleep(min(timeout or 0.01, 0.01))
+        return None
+
+    async def unsubscribe(self):
+        pass
+
+    async def aclose(self):
+        pass
+
+
+class _StubClient:
+    def __init__(self, stub):
+        self.stub = stub
+
+    def pubsub(self):
+        return self.stub
+
+
+async def test_subscribed_waits_for_the_servers_confirmation(monkeypatch):
+    confirm = asyncio.Event()
+    previous = valkey_client.set_valkey(_StubClient(_StubPubSub(confirm)))
+    try:
+        got = Collector(listen_campaign_events(uuid.uuid4(), announce=True))
+        await asyncio.sleep(0.2)
+        assert got.items == []  # SUBSCRIBE sent, not confirmed: no resync point yet
+        confirm.set()
+        await wait_until(lambda: got.items)
+        assert got.items == [(pubsub.SUBSCRIBED_EVENT, {})]
+        await got.close()
+    finally:
+        valkey_client.set_valkey(previous)
+
+
+@pytest.mark.parametrize("fail", [False, True])
+async def test_unconfirmed_subscribe_ends_without_subscribed(monkeypatch, caplog, fail):
+    monkeypatch.setattr(pubsub, "PUBLISH_TIMEOUT_S", 0.2)
+    previous = valkey_client.set_valkey(_StubClient(_StubPubSub(None if fail else asyncio.Event(), fail=fail)))
+    caplog.set_level(logging.WARNING, logger="app.core.pubsub")
+    try:
+        items = [item async for item in listen_campaign_events(uuid.uuid4(), announce=True)]
+    finally:
+        valkey_client.set_valkey(previous)
+    assert items == []
+    assert ("pubsub_subscribe_failed" if fail else "pubsub_subscribe_unconfirmed") in caplog.text
+
+
 async def test_announce_without_valkey_yields_nothing(no_valkey):
     items = [item async for item in listen_campaign_events(uuid.uuid4(), announce=True)]
     assert items == []

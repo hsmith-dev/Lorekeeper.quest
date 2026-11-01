@@ -289,6 +289,66 @@ describe("the loop over a fake transport", () => {
     assert.ok(calls.every((h) => !("X-Lorekeeper-Preview" in h)));
   });
 
+  test("a 404 on the first connection invalidates the role and the Campaign, then stops", async () => {
+    localStorage.setItem("lk_token", "tok-404");
+    const qc = seeded();
+    const reason = await ev.runCampaignEvents({
+      campaignId: CID,
+      queryClient: qc,
+      signal: new AbortController().signal,
+      open: async () => ({ kind: "status", status: 404 }),
+    });
+    assert.equal(reason, "404");
+    for (const key of [["campaignRole", CID], ["entities", CID], ["npcs", CID]]) {
+      assert.ok(invalidated(qc, key), JSON.stringify(key));
+    }
+    assert.ok(!invalidated(qc, ["entities", OTHER]) && !invalidated(qc, ["campaignRole", OTHER]));
+  });
+
+  test("the idle watchdog ends a silent (half-open) stream as an error", async () => {
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = async (_url, init) => {
+      const body = new ReadableStream({
+        start(c) {
+          c.enqueue(new TextEncoder().encode(frame("subscribed", {})));
+          init.signal.addEventListener("abort", () => c.error(new Error("aborted")));
+        },
+      });
+      return new Response(body, { status: 200 });
+    };
+    try {
+      const got = [];
+      const open = ev.createFetchStream(50);
+      const result = await open("/x", {}, new AbortController().signal, (f) => got.push(f.event));
+      assert.deepEqual(result, { kind: "error" });
+      assert.deepEqual(got, ["subscribed"]);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  test("a non-ok answer's body is cancelled", async () => {
+    const realFetch = globalThis.fetch;
+    let cancelled = false;
+    globalThis.fetch = async () =>
+      new Response(
+        new ReadableStream({
+          cancel() {
+            cancelled = true;
+          },
+        }),
+        { status: 503 },
+      );
+    try {
+      const result = await ev.openFetchStream("/x", {}, new AbortController().signal, () => {});
+      assert.deepEqual(result, { kind: "status", status: 503 });
+      await tick();
+      assert.ok(cancelled);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
   test("no token: never connects", async () => {
     let opened = false;
     const reason = await ev.runCampaignEvents({

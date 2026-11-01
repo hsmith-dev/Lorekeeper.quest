@@ -2,6 +2,7 @@ import { useEffect, useSyncExternalStore } from "react";
 import { useQueryClient, type QueryClient, type QueryKey } from "@tanstack/react-query";
 
 import { getPreviewCampaignId, previewHeaders, subscribePreview } from "../lib/preview";
+import { campaignRoleKey } from "./useCampaignRole";
 import { useCurrentCampaign } from "./useCurrentCampaign";
 
 // Campaign invalidations pushed by the server (E0-Access.11, AD-5):
@@ -26,7 +27,11 @@ import { useCurrentCampaign } from "./useCurrentCampaign";
 // that one function. The server filters every event for the caller; nothing
 // here decides what a user may see.
 
-export const EVENTS_PATH = (campaignId: string) => `/api/campaigns/${encodeURIComponent(campaignId)}/events`;
+// The same base URL as services/api.ts (empty: same origin).
+const API_BASE: string = import.meta.env.VITE_API_URL ?? "";
+
+export const EVENTS_PATH = (campaignId: string) =>
+  `${API_BASE}/api/campaigns/${encodeURIComponent(campaignId)}/events`;
 
 export const BACKOFF_BASE_MS = 1_000;
 export const BACKOFF_MAX_MS = 30_000;
@@ -88,7 +93,15 @@ export const BROADCAST_DOMAINS = new Set(["visibility", "role"]);
 
 // Query keys that hold this Campaign's rows without the Campaign id at
 // position 1 (cross-Campaign lists and item details).
-export const CROSS_CAMPAIGN_KEYS = new Set(["journals", "journal", "chat-sessions", "campaigns", "tags"]);
+export const CROSS_CAMPAIGN_KEYS = new Set([
+  "journals",
+  "journal",
+  "chat-sessions",
+  "campaigns",
+  "tags",
+  "npc-entries",
+  "quest-entries",
+]);
 
 // Existing query keys whose name differs from the event domain.
 const DOMAIN_ALIASES: Record<string, (campaignId: string, id: string | null) => QueryKey[]> = {
@@ -98,7 +111,7 @@ const DOMAIN_ALIASES: Record<string, (campaignId: string, id: string | null) => 
 };
 
 export function campaignRoleQueryKey(campaignId: string): QueryKey {
-  return ["campaignRole", campaignId];
+  return campaignRoleKey(campaignId);
 }
 
 /** True for a query that holds data of `campaignId` (refetched on resync). */
@@ -214,34 +227,66 @@ export type OpenStream = (
   onFrame: (frame: SseFrame) => void,
 ) => Promise<{ kind: "status"; status: number } | { kind: "ended" } | { kind: "error" } | { kind: "aborted" }>;
 
-export const openFetchStream: OpenStream = async (url, headers, signal, onFrame) => {
-  let resp: Response;
+/** No frame (pings included, every 15 s) for this long: the connection is dead. */
+export const IDLE_TIMEOUT_MS = 45_000;
+
+/** A fetch transport whose idle watchdog fires after `idleMs` without a chunk. */
+export const createFetchStream = (idleMs: number = IDLE_TIMEOUT_MS): OpenStream => async (url, headers, signal, onFrame) => {
+  // Our own controller: aborted by the caller's signal or by the idle watchdog
+  // (a half-open connection never errors on its own).
+  if (signal.aborted) return { kind: "aborted" };
+  const local = new AbortController();
+  const forward = () => local.abort();
+  signal.addEventListener("abort", forward);
+  let idle: ReturnType<typeof setTimeout> | undefined;
+  const arm = () => {
+    if (idle !== undefined) clearTimeout(idle);
+    idle = setTimeout(() => local.abort(), idleMs);
+  };
+  const outcome = (fallback: "ended" | "error"): { kind: "ended" } | { kind: "error" } | { kind: "aborted" } => {
+    if (signal.aborted) return { kind: "aborted" };
+    if (local.signal.aborted) return { kind: "error" };
+    return { kind: fallback };
+  };
   try {
-    resp = await fetch(url, { headers: { Accept: "text/event-stream", ...headers }, signal, cache: "no-store" });
-  } catch {
-    return signal.aborted ? { kind: "aborted" } : { kind: "error" };
-  }
-  if (!resp.ok || !resp.body) return { kind: "status", status: resp.status };
-  const reader = resp.body.getReader();
-  const decoder = new TextDecoder();
-  const split = createFrameSplitter();
-  try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      for (const frame of split(decoder.decode(value, { stream: true }))) onFrame(frame);
-    }
-  } catch {
-    return signal.aborted ? { kind: "aborted" } : { kind: "error" };
-  } finally {
+    let resp: Response;
+    arm();
     try {
-      reader.releaseLock();
+      resp = await fetch(url, {
+        headers: { Accept: "text/event-stream", ...headers },
+        signal: local.signal,
+        cache: "no-store",
+      });
     } catch {
-      // already released
+      return outcome("error");
     }
+    if (!resp.ok || !resp.body) {
+      void resp.body?.cancel().catch(() => undefined);
+      return { kind: "status", status: resp.status };
+    }
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    const split = createFrameSplitter();
+    try {
+      for (;;) {
+        arm();
+        const { done, value } = await reader.read();
+        if (done) break;
+        for (const frame of split(decoder.decode(value, { stream: true }))) onFrame(frame);
+      }
+    } catch {
+      return outcome("error");
+    } finally {
+      void reader.cancel().catch(() => undefined);
+    }
+    return outcome("ended");
+  } finally {
+    if (idle !== undefined) clearTimeout(idle);
+    signal.removeEventListener("abort", forward);
   }
-  return signal.aborted ? { kind: "aborted" } : { kind: "ended" };
 };
+
+export const openFetchStream: OpenStream = createFetchStream();
 
 // ─── The loop ────────────────────────────────────────────────────────────────
 
