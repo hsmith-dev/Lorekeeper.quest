@@ -71,6 +71,61 @@ export interface PublicCampaign {
   share_kind: ShareKind;
 }
 
+// Read-only Share Link payloads. These mirror the backend Public* allow-list
+// schemas in src/backend/app/schemas/share.py exactly. They deliberately leave
+// out GM-private fields (journal `shorthand`, NPC/quest `notes`), so share-page
+// code that reaches for them fails to compile. Don't widen them.
+export interface PublicTagCategory {
+  id: string;
+  name: string;
+  campaign_id: string;
+  created_at: string;
+}
+
+export interface PublicTag {
+  id: string;
+  name: string;
+  tag_type: TagType | null;
+  custom_category: PublicTagCategory | null;
+}
+
+export interface PublicJournal {
+  id: string;
+  campaign_id: string;
+  narrative: string;
+  session_date: string | null;
+  tags: PublicTag[];
+  created_at: string;
+}
+
+export interface PublicJournalList {
+  items: PublicJournal[];
+  total: number;
+  page: number;
+  limit: number;
+}
+
+export interface PublicNpc {
+  id: string;
+  campaign_id: string;
+  name: string;
+  role: NpcRole;
+  status: NpcStatus;
+  description: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PublicQuest {
+  id: string;
+  campaign_id: string;
+  title: string;
+  description: string | null;
+  status: QuestStatus;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface JoinCampaignResult {
   campaign_id: string;
   campaign_name: string;

@@ -3,14 +3,14 @@ import { useParams, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import * as api from "../services/api";
 import { JournalCard } from "../components/JournalCard";
-import type { PublicCampaign, JournalListResponse, NpcEntry, Quest } from "../types";
+import type { PublicCampaign, PublicJournalList, PublicNpc, PublicQuest } from "../types";
 
 const TABS = ["Journal", "Characters", "Quests"] as const;
 type Tab = (typeof TABS)[number];
 
 function JournalTab({ token }: { token: string }) {
   const [page, setPage] = useState(1);
-  const { data, isLoading } = useQuery<JournalListResponse>({
+  const { data, isLoading } = useQuery<PublicJournalList>({
     queryKey: ["sharedJournals", token, page],
     queryFn: async () => (await api.getSharedJournals(token, page)).data,
   });
@@ -41,7 +41,7 @@ function JournalTab({ token }: { token: string }) {
 }
 
 function NpcsTab({ token }: { token: string }) {
-  const { data, isLoading } = useQuery<NpcEntry[]>({
+  const { data, isLoading } = useQuery<PublicNpc[]>({
     queryKey: ["sharedNpcs", token],
     queryFn: async () => (await api.getSharedNpcs(token)).data,
   });
@@ -61,7 +61,7 @@ function NpcsTab({ token }: { token: string }) {
 }
 
 function QuestsTab({ token }: { token: string }) {
-  const { data, isLoading } = useQuery<Quest[]>({
+  const { data, isLoading } = useQuery<PublicQuest[]>({
     queryKey: ["sharedQuests", token],
     queryFn: async () => (await api.getSharedQuests(token)).data,
   });

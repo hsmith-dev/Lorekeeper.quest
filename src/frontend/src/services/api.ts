@@ -125,16 +125,16 @@ export const getSharedCampaign = (token: string) =>
   api.get<import("../types").PublicCampaign>(`/api/share/${token}`);
 
 export const getSharedJournals = (token: string, page = 1) =>
-  api.get<import("../types").JournalListResponse>(`/api/share/${token}/journals`, { params: { page } });
+  api.get<import("../types").PublicJournalList>(`/api/share/${token}/journals`, { params: { page } });
 
 export const getSharedJournal = (token: string, journal_id: string) =>
-  api.get<import("../types").JournalEntry>(`/api/share/${token}/journals/${journal_id}`);
+  api.get<import("../types").PublicJournal>(`/api/share/${token}/journals/${journal_id}`);
 
 export const getSharedNpcs = (token: string) =>
-  api.get<import("../types").NpcEntry[]>(`/api/share/${token}/npcs`);
+  api.get<import("../types").PublicNpc[]>(`/api/share/${token}/npcs`);
 
 export const getSharedQuests = (token: string) =>
-  api.get<import("../types").Quest[]>(`/api/share/${token}/quests`);
+  api.get<import("../types").PublicQuest[]>(`/api/share/${token}/quests`);
 
 export const joinCampaign = (token: string) =>
   api.post<import("../types").JoinCampaignResult>(`/api/share/${token}/join`);

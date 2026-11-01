@@ -1,5 +1,5 @@
 import { Link } from "react-router-dom";
-import type { JournalEntry, TagType } from "../types";
+import type { TagType } from "../types";
 import { formatDate } from "../utils/formatDate";
 
 const TAG_STYLES: Record<TagType, string> = {
@@ -10,8 +10,24 @@ const TAG_STYLES: Record<TagType, string> = {
   faction:   "bg-destructive/15 text-destructive-foreground border-destructive/30",
 };
 
+// Only the fields the card renders. Both the owner `JournalEntry` and the
+// share-page `PublicJournal` satisfy it, so the card never forces the Public
+// types to grow GM-private fields.
+export interface JournalCardEntry {
+  id: string;
+  narrative: string;
+  session_date: string | null;
+  created_at: string;
+  tags: {
+    id: string;
+    name: string;
+    tag_type: TagType | null;
+    custom_category: { name: string } | null;
+  }[];
+}
+
 interface JournalCardProps {
-  entry: JournalEntry;
+  entry: JournalCardEntry;
   preview?: boolean;
   linkable?: boolean;
 }
