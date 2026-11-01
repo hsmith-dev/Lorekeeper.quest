@@ -1,5 +1,8 @@
 # Dev-only compose: runs postgres + redis locally so you can run backend/frontend directly.
-# Usage: docker-compose -f docker-compose.dev.yml up -d
+# Usage: docker compose -f docker-compose.dev.yml up -d
+# Ports bind to 127.0.0.1 by default. Set BIND_IP in .env (e.g. a Tailscale IP)
+# to expose them on one specific interface instead. Never use 0.0.0.0 — Docker
+# published ports bypass ufw.
 
 services:
   postgres:
@@ -9,7 +12,7 @@ services:
       POSTGRES_PASSWORD: changeme
       POSTGRES_DB: lorekeeper
     ports:
-      - "5432:5432"
+      - "${BIND_IP:-127.0.0.1}:5432:5432"
     volumes:
       - postgres_dev_data:/var/lib/postgresql/data
     healthcheck:
@@ -21,7 +24,7 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      - "${BIND_IP:-127.0.0.1}:6379:6379"
     volumes:
       - redis_dev_data:/data
     healthcheck:

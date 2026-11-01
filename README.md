@@ -112,6 +112,17 @@ services:
 
 then start with both files: `docker compose -f docker-compose.prod.yml -f docker-compose.override.yml up -d`. Verify with `ollama ps` (should read `100% GPU`). A 7B Q4 model needs ~5 GB VRAM; generations drop from minutes (CPU) to seconds.
 
+### Remote dev over Tailscale
+
+Dev-only: this applies to `docker-compose.yml` and `docker-compose.dev.yml`, which publish their ports on `127.0.0.1` by default, and does not affect `docker-compose.prod.yml`. To reach them from another machine (e.g. a laptop working against a desktop):
+
+- Start Tailscale first, then set `BIND_IP` in `.env` to the desktop's Tailscale IPv4 address (`tailscale ip -4`; an unbracketed IPv6 address breaks the port spec). If Tailscale wasn't up, `up -d` fails with "cannot assign requested address": start it and re-run `up -d`.
+- Run `docker compose -f docker-compose.dev.yml up -d` (Postgres + Redis), or `docker compose up -d` for the full dev stack (adds backend 8000 and Vite 5173). Check with `docker compose -f docker-compose.dev.yml ps`: it should show `127.0.0.1:5432->5432` (or your `BIND_IP`).
+- On the laptop: `DATABASE_URL=postgresql+asyncpg://lorekeeper:changeme@100.x.y.z:5432/lorekeeper` and `REDIS_URL=redis://100.x.y.z:6379/0`.
+- `BIND_IP` replaces loopback rather than adding to it, so clients on the desktop itself (psql, a natively run backend, `scripts/start.sh`'s `pg_isready -h localhost`) must also use the `BIND_IP` address.
+- Every device on your tailnet can then reach these services: restrict them with Tailscale ACLs and use a non-default Postgres password.
+- Never set `BIND_IP=0.0.0.0`: Docker-published ports bypass host firewalls such as ufw/firewalld on Linux, so Postgres, Redis, the backend API and Vite would be exposed to your whole LAN.
+
 ## Access modes
 
 **Open access is the default**: anyone can register and use the app — including the self-hosted model — with no promo code, subscription, or billing. That covers self-hosting, a company provisioning accounts for its users, and free community servers.
