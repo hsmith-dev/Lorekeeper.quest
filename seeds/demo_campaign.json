@@ -1,0 +1,310 @@
+{
+  "format_version": 1,
+  "campaign": {
+    "seed_id": "campaign-silver-key",
+    "name": "The Silver Key (demo)",
+    "genre": "fantasy",
+    "description": "A cursed key, a lost dwarf hold and the cult that wants both. The demo campaign behind docs/RETRIEVAL_EVAL.md and the evals that build on it."
+  },
+  "owner": {
+    "email": "demo-gm@example.com",
+    "display_name": "Demo GM"
+  },
+  "entries": [
+    {
+      "seed_id": "e01-old-mill",
+      "session_number": 1,
+      "session_date": "2026-01-10",
+      "purpose": "demo",
+      "shorthand": "Party defeated goblin chief Grukk at the old mill. Rescued the miller's daughter. Thorin found a mysterious silver key.",
+      "narrative": "The once tranquil air around the ancient mill hung heavy with the stench of goblin filth. We cut our way through the raiders on the waterwheel bridge, and Thorin's axe ended their chieftain in the grain loft. Hanna, the young woman they had kept tied in the cellar, wept with relief when Lyra loosed her bonds. In the quiet that followed, Thorin pried a gleaming silver key from the ruin's depths, cold to the touch and etched with runes none of us could read."
+    },
+    {
+      "seed_id": "e02-aldric",
+      "session_number": 2,
+      "session_date": "2026-01-17",
+      "purpose": "demo",
+      "shorthand": "Brought the key to the scholar Aldric in Thornwick. He named it the Silver Key, made for the gates of a dwarf hold. Charged us 50 gold for the reading.",
+      "narrative": "Thornwick's lamplit lanes led us to a crooked tower stuffed with books and dust. Its keeper, an old man with ink-black fingers, turned our find over in his hands for a long time before he spoke. It was no ordinary lock-opener, he said, but a thing forged for the doors of a mountain kingdom that fell long ago. His knowledge was not free: he took fifty gold coins from Vex's purse before he would say another word."
+    },
+    {
+      "seed_id": "e03-borin",
+      "session_number": 3,
+      "session_date": "2026-01-24",
+      "purpose": "demo",
+      "shorthand": "Borin Stonebeard agreed to take us over the Greyspine passes for a share of the hold's gold. His clan fled Karak Dun when the Hollow King stirred beneath it.",
+      "narrative": "We found him drinking alone at the Last Lantern, a broad, scarred dwarf who knew every goat track over the high peaks. For a tenth of whatever treasure we recover, he will walk ahead of us through the snow and the rockfalls. Late into the night he told us why he knows those heights so well: his family abandoned their ancestral halls when something ancient woke in the dark below them, and none of them has gone back since."
+    },
+    {
+      "seed_id": "e04-ash-grey",
+      "session_number": 4,
+      "session_date": "2026-01-31",
+      "purpose": "demo",
+      "shorthand": "Ambushed on the mountain road by cultists in ash-grey robes, the Ashen Hand. Their leader Veyra the Pale demanded the key and escaped when we fought back.",
+      "narrative": "Fog rolled over the switchbacks as figures in grey cloth rose from behind the boulders, chanting. Their mistress stood apart, pale as bone, and asked for the key as if it were already hers. When Thorin answered with steel the hooded zealots broke against our shields, but she simply walked backward into the mist and was gone. Mira bound our wounds by firelight while we argued over who could have told them we carried it."
+    },
+    {
+      "seed_id": "e05-gates",
+      "session_number": 5,
+      "session_date": "2026-02-07",
+      "purpose": "demo",
+      "shorthand": "Reached the gates of Karak Dun. Turned the Silver Key and the great doors opened. Ashen Hand scouts had camped outside before us.",
+      "narrative": "After three days of climbing we stood before a wall of carved stone taller than any temple in Thornwick. Thorin set the key into a lock no bigger than his palm and turned it, and with a groan that shook the snow from the peaks the ancient doors swung inward. Cold air poured out of the darkness. Around us lay the cold ashes of campfires and a scrap of grey cloth snagged on a thorn: someone had waited here before us."
+    },
+    {
+      "seed_id": "e06-deep-halls",
+      "session_number": 6,
+      "session_date": "2026-02-14",
+      "purpose": "demo",
+      "shorthand": "Explored the deep halls of Karak Dun. Bridge over the chasm gave way under Mira, she caught the edge. Found the sword Dawnbreaker in a dwarf king's tomb.",
+      "narrative": "Our torches barely touched the ceilings of the drowned and silent city. Halfway across a span of crumbling stone the floor beneath Mira simply fell away into the abyss, and only her fingers on the lip of the broken arch kept her with us until Borin hauled her back up. Deeper still, behind a door sealed with lead, we found the resting place of a long-dead ruler. On his chest lay a blade that glowed faintly when Thorin lifted it, as if it remembered the sun."
+    },
+    {
+      "seed_id": "e07-ritual",
+      "session_number": 7,
+      "session_date": "2026-02-21",
+      "purpose": "demo",
+      "shorthand": "Back in Thornwick, Aldric deciphered the runes on the key. The ritual to wake the Hollow King needs the key, royal dwarf blood and a moonless night. The key can only be unmade in the fire that forged it.",
+      "narrative": "The old scholar worked through the night with the key under his lens, copying each rune onto parchment. By dawn he looked ten years older. Whoever holds the key, he told us, can open the prison beneath the mountain, but only with the blood of a royal line spilled on a night without a moon. There is one way to end the threat for good: carry it back to the furnace where it was made, far to the east, and let the flames take it. That is where we must go next."
+    },
+    {
+      "seed_id": "e08-forge",
+      "session_number": 8,
+      "session_date": "2026-02-28",
+      "purpose": "demo",
+      "shorthand": "Set out east for the Forge of Dawn. Kaelen, a ranger of the Greenwatch, warned us that Veyra is gathering an army of the Ashen Hand in the northern wastes.",
+      "narrative": "The road east wound through birch forest and burned farmsteads. On the second evening a lean woman in a green cloak stepped out of the trees with an arrow already nocked, then lowered her bow when she saw the key's chain around Thorin's neck. She had tracked the cult for months. Hundreds of them, she said, are massing in the frozen north under their pale mistress, and they will not stop until they hold what we carry."
+    },
+    {
+      "seed_id": "e09-throne",
+      "session_number": 9,
+      "session_date": "2026-03-07",
+      "purpose": "demo",
+      "shorthand": "Stormed the Sunless Throne, Veyra's fortress in the north. While we held the hall, Vex slipped into her chambers and stole the Crown of Ash. Veyra fled again.",
+      "narrative": "We came over the ice wall at the darkest hour, and the fortress woke screaming. Thorin, Mira and Lyra held the great hall against wave after wave of hooded guards while our rogue went over the rooftops. She came back with blood on her sleeve and a blackened circlet under her cloak, the very thing the cult's mistress needed for her rite. Their leader escaped through a tunnel beneath the dais, but she escaped with nothing."
+    },
+    {
+      "seed_id": "e10-mira-dies",
+      "session_number": 10,
+      "session_date": "2026-03-14",
+      "purpose": "eval",
+      "eval_label": {
+        "kind": "death",
+        "subject": "Mira",
+        "note": "Mira dies here. From this session on any summary, recap or answer that treats her as alive in the present is wrong."
+      },
+      "shorthand": "Mira died holding the burning stair at the Ember Keep so the rest of us could get out. We gave her a pyre by the river Sael. (GM: the fire was set by the cult's agent in the Greenwatch, who knew Mira would hold the stair.)",
+      "narrative": "The Ember Keep was already burning when the floor gave way. Mira planted her spear at the top of the stair and told us to run, and we did, because she gave us no choice. The last we saw of her was the light of her holy symbol in the smoke. At dawn we found her beneath the fallen beams and carried her to the riverbank, where Lyra lit the pyre and Thorin said the old words. None of us spoke for the rest of the day."
+    },
+    {
+      "seed_id": "e11-contradiction",
+      "session_number": 11,
+      "session_date": "2026-03-21",
+      "purpose": "eval",
+      "eval_label": {
+        "kind": "contradiction",
+        "subject": "Mira",
+        "contradicts": "e10-mira-dies",
+        "note": "A continuity error in the GM's own notes: Mira fights in the present although she died in e10-mira-dies. A contradiction check must flag it."
+      },
+      "shorthand": "Fought two river trolls at the Sael ford. Mira took the second troll down with her spear. Found a map to the old watchtower in the trolls' den. (GM: the watchtower map is a forgery the cult planted for us.)",
+      "narrative": "The ford was waist-deep and moving fast when the first troll rose out of the reeds. Thorin met it in the water while Lyra's fire kept the second at bay, until Mira drove her spear up under its jaw and it toppled into the current. In the stinking den on the far bank, among gnawed bones, Vex found an oilskin case holding a careful map of a ruined tower to the south."
+    },
+    {
+      "seed_id": "e12-flashback",
+      "session_number": 12,
+      "session_date": "2026-03-28",
+      "purpose": "eval",
+      "eval_label": {
+        "kind": "flashback",
+        "subject": "Mira",
+        "in_world": "ten years before session 1",
+        "note": "A flashback trap: Mira appears alive, but in the past. This is not a contradiction of e10-mira-dies and must not be treated as present-day events."
+      },
+      "shorthand": "Flashback session, ten years before the campaign: a young Mira and her brother Tam steal apples from the Thornwick mayor's orchard and get caught by the watch. Mira swears she will never leave a friend behind.",
+      "narrative": "Ten summers before any of us had heard of a silver key, two children crouched beneath an orchard wall in Thornwick with their shirts full of stolen apples. The girl was quick and the boy was not, and when the lanterns of the night watch came bobbing through the trees she went back for him rather than run. They spent the night in the mayor's cellar together, and somewhere in the dark she made her brother a promise: she would never leave a friend behind."
+    }
+  ],
+  "npcs": [
+    {
+      "seed_id": "pc-thorin",
+      "name": "Thorin",
+      "role": "pc",
+      "description": "Human fighter. Found the Silver Key at the old mill and carries it on a chain around his neck.",
+      "notes": null,
+      "status_history": [{"session": 1, "status": "alive"}]
+    },
+    {
+      "seed_id": "npc-mira",
+      "name": "Mira",
+      "role": "npc",
+      "description": "Cleric of the dawn with a spear and a holy symbol. Joined the party in Thornwick after the old mill and travelled with them until the Ember Keep.",
+      "notes": "Played by the GM as a companion. Her brother Tam still lives in Thornwick and does not yet know she is dead.",
+      "status_history": [
+        {"session": 1, "status": "alive"},
+        {"session": 10, "status": "dead"}
+      ]
+    },
+    {
+      "seed_id": "pc-vex",
+      "name": "Vex",
+      "role": "pc",
+      "description": "Halfling rogue. Holds the party purse and, since session 9, the Crown of Ash.",
+      "notes": "GM secret: Vex once carried messages for the cult in Thornwick and has told no one.",
+      "status_history": [{"session": 1, "status": "alive"}]
+    },
+    {
+      "seed_id": "pc-lyra",
+      "name": "Lyra",
+      "role": "pc",
+      "description": "Human wizard with a fondness for fire.",
+      "notes": null,
+      "status_history": [{"session": 1, "status": "alive"}]
+    },
+    {
+      "seed_id": "npc-grukk",
+      "name": "Grukk",
+      "role": "monster",
+      "description": "Goblin chief who held the old mill. Killed by Thorin in session 1.",
+      "notes": null,
+      "status_history": [
+        {"session": 0, "status": "alive"},
+        {"session": 1, "status": "dead"}
+      ]
+    },
+    {
+      "seed_id": "npc-hanna",
+      "name": "Hanna",
+      "role": "npc",
+      "description": "The miller's daughter, rescued from the goblins at the old mill.",
+      "notes": null,
+      "status_history": [{"session": 1, "status": "alive"}]
+    },
+    {
+      "seed_id": "npc-aldric",
+      "name": "Aldric",
+      "role": "npc",
+      "description": "Scholar of Thornwick who read the Silver Key's runes. Expensive.",
+      "notes": "GM secret: Aldric sold a copy of his rune notes to the cult for two hundred gold.",
+      "status_history": [{"session": 2, "status": "alive"}]
+    },
+    {
+      "seed_id": "npc-borin",
+      "name": "Borin Stonebeard",
+      "role": "npc",
+      "description": "Dwarf exile who led the party over the Greyspine passes to Karak Dun.",
+      "notes": "GM secret: Borin carries the royal blood of Karak Dun, the blood the ritual needs.",
+      "status_history": [{"session": 3, "status": "alive"}]
+    },
+    {
+      "seed_id": "npc-veyra",
+      "name": "Veyra the Pale",
+      "role": "npc",
+      "description": "Leader of the Ashen Hand. Wants the Silver Key to wake the Hollow King.",
+      "notes": null,
+      "status_history": [{"session": 4, "status": "alive"}]
+    },
+    {
+      "seed_id": "npc-kaelen",
+      "name": "Kaelen",
+      "role": "npc",
+      "description": "Ranger of the Greenwatch who has tracked the Ashen Hand for months.",
+      "notes": null,
+      "status_history": [{"session": 8, "status": "alive"}]
+    },
+    {
+      "seed_id": "npc-hollow-king",
+      "name": "The Hollow King",
+      "role": "monster",
+      "description": "Something ancient sleeping beneath Karak Dun. The Silver Key opens its prison.",
+      "notes": null,
+      "status_history": [{"session": 3, "status": "unknown"}]
+    },
+    {
+      "seed_id": "faction-ashen-hand",
+      "name": "The Ashen Hand",
+      "role": "faction",
+      "description": "A cult in ash-grey robes, led by Veyra the Pale, that wants to wake the Hollow King.",
+      "notes": "GM secret: the Ashen Hand has an agent inside the Greenwatch.",
+      "status_history": [{"session": 4, "status": "alive"}]
+    },
+    {
+      "seed_id": "faction-greenwatch",
+      "name": "The Greenwatch",
+      "role": "faction",
+      "description": "Rangers who keep the eastern roads.",
+      "notes": null,
+      "status_history": [{"session": 8, "status": "alive"}]
+    }
+  ],
+  "quests": [
+    {
+      "seed_id": "quest-rescue-hanna",
+      "title": "Rescue the miller's daughter",
+      "status": "completed",
+      "description": "Goblins took Hanna from the old mill.",
+      "notes": null
+    },
+    {
+      "seed_id": "quest-destroy-key",
+      "title": "Destroy the Silver Key",
+      "status": "active",
+      "description": "Carry the key to the Forge of Dawn and unmake it in the fire that forged it.",
+      "notes": "GM secret: the Forge of Dawn has gone cold and only Borin knows the rite to rekindle it."
+    },
+    {
+      "seed_id": "quest-stop-ashen-hand",
+      "title": "Stop the Ashen Hand",
+      "status": "active",
+      "description": "Keep Veyra the Pale from waking the Hollow King.",
+      "notes": null
+    }
+  ],
+  "locations": [
+    {"seed_id": "loc-old-mill", "name": "The old mill", "description": "Where the party found the Silver Key."},
+    {"seed_id": "loc-thornwick", "name": "Thornwick", "description": "Market town, home of Aldric's tower."},
+    {"seed_id": "loc-greyspine", "name": "Greyspine Mountains", "description": "The high passes to Karak Dun."},
+    {"seed_id": "loc-karak-dun", "name": "Karak Dun", "description": "The lost dwarf hold. The Hollow King sleeps beneath it."},
+    {"seed_id": "loc-forge-of-dawn", "name": "Forge of Dawn", "description": "The furnace in the east where the key was made."},
+    {"seed_id": "loc-sunless-throne", "name": "Sunless Throne", "description": "Veyra's fortress in the northern wastes."},
+    {"seed_id": "loc-ember-keep", "name": "Ember Keep", "description": "Burned keep where Mira fell."},
+    {"seed_id": "loc-river-sael", "name": "River Sael", "description": "Mira's pyre; the troll ford."}
+  ],
+  "gm_secrets": [
+    {
+      "seed_id": "secret-ember-keep-fire",
+      "phrase": "set by the cult's agent",
+      "where": {"kind": "entry", "seed_id": "e10-mira-dies", "field": "shorthand"}
+    },
+    {
+      "seed_id": "secret-forged-map",
+      "phrase": "forgery the cult planted",
+      "where": {"kind": "entry", "seed_id": "e11-contradiction", "field": "shorthand"}
+    },
+    {
+      "seed_id": "secret-vex-past",
+      "phrase": "carried messages for the cult",
+      "where": {"kind": "npc", "seed_id": "pc-vex", "field": "notes"}
+    },
+    {
+      "seed_id": "secret-aldric-sold",
+      "phrase": "sold a copy of his rune notes",
+      "where": {"kind": "npc", "seed_id": "npc-aldric", "field": "notes"}
+    },
+    {
+      "seed_id": "secret-borin-blood",
+      "phrase": "royal blood of Karak Dun",
+      "where": {"kind": "npc", "seed_id": "npc-borin", "field": "notes"}
+    },
+    {
+      "seed_id": "secret-greenwatch-agent",
+      "phrase": "agent inside the Greenwatch",
+      "where": {"kind": "npc", "seed_id": "faction-ashen-hand", "field": "notes"}
+    },
+    {
+      "seed_id": "secret-cold-forge",
+      "phrase": "rite to rekindle it",
+      "where": {"kind": "quest", "seed_id": "quest-destroy-key", "field": "notes"}
+    }
+  ]
+}
