@@ -91,9 +91,13 @@ async def run_cursor(job: Job, ctx: CampaignContext, db: AsyncSession, *, select
     ran and the Job continues; False when nothing was left (the Job ends
     `done`)."""
     payload = dict(job.payload or {})
-    step = await select_next(db, ctx, payload.get("cursor"))
+    previous = payload.get("cursor")
+    step = await select_next(db, ctx, previous)
     if step is None:
         return False
+    if step.cursor is None or step.cursor == previous:
+        # Would re-push itself forever (attempts reset every step).
+        raise ValueError("cursor did not advance")
     await process_one(db, ctx, step.item)
     done = int(payload.get("done") or 0) + 1
     total = max(int(step.total), done)

@@ -462,8 +462,9 @@ async def _defer(db: AsyncSession, job_id: uuid.UUID, worker_id: str, deferral: 
                  extra: dict[str, str]) -> JobStatus | None:
     """Not admitted (app/jobs/admission.py): back to `queued` with
     `next_run_at` = now + the deferral's delay and its stage. The attempt is
-    not used up (`attempts` restored) and the run state is cleared; a
-    previous retry's error stays. Pushed again when due (the delayed set)."""
+    not used up (`attempts` restored) and the run state is cleared, except
+    `progress` (a cursor Job keeps showing how far it got); a previous retry's
+    error stays. Pushed again when due (the delayed set)."""
     await db.rollback()  # only the rights check's reads
     job = await _owned(db, job_id, worker_id)
     if job is None or isinstance(job, JobStatus):
@@ -474,7 +475,7 @@ async def _defer(db: AsyncSession, job_id: uuid.UUID, worker_id: str, deferral: 
     job.next_run_at = due
     job.stage = deferral.stage
     job.attempts = max(job.attempts - 1, 0)
-    job.progress = job.eta_seconds = job.worker_id = job.heartbeat_at = job.started_at = None
+    job.eta_seconds = job.worker_id = job.heartbeat_at = job.started_at = None
     await db.commit()
     logger.info("job deferred: %s (%ss)", deferral.stage, deferral.delay_s, extra=extra)
     try:

@@ -76,6 +76,17 @@ async def test_an_onsave_job_waits_for_at_most_the_running_backfill(db, conn, mo
 
 async def test_at_rest_the_higher_queue_goes_first(db, conn, monkeypatch):
     ORDER.clear()
+    backfilling, saving = await _campaign(db), await _campaign(db)
+    for i in range(1, 6):
+        await _enqueue(db, backfilling, "test_p.backfill", {"name": f"B{i}"})
+    await _enqueue(db, saving, "test_p.onsave", {"name": "O"})
+    _drain(conn, monkeypatch)
+    assert ORDER.index("O") <= 1  # behind at most one backfill Job
+    assert ORDER == ["O", "B1", "B2", "B3", "B4", "B5"]
+
+
+async def test_interactive_goes_before_onsave_and_backfill(db, conn, monkeypatch):
+    ORDER.clear()
     c = await _campaign(db)
     await _enqueue(db, c, "test_p.backfill", {"name": "B"})
     await _enqueue(db, c, "test_p.onsave", {"name": "O"})

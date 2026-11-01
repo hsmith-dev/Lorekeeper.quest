@@ -264,6 +264,48 @@ async def test_lease_ttl_is_rq_timeout(db, vk):
     assert outbox.rq_timeout(kind.name) - 2 <= ttl <= outbox.rq_timeout(kind.name) == kind.timeout_s + 60
 
 
+async def test_a_deferred_cursor_job_keeps_its_progress(db, vk):
+    sync, client = vk
+    c = await _campaign(db)
+    await client.set("res:nli", "someone-else")
+    row = await _job(db, c, "test_a.nli", payload={"cursor": 2, "done": 2}, progress=0.4, stage="Entry 2 of 5")
+    assert await run_job(row.id, _factory(db), "w") == JobStatus.QUEUED
+    r = await _row(db, row.id)
+    assert r.stage == WAITING_STAGE and r.progress == pytest.approx(0.4)
+    assert r.eta_seconds is None and r.worker_id is None and r.heartbeat_at is None and r.started_at is None
+
+
+async def test_a_jobs_own_leftover_lease_is_taken_again(db, vk):
+    """A killed attempt's lease still holds this Job's id after the reaper
+    requeued it: the Job runs instead of waiting out its own TTL."""
+    sync, client = vk
+    c = await _campaign(db)
+    row = await _job(db, c, "test_a.nli")
+    await client.set("res:nli", str(row.id), ex=30)
+    assert await run_job(row.id, _factory(db), "w") == JobStatus.DONE
+    assert await client.get("res:nli") is None
+
+
+async def test_a_set_that_landed_but_raised_leaves_no_lease(vk):
+    sync, client = vk
+
+    class LandsThenRaises:
+        async def set(self, *a, **kw):
+            await client.set(*a, **kw)
+            raise redis.ConnectionError("reply lost")
+
+        async def eval(self, *a):
+            return await client.eval(*a)
+
+    job_id = uuid.uuid4()
+    set_valkey(LandsThenRaises())
+    try:
+        assert await admission.acquire_resources(job_id, registry.get_kind("test_a.heavy")) == []
+    finally:
+        set_valkey(client)
+    assert await client.get("res:cpu_heavy") is None and await client.get("res:stt") is None
+
+
 # ── Live Sessions ──────────────────────────────────────────────────────────
 
 async def test_hold_renew_release(vk):
@@ -438,6 +480,9 @@ async def test_a_redis_error_also_fails_open(monkeypatch):
         async def set(self, *a, **kw):
             raise redis.ConnectionError("down")
 
+        async def eval(self, *a):
+            raise redis.ConnectionError("down")
+
     previous = set_valkey(Broken())
     try:
         assert await admission.admit(uuid.uuid4(), registry.get_kind("test_a.heavy")) == []
@@ -456,7 +501,8 @@ _SCANNED = ("src/backend/app", "src/backend/scripts", "scripts", "docker-compose
 def test_nothing_suspends_rq():
     """AD-5: pausing RQ (`rq suspend`) stops every queue, Live-safe work
     included; admission defers per kind instead."""
-    found = []
+    found, scanned = [], 0
+    assert (REPO / "src/backend/app/jobs/worker.py").is_file()  # the roots exist: never vacuous
     for rel in _SCANNED:
         root = REPO / rel
         paths = [root] if root.is_file() else (p for p in root.rglob("*") if p.is_file()) if root.exists() else []
@@ -467,6 +513,8 @@ def test_nothing_suspends_rq():
                 text = path.read_text(errors="ignore")
             except OSError:
                 continue
+            scanned += 1
             if _SUSPEND.search(text):
                 found.append(str(path.relative_to(REPO)))
+    assert scanned > 50
     assert found == []

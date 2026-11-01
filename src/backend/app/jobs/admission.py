@@ -14,7 +14,8 @@ through the delayed set below. Two rules, checked in this order:
   `release` lifts it until the other's next `renew`.
 * Heavy models. A kind whose `resources` include any of LEASED_RESOURCES
   takes `res:<resource>` for each (SET NX, value = the Job id, TTL = RQ's
-  timeout for the kind, so a killed work horse's lease lapses no later than
+  timeout for the kind; one already holding this Job's id, left by a killed
+  attempt, is taken again, so a killed work horse's lease lapses no later than
   RQ's own kill). Any one taken by another Job: the ones this Job took are
   given back and it waits RESOURCE_WAIT_S ("Waiting for the model").
   Leases are released compare-and-delete after the outcome is written, so a
@@ -166,13 +167,19 @@ async def acquire_resources(job_id: uuid.UUID, kind: JobKind) -> list[str] | Non
         client = get_valkey()
         ttl = outbox.rq_timeout(kind.name)
         for resource in wanted:
-            if not await client.set(f"{RESOURCE_KEY_PREFIX}{resource}", str(job_id), nx=True, ex=ttl):
-                await release_resources(job_id, taken)
-                return None
+            key = f"{RESOURCE_KEY_PREFIX}{resource}"
+            if not await client.set(key, str(job_id), nx=True, ex=ttl):
+                # This Job's own lease (left by a killed attempt, the Job
+                # requeued) is taken again, not waited out.
+                if _text(await client.get(key)) != str(job_id):
+                    await release_resources(job_id, taken)
+                    return None
+                await client.set(key, str(job_id), ex=ttl)
             taken.append(resource)
     except _UNAVAILABLE:
         logger.warning("admission: resource leases unavailable (Valkey); admitting", exc_info=True)
-        await release_resources(job_id, taken)
+        # A SET may have landed server-side before the client raised.
+        await release_resources(job_id, wanted)
         return []
     return taken
 

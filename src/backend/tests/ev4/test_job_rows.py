@@ -124,6 +124,8 @@ async def test_runner_jobs_with_progress_are_gm_only(db, world, monkeypatch):
 
 async def test_deferred_rows_stay_with_their_starter(db, world):
     c, other, player = world
+    second = await _player(db, c)
+    await db.commit()
     gm_job = await _job(db, c, c.user_id, "gm")
     own_job = await _job(db, c, player.id, "player")
     server = fakeredis.FakeServer()
@@ -142,5 +144,6 @@ async def test_deferred_rows_stay_with_their_starter(db, world):
 
     ids = [gm_job.id, own_job.id]
     assert await _visible(db, await ctx_for(db, player.id, c.id), ids) == {own_job.id}
+    assert await _visible(db, await ctx_for(db, second.id, c.id), ids) == set()  # another Player's Job
     assert await _visible(db, await ctx_for(db, other.user_id, other.id), ids) == set()
     assert await _visible(db, await ctx_for(db, c.user_id, c.id), ids) == {gm_job.id, own_job.id}

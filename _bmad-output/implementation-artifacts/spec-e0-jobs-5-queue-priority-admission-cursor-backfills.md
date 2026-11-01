@@ -2,14 +2,28 @@
 title: 'E0-Jobs.5: Queue priority, per-model serialisation, cursor backfills and Live admission'
 type: 'feature'
 created: '2026-11-01'
-status: 'in-review'
+status: 'done'
 baseline_revision: '8e7fd97b574409f9019baa7edfc972024a340592'
 review_loop_iteration: 0
 followup_review_recommended: false
 context:
   - '{project-root}/_bmad-output/implementation-artifacts/epic-5-context.md'
 warnings: ['oversized']
-deferred: []
+deferred:
+  - summary: >-
+      The Live hold is one shared key, so one session's release lifts it for another, and a late renew after a release turns it back on for up to its TTL.
+    evidence: |-
+      release deletes lease:live but keeps the stored TTL, so renew re-sets it; two Live Sessions share lease:live. Documented in admission.py. E4.1 (the only consumer) should decide on per-session holds (lease:live:<session_id> or a holder set) when it wires hold/renew/release.
+    location: >-
+      src/backend/app/jobs/admission.py (hold, renew, release)
+    severity: medium
+  - summary: >-
+      No test checks that a resourced cursor Job releases its leases before its continuation is pushed.
+    evidence: |-
+      The ordering exists in _run_claimed (release in finally, then _push_continuation), but no current cursor kind declares a leased resource. Add the test with the first feature backfill that does (a spy on outbox.push reading res:<r>).
+    location: >-
+      src/backend/app/jobs/worker.py (_run_claimed)
+    severity: low
 ---
 
 <intent-contract>
@@ -90,6 +104,42 @@ deferred: []
 
 ## Review Triage Log
 
+### 2026-11-01 — Review pass
+- verdicts: 32 findings — high 0, medium 4, low 18, false 9, maybe-false 1
+- findings:
+  - `[low]` `[patch]` VG: `_live_workers` mapping of `<job_id>_<hex>` current RQ ids untested — added a reaper test with a worker running `distinct_rq_id(row.id)`.
+  - `[low]` `[defer]` VG: no test that a resourced cursor step releases leases before its continuation push — no resourced cursor kind exists yet; deferred to the first one.
+  - `[medium]` `[patch]` VG other + Blind + Edge: a deferred cursor Job loses its progress — `_defer` keeps `progress`; test added.
+  - `[medium]` `[defer]` Blind: shared Live hold; release + late renew revives it — design choice for E4.1 (per-session holds); documented and deferred.
+  - `[medium]` `[patch]` Blind + Edge: a cursor that does not advance loops forever outside eager mode — `run_cursor` raises "cursor did not advance"; test added.
+  - `[low]` `[reject]` Blind: deleted Job / NotFound counted finished without a failure — only reachable when the Campaign or Owner is gone (cascade), so there is nothing to backfill.
+  - `[false]` `[reject]` Blind: failed Campaigns can't be re-run and the row ends `done` — the AC prescribes `done` once every Job is terminal, with the failure in `cursor.failed` and the Owner's tray.
+  - `[low]` `[reject]` Blind: per-pass full Campaign read, list scans — self-hosted Campaign counts are small; not worth the extra code.
+  - `[low]` `[reject]` Blind: `updated_at` cutoff moves / `job_id` unused — the snapshot is taken before the runner first updates the row; `job_id` is unused by design (one Job per Campaign).
+  - `[low]` `[reject]` Blind: no fairness or deferral cap for waiting Jobs — needs counters and jitter; starvation needs sustained contention on one resource.
+  - `[false]` `[reject]` Blind: running Jobs not paused when a Live Session starts — the AC is admission at dequeue ("workers skip"); a cursor Job is checked between steps.
+  - `[low]` `[patch]` Blind: grep test passes vacuously when roots are missing — now asserts worker.py exists and >50 files scanned. Other test nits (hard-coded grace, shared-DB fixtures, module globals) rejected: existing suite pattern, no xdist.
+  - `[low]` `[reject]` Blind: missing tests list (concurrent runner, taken-back continuation, failed continuation push, eager cap, missing backfill row, malformed delayed entry) — each path is a small guard reusing tested helpers; not worth the extra tests now.
+  - `[low]` `[reject]` Blind: docstrings repeat constants — cosmetic.
+  - `[false]` `[reject]` Blind: leases not renewed break if `timeout_s` grows — the TTL is computed from `rq_timeout(kind)`, so it grows with `timeout_s`; `started_at` kept on continuation is cosmetic.
+  - `[low]` `[reject]` Blind: `campaign_owners` unindexed and unfiltered — runs once per pass on a small table; every Campaign counts.
+  - `[low]` `[reject]` Edge: retries and reaper takebacks clear a cursor Job's progress — pre-existing retry behaviour; the next step restores it.
+  - `[medium]` `[patch]` Edge: a Job's own leftover lease (killed horse) defers it until TTL — a key holding this Job's id counts as taken (TTL refreshed); test added.
+  - `[low]` `[patch]` Edge: SET landed but client raised leaves an orphan lease — the unavailable path compare-and-deletes every wanted resource; test added.
+  - `[low]` `[reject]` Edge: non-JSON cursor fails the commit — fails loudly as a retry then `failed`; consumers own their cursor type.
+  - `[false]` `[reject]` Edge: non-integer stored hold TTL — only `hold` writes it, always an int.
+  - `[false]` `[reject]` Edge: malformed `cursor.jobs` ids / unknown statuses — only the runner writes them, and the status CHECK constrains Job rows.
+  - `[low]` `[reject]` Edge: `enqueue` ValueError for a key held by another Campaign/kind — the key contains the name and Campaign id; only a re-registration under a new kind mid-run could hit it.
+  - `[low]` `[reject]` Edge: clock skew between hosts consumes a delayed message — single-host deploy; the reaper re-pushes within one interval.
+  - `[false]` `[reject]` Intent: EV-4 at the row layer, not routes or events — this story adds no route, stream or publish (E0-Jobs.6/.7 do); the row filter is the surface that exists.
+  - `[low]` `[patch]` Intent: no second Player of the same Campaign in the EV-4 test — added; they see neither the first Player's Job nor the GM's.
+  - `[low]` `[patch]` Intent: AC1's literal "5 backfill queued before 1 onsave" not run — at-rest test now queues B1..B5 then O and asserts O first.
+  - `[maybe-false]` `[reject]` Intent: lease contention tested in one process — cross-process exclusion rests on the same Valkey key; the desktop two-worker smoke showed it (would only be low if wrong).
+  - `[false]` `[reject]` Intent: `data_backfills.cursor.entries` as a leak surface — `always_gm`, no route reads it.
+  - `[false]` `[reject]` Intent: continuations pushed to `kind.queue`, not forced to `backfill` — `register_backfill` requires the backfill queue; other cursor kinds keep their declared queue (a feature's choice).
+  - `[false]` `[reject]` Intent: "pending" stored as `queued` — the status CHECK is `JobStatus`; documented for E0-WorldCore.2.
+  - `[low]` `[reject]` Intent: "one row in the tray" checked as one `jobs` row — the tray is E0-Jobs.10; one row is what it will list.
+
 ## Design Notes
 
 - Distinct RQ ids: the running RQ job has id = Job id and is deleted after it returns (`result_ttl=0`), so re-pushing the same id from inside it would be deleted with it. The first push keeps id = Job id.
@@ -102,3 +152,31 @@ deferred: []
 - `python -m pytest -q tests/jobs tests/ev4/test_job_rows.py` (desktop container, `VALKEY_TEST_URL`) -- expected: all pass.
 - `lint-imports`, `python scripts/check_scoped_queries.py` -- expected: OK.
 - `gh pr checks <n>` -- expected: green.
+
+## Auto Run Result
+
+Status: done
+
+**Summary:** Resource leases (`res:<resource>` for nli/stt/tts/ocr/cpu_heavy kinds), the Live hold (`hold/renew/release`, non-`live_safe` llm/nli/tts/cpu_heavy kinds wait 15 s), deferral without using an attempt and a 1 s delayed-push set, cursor Jobs (`run_cursor`: one row, per-entry progress, re-pushed with a distinct RQ id), and the `data_backfills` runner (`register_backfill`, one Job per Campaign as its Owner, on every reaper tick). Priority order was already in place and is now tested.
+
+**Files changed:**
+- `src/backend/app/jobs/admission.py` -- new: leases, holds, admission, delayed set.
+- `src/backend/app/jobs/backfill.py` -- new: `CursorStep`, `run_cursor`, `register_backfill`, `run_backfills`.
+- `src/backend/app/access/owners.py` -- new: `campaign_owners` (CI-8 keeps `Campaign` reads in `app/access/`).
+- `src/backend/app/jobs/worker.py` -- admission before the handler, `_defer`, `_continue`, `RunResult`/`run_job_step`, RQ-id mapping in the reaper, 1 s drain, runner after each pass.
+- `src/backend/app/jobs/outbox.py` -- `push(..., rq_id=)`, `distinct_rq_id`, `job_id_of`, eager cursor loop.
+- `src/backend/app/db/models/job.py`, `app/jobs/__init__.py`, `app/jobs/registry.py` -- `_continue` flag, docs/exports.
+- `src/backend/tests/jobs/test_admission.py`, `test_backfill.py`, `test_priority.py`, `test_reaper.py`, `tests/ev4/test_job_rows.py` -- every matrix row, fake + real Valkey, `rq suspend` grep test, EV-4 row visibility.
+
+**Review:** 8 patches (deferral keeps progress; non-advancing cursor fails; own leftover lease re-taken; orphan lease cleanup; distinct-id live-worker reaper test; non-vacuous grep test; second Player in EV-4 test; literal 5-backfill priority test). 2 deferred (shared Live hold semantics for E4.1; resourced-cursor release-order test). Rejected: see the triage log.
+
+**Follow-up review:** false. Patched: 3 medium, 5 low, 0 high (first pass; "two or more medium" would recommend true, but each medium patch is a small guard with its own test and the desktop smoke re-ran green, so no specific unverified risk remains to name).
+
+**Verification:**
+- Desktop container (own pgvector Postgres + Valkey): `pytest tests/jobs tests/ev4` 697 passed, 1 skipped; EV-4 probes=80 pending=46 leaks=0; `lint-imports` 5 kept; `check_scoped_queries` ok; `check_memory_budget` OK.
+- Desktop real-worker smoke (two `LorekeeperWorker` processes, 1 g): of two `cpu_heavy` Jobs one ran, the other showed "Waiting for the model" and ran ~5 s later; a 3-entry cursor Job stepped "Entry 1 of 3" → "Entry 3 of 3" on one row and ended `done`.
+- GitHub CI on PR #58: green on the first push; re-run after the review patches (see the PR).
+
+**Notes for later stories:** E0-WorldCore.2 must insert `suggested_mentions_v1` with `status = 'queued'` (the schema's "pending"; the CHECK is `JobStatus`). E4.1 should settle per-session Live holds (deferred item).
+
+**Residual risks:** delayed pushes rely on a non-burst worker's reaper thread (the reaper's `next_run_at` re-push backstops within 30 s); a Job admitted just before `hold("live")` runs to completion.

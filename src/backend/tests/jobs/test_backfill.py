@@ -70,6 +70,14 @@ async def walk(job, ctx, db):
 
 
 register(JobKind(name="test_b.walk", queue=JobQueue.BACKFILL, timeout_s=10, handler=f"{__name__}:walk"))
+async def stuck(job, ctx, db):
+    async def select_next(db, ctx, cursor):
+        return CursorStep(item="stuck", cursor=job.payload["next"], total=3)
+
+    await run_cursor(job, ctx, db, select_next=select_next, process_one=_process_one(job))
+
+
+register(JobKind(name="test_b.stuck", queue=JobQueue.BACKFILL, timeout_s=10, handler=f"{__name__}:stuck"))
 register(JobKind(name="test_b.onsave", queue=JobQueue.ONSAVE, timeout_s=10, handler=f"{__name__}:walk"))
 
 
@@ -200,6 +208,17 @@ async def test_a_failed_step_rolls_back_and_retries_from_the_same_cursor(db):
         pass
     row = await _row(db, job_id)
     assert row.status == JobStatus.DONE and await _users(db, job_id) == {"a", "boom", "c"}
+
+
+@pytest.mark.parametrize("payload", [{"next": None}, {"cursor": 1, "next": 1}])
+async def test_a_cursor_that_does_not_advance_fails_instead_of_looping(db, payload):
+    c = await _campaign(db)
+    ctx = await ctx_for(db, c.user_id, c.id)
+    job_id = await enqueue(db, ctx, "test_b.stuck", payload, idempotency_key=f"test:{uuid.uuid4().hex}")
+    await db.commit()  # eager: one attempt, no continuation
+    row = await _row(db, job_id)
+    assert row.status == JobStatus.QUEUED and row.attempts == 1 and row.error_code == JobErrorCode.INTERNAL
+    assert row.payload == payload and await _users(db, job_id) == set()  # nothing processed
 
 
 async def test_a_continuation_is_pushed_again_with_a_distinct_rq_id(db, conn, monkeypatch):
