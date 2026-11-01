@@ -63,7 +63,7 @@ function FieldBuilder({ fields, onChange }: { fields: CharacterTemplateField[]; 
               type="button"
               onClick={() => removeField(i)}
               title="Remove field"
-              className="shrink-0 p-1.5 rounded text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
+              className="shrink-0 p-1.5 rounded text-muted-foreground hover:text-danger hover:bg-destructive/10 transition-colors"
             >
               <svg width="14" height="14" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" clipRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" /></svg>
             </button>
@@ -179,7 +179,7 @@ function TemplateManager({ campaign }: { campaign: Campaign }) {
                 </button>
               </div>
             ) : (
-              <button onClick={() => setConfirmDelete(t.id)} className="text-xs px-2.5 py-1 rounded-md border border-destructive/30 text-destructive hover:bg-destructive/10 transition-colors">
+              <button onClick={() => setConfirmDelete(t.id)} className="text-xs px-2.5 py-1 rounded-md border border-destructive/30 text-danger hover:bg-destructive/10 transition-colors">
                 Delete
               </button>
             )}
@@ -359,7 +359,7 @@ function CharacterCard({
             </button>
           </div>
         ) : (
-          <button onClick={() => setConfirmDelete(true)} className="text-xs px-2.5 py-1 rounded-md border border-destructive/30 text-destructive hover:bg-destructive/10 transition-colors">
+          <button onClick={() => setConfirmDelete(true)} className="text-xs px-2.5 py-1 rounded-md border border-destructive/30 text-danger hover:bg-destructive/10 transition-colors">
             Delete
           </button>
         )}

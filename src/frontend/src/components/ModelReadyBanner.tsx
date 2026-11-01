@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
+import { TriangleAlert } from "lucide-react";
 import { getModelStatus, getMe } from "../services/api";
 
 /** Fresh-deployment guardrail: when the account's effective backend is the
@@ -27,9 +28,10 @@ export function ModelReadyBanner() {
   const serverDown = !status.server_reachable;
 
   return (
-    <div className="mb-5 rounded-lg border border-amber-500/40 bg-amber-500/10 p-4 text-sm">
+    <div className="mb-5 rounded-lg border border-warning/40 bg-warning/14 p-4 text-sm">
       <p className="font-semibold text-foreground mb-1">
-        {serverDown ? "⚠ The AI model server isn't reachable" : "⚠ No AI model is installed yet"}
+        <TriangleAlert aria-hidden="true" className="inline h-4 w-4 align-text-bottom text-warning" />{" "}
+        {serverDown ? "The AI model server isn't reachable" : "No AI model is installed yet"}
       </p>
       <p className="text-muted-foreground">
         {serverDown ? (

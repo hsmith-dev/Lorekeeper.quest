@@ -161,7 +161,7 @@ function StructuredForm({ campaign }: { campaign: Campaign }) {
         </button>
       </div>
       {(generateDraft.isError || generate.isError) && (
-        <p className="text-sm text-destructive bg-destructive/10 rounded-md px-3 py-2">Something went wrong. Try again.</p>
+        <p className="text-sm text-danger bg-destructive/10 rounded-md px-3 py-2">Something went wrong. Try again.</p>
       )}
     </div>
   );
@@ -234,7 +234,7 @@ function ManualEntryForm({ campaign }: { campaign: Campaign }) {
       </div>
       <div className="flex items-center justify-end gap-3">
         {dupWarning && (
-          <p className="text-xs text-amber-500">
+          <p className="text-xs text-warning">
             Duplicate?{" "}
             <button className="underline underline-offset-2" onClick={() => { setForceSubmit(true); setDupWarning(false); }}>
               Save anyway
@@ -251,7 +251,7 @@ function ManualEntryForm({ campaign }: { campaign: Campaign }) {
         </button>
       </div>
       {(saveError || generate.isError) && (
-        <p className="text-sm text-destructive bg-destructive/10 rounded-md px-3 py-2">
+        <p className="text-sm text-danger bg-destructive/10 rounded-md px-3 py-2">
           {saveError ?? "Something went wrong. Try again."}
         </p>
       )}
@@ -301,7 +301,7 @@ function DiscordModal({ onExtract, onClose }: { onExtract: (text: string) => voi
           rows={8}
           className="resize-none w-full rounded-lg border border-input bg-background px-3 py-2.5 text-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring font-mono text-xs"
         />
-        {error && <p className="text-xs text-destructive">{error}</p>}
+        {error && <p className="text-xs text-danger">{error}</p>}
         <div className="flex gap-2 justify-end">
           <button onClick={onClose} className="px-4 py-2 text-sm text-muted-foreground hover:text-foreground transition-colors">Cancel</button>
           <button
@@ -534,7 +534,7 @@ export function JournalInput({ campaign }: JournalInputProps) {
       ) : (
       <>
       {offlineQueue.queue.length > 0 && (
-        <div className="flex items-center justify-between gap-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">
+        <div className="flex items-center justify-between gap-3 rounded-lg border border-warning/40 bg-warning/14 px-3 py-2 text-xs text-warning">
           <span>
             {offlineQueue.queue.length} note{offlineQueue.queue.length === 1 ? "" : "s"} queued locally —
             {navigator.onLine ? " syncing…" : " will send once you're back online."}
@@ -548,7 +548,7 @@ export function JournalInput({ campaign }: JournalInputProps) {
       )}
 
       {queuedMessage && (
-        <div className="rounded-lg border border-green-500/30 bg-green-500/10 px-3 py-2 text-xs text-green-700 dark:text-green-400">
+        <div className="rounded-lg border border-success/40 bg-success/14 px-3 py-2 text-xs text-success">
           ✓ Saved locally — no connection right now, will send once you're back online.
         </div>
       )}
@@ -570,7 +570,7 @@ export function JournalInput({ campaign }: JournalInputProps) {
         </div>
       )}
 
-      {extractError && <p className="text-sm text-destructive bg-destructive/10 rounded-md px-3 py-2">{extractError}</p>}
+      {extractError && <p className="text-sm text-danger bg-destructive/10 rounded-md px-3 py-2">{extractError}</p>}
 
       <div className="relative">
         <textarea
@@ -630,7 +630,7 @@ export function JournalInput({ campaign }: JournalInputProps) {
           <button type="button" onClick={recording ? stopRecording : startRecording}
             disabled={transcribing || extracting}
             title={recording ? "Stop recording" : "Record voice note"}
-            className={`flex items-center gap-1 px-2.5 py-1.5 rounded-md border text-xs transition-colors disabled:opacity-40 ${recording ? "border-red-500 text-red-500 bg-red-500/10 animate-pulse" : "border-border text-muted-foreground hover:text-foreground hover:bg-muted/60"}`}>
+            className={`flex items-center gap-1 px-2.5 py-1.5 rounded-md border text-xs transition-colors disabled:opacity-40 ${recording ? "border-live text-live bg-live/14 animate-pulse" : "border-border text-muted-foreground hover:text-foreground hover:bg-muted/60"}`}>
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" /><path d="M19 10v2a7 7 0 0 1-14 0v-2" /><line x1="12" y1="19" x2="12" y2="23" /><line x1="8" y1="23" x2="16" y2="23" />
             </svg>
@@ -658,7 +658,7 @@ export function JournalInput({ campaign }: JournalInputProps) {
         {/* Right: dup warning + submit */}
         <div className="flex items-center gap-3">
           {dupWarning && (
-            <p className="text-xs text-amber-500">
+            <p className="text-xs text-warning">
               Duplicate?{" "}
               <button className="underline underline-offset-2" onClick={() => { setForceSubmit(true); setDupWarning(false); }}>
                 Submit anyway
@@ -674,7 +674,7 @@ export function JournalInput({ campaign }: JournalInputProps) {
       </div>
 
       {(generateDraft.isError || generate.isError) && (
-        <p className="text-sm text-destructive bg-destructive/10 rounded-md px-3 py-2">Something went wrong. Try again.</p>
+        <p className="text-sm text-danger bg-destructive/10 rounded-md px-3 py-2">Something went wrong. Try again.</p>
       )}
 
       {showDiscord && <DiscordModal onExtract={(text) => { setNotes(text); setSuggestion(""); }} onClose={() => setShowDiscord(false)} />}

@@ -54,12 +54,11 @@ export function TourOverlay() {
         width: rect.width + pad * 2,
         height: rect.height + pad * 2,
         borderRadius: 12,
-        boxShadow: "0 0 0 9999px rgba(0,0,0,0.65)",
         pointerEvents: "none",
         transition: "top 0.25s ease, left 0.25s ease, width 0.25s ease, height 0.25s ease",
         zIndex: 100,
       }
-    : { position: "fixed", inset: 0, background: "rgba(0,0,0,0.65)", zIndex: 100 };
+    : { position: "fixed", inset: 0, zIndex: 100 };
 
   // Capped to the viewport width (minus margins) rather than a flat 320 —
   // on a narrow phone (~320-360px wide) a fixed 320px card left almost no
@@ -75,7 +74,7 @@ export function TourOverlay() {
 
   return (
     <>
-      <div style={spotlightStyle} />
+      <div style={spotlightStyle} className={rect ? "ring-[9999px] ring-black/65" : "bg-black/65"} />
       <div
         className="fixed z-[101] rounded-xl border border-border bg-card p-4 shadow-xl flex flex-col gap-3"
         style={{ top: tooltipTop, left: tooltipLeft, width: cardWidth }}

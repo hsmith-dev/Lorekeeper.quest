@@ -15,7 +15,7 @@ function SourceRow({ doc, onDelete }: { doc: SourceDocument; onDelete: () => voi
       </div>
       <button
         onClick={onDelete}
-        className="p-1.5 rounded text-muted-foreground hover:text-destructive transition-colors shrink-0"
+        className="p-1.5 rounded text-muted-foreground hover:text-danger transition-colors shrink-0"
         title="Remove source document"
       >
         <svg width="14" height="14" viewBox="0 0 20 20" fill="currentColor">
@@ -75,7 +75,7 @@ function CampaignSources({ campaign }: { campaign: Campaign }) {
           />
         </div>
         {upload.isPending && <p className="text-xs text-muted-foreground">Uploading and embedding…</p>}
-        {error && <p className="text-xs text-destructive">{error}</p>}
+        {error && <p className="text-xs text-danger">{error}</p>}
       </div>
 
       {isLoading && <p className="text-sm text-muted-foreground">Loading sources…</p>}

@@ -11,12 +11,12 @@ const ROLE_LABELS: Record<NpcRole, string> = {
 const ROLE_COLORS: Record<NpcRole, string> = {
   npc: "bg-primary/15 text-primary border-primary/30",
   pc: "bg-accent/15 text-accent-foreground border-accent/30",
-  monster: "bg-destructive/15 text-destructive border-destructive/30",
+  monster: "bg-destructive/15 text-danger border-destructive/30",
   faction: "bg-secondary/20 text-secondary-foreground border-secondary/30",
 };
 const STATUS_COLORS: Record<NpcStatus, string> = {
-  alive: "text-green-600 bg-green-500/10 border-green-500/20",
-  dead: "text-red-500 bg-red-500/10 border-red-500/20",
+  alive: "text-success bg-success/14 border-success/40",
+  dead: "text-danger bg-destructive/14 border-destructive/40",
   unknown: "text-muted-foreground bg-muted/40 border-border",
 };
 const STATUS_CYCLE: Record<NpcStatus, NpcStatus> = { alive: "dead", dead: "unknown", unknown: "alive" };
@@ -44,7 +44,7 @@ function NpcCard({ npc, onStatusCycle, onDelete, onSelect }: { npc: NpcEntry; on
           </button>
           <button
             onClick={(e) => { e.stopPropagation(); onDelete(); }}
-            className="p-1 rounded text-muted-foreground hover:text-destructive transition-colors"
+            className="p-1 rounded text-muted-foreground hover:text-danger transition-colors"
             title="Remove"
           >
             <svg width="13" height="13" viewBox="0 0 20 20" fill="currentColor">

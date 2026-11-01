@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "lint:tokens": "node scripts/check-ui-tokens.mjs && node scripts/check-ui-tokens.mjs --contrast"
   },
   "dependencies": {
     "@radix-ui/react-slot": "^1.2.4",

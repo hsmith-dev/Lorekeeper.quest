@@ -44,7 +44,7 @@ export function JoinCampaignPage() {
         <p className="text-4xl">🤝</p>
 
         {isLoading && <div className="h-6 w-48 mx-auto bg-muted rounded animate-pulse" />}
-        {isError && <p className="text-sm text-destructive">This invite link is invalid or has been revoked.</p>}
+        {isError && <p className="text-sm text-danger">This invite link is invalid or has been revoked.</p>}
 
         {campaign && campaign.share_kind === "collaborate" && (
           <>
@@ -69,7 +69,7 @@ export function JoinCampaignPage() {
                 >
                   {joining ? "Joining…" : "Join Campaign"}
                 </button>
-                {error && <p className="text-sm text-destructive">{error}</p>}
+                {error && <p className="text-sm text-danger">{error}</p>}
               </>
             ) : (
               <>

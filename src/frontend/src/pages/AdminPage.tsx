@@ -51,7 +51,7 @@ const CATEGORY_LABELS: Record<FeedbackCategory, string> = {
 function FeedbackContextPanel({ feedbackId }: { feedbackId: string }) {
   const { data, isLoading, isError } = useFeedbackContext(feedbackId);
   if (isLoading) return <p className="text-xs text-muted-foreground px-4 pb-4">Loading campaign context…</p>;
-  if (isError || !data) return <p className="text-xs text-destructive px-4 pb-4">Couldn't load campaign context.</p>;
+  if (isError || !data) return <p className="text-xs text-danger px-4 pb-4">Couldn't load campaign context.</p>;
   return (
     <div className="px-4 pb-4 flex flex-col gap-3 border-t border-border pt-3 text-sm">
       <div>
@@ -120,7 +120,7 @@ function FeedbackTab() {
         campaign's recent entries, NPCs, quests, and sources for research.
       </p>
       {isLoading && <p className="text-sm text-muted-foreground">Loading…</p>}
-      {isError && <p className="text-sm text-destructive">Couldn't load feedback.</p>}
+      {isError && <p className="text-sm text-danger">Couldn't load feedback.</p>}
       {data && data.length === 0 && (
         <div className="text-center py-16 text-muted-foreground border border-dashed border-border rounded-xl">
           <p className="text-4xl mb-3">📭</p>
@@ -154,7 +154,7 @@ function MessageForm({ userId, onDone }: { userId: string; onDone: () => void })
         value={message} onChange={(e) => setMessage(e.target.value)} placeholder="Message" rows={3}
         className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm resize-y focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
       />
-      {send.isError && <p className="text-xs text-destructive">Couldn't send. Try again.</p>}
+      {send.isError && <p className="text-xs text-danger">Couldn't send. Try again.</p>}
       {send.isSuccess ? (
         <p className="text-xs text-primary">Sent.</p>
       ) : (
@@ -230,7 +230,7 @@ function UserRow({ user }: { user: AdminUser }) {
             <span className="text-sm font-medium text-card-foreground truncate">{user.display_name}</span>
             <span className="text-xs text-muted-foreground truncate">{user.email}</span>
             {user.is_admin && <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-accent/20 text-accent-foreground">Admin</span>}
-            {user.is_suspended && <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-destructive/15 text-destructive">Suspended</span>}
+            {user.is_suspended && <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-destructive/15 text-danger">Suspended</span>}
             {user.access_granted && !user.is_suspended && <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-primary/15 text-primary">{user.subscription_plan ? PLAN_LABELS[user.subscription_plan] : (user.access_source ?? "active")}</span>}
             {!user.access_granted && <span className="text-xs text-muted-foreground">gated</span>}
           </div>
@@ -244,7 +244,7 @@ function UserRow({ user }: { user: AdminUser }) {
       {expanded && (
         <div className="px-4 pb-4 flex flex-col gap-3 border-t border-border pt-3 text-sm">
           {user.is_suspended && user.suspended_reason && (
-            <p className="text-xs text-destructive">Suspended: {user.suspended_reason}</p>
+            <p className="text-xs text-danger">Suspended: {user.suspended_reason}</p>
           )}
           {user.subscription_status && (
             <p className="text-xs text-muted-foreground">
@@ -265,7 +265,7 @@ function UserRow({ user }: { user: AdminUser }) {
             ) : (
               <button
                 onClick={() => setSuspending((v) => !v)}
-                className="rounded-md border border-destructive/40 text-destructive px-3 py-1.5 text-xs font-semibold hover:bg-destructive/10"
+                className="rounded-md border border-destructive/40 text-danger px-3 py-1.5 text-xs font-semibold hover:bg-destructive/10"
               >
                 Suspend
               </button>
@@ -293,7 +293,7 @@ function UserRow({ user }: { user: AdminUser }) {
                 Make Admin
               </button>
             )}
-            <button onClick={handleDelete} disabled={del.isPending} className="rounded-md border border-destructive/40 text-destructive px-3 py-1.5 text-xs font-semibold hover:bg-destructive/10 disabled:opacity-50">
+            <button onClick={handleDelete} disabled={del.isPending} className="rounded-md border border-destructive/40 text-danger px-3 py-1.5 text-xs font-semibold hover:bg-destructive/10 disabled:opacity-50">
               {del.isPending ? "Deleting…" : "Delete account"}
             </button>
           </div>
@@ -334,7 +334,7 @@ function UsersTab() {
         {data ? `${data.length} registered account${data.length === 1 ? "" : "s"}.` : "All registered accounts, their tier, and usage."}
       </p>
       {isLoading && <p className="text-sm text-muted-foreground">Loading…</p>}
-      {isError && <p className="text-sm text-destructive">Couldn't load users.</p>}
+      {isError && <p className="text-sm text-danger">Couldn't load users.</p>}
       {data && (
         <div className="flex flex-col gap-2">
           {data.map((u) => <UserRow key={u.id} user={u} />)}
@@ -394,7 +394,7 @@ function CreatePromoCodeForm() {
         <input type="date" value={expiresAt} onChange={(e) => setExpiresAt(e.target.value)}
           className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring" />
       </div>
-      {error && <p className="text-sm text-destructive bg-destructive/10 rounded-md px-3 py-2">{error}</p>}
+      {error && <p className="text-sm text-danger bg-destructive/10 rounded-md px-3 py-2">{error}</p>}
       <button type="submit" disabled={create.isPending || !code.trim()} className="self-start rounded-md bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground hover:opacity-90 disabled:opacity-50">
         {create.isPending ? "Creating…" : "Create Code"}
       </button>
@@ -470,8 +470,8 @@ function PromoCodeRow({ promo }: { promo: PromoCodeAdmin }) {
           <div className="flex items-center gap-2 flex-wrap">
             <span className="text-sm font-mono font-semibold text-card-foreground">{promo.code}</span>
             {!promo.active && <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-muted text-muted-foreground">Disabled</span>}
-            {promo.active && expired && <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-destructive/15 text-destructive">Expired</span>}
-            {promo.active && !expired && exhausted && <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-destructive/15 text-destructive">Exhausted</span>}
+            {promo.active && expired && <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-destructive/15 text-danger">Expired</span>}
+            {promo.active && !expired && exhausted && <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-destructive/15 text-danger">Exhausted</span>}
             {promo.active && !expired && !exhausted && <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-primary/15 text-primary">Active</span>}
             <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-accent/15 text-accent-foreground">{PLAN_LABELS[promo.grants_plan]}</span>
           </div>
@@ -514,7 +514,7 @@ function PromoCodeRow({ promo }: { promo: PromoCodeAdmin }) {
             <button onClick={() => setEditing((v) => !v)} className="rounded-md border border-input px-3 py-1.5 text-xs text-foreground hover:bg-muted/60">
               Edit
             </button>
-            <button onClick={handleDelete} disabled={del.isPending} className="rounded-md border border-destructive/40 text-destructive px-3 py-1.5 text-xs font-semibold hover:bg-destructive/10 disabled:opacity-50">
+            <button onClick={handleDelete} disabled={del.isPending} className="rounded-md border border-destructive/40 text-danger px-3 py-1.5 text-xs font-semibold hover:bg-destructive/10 disabled:opacity-50">
               {del.isPending ? "Deleting…" : "Delete"}
             </button>
           </div>
@@ -532,7 +532,7 @@ function PromoCodesTab() {
     <div className="flex flex-col gap-4">
       <CreatePromoCodeForm />
       {isLoading && <p className="text-sm text-muted-foreground">Loading…</p>}
-      {isError && <p className="text-sm text-destructive">Couldn't load promo codes.</p>}
+      {isError && <p className="text-sm text-danger">Couldn't load promo codes.</p>}
       {data && data.length === 0 && (
         <div className="text-center py-16 text-muted-foreground border border-dashed border-border rounded-xl">
           <p className="text-4xl mb-3">🎟️</p>
@@ -595,7 +595,7 @@ function PlatformTab() {
         <div className="rounded-lg border border-border bg-card p-5 text-sm">
           <p className="font-semibold text-card-foreground mb-1">Stripe billing</p>
           <p className="text-muted-foreground">
-            <span className="text-green-600 dark:text-green-400">● Configured</span> — subscription
+            <span className="text-success">● Configured</span> — subscription
             checkout works whenever open access is off.
           </p>
         </div>
@@ -700,7 +700,7 @@ function SystemTab() {
           <p className="text-xs text-muted-foreground mt-0.5">Source: {slot.source}</p>
         </div>
         {slot.installed ? (
-          <span className="text-sm text-green-600 dark:text-green-400 whitespace-nowrap">● Installed</span>
+          <span className="text-sm text-success whitespace-nowrap">● Installed</span>
         ) : (
           <button
             onClick={() => install(variant)}
@@ -746,7 +746,7 @@ function SystemTab() {
 
         {isLoading && <p className="text-sm text-muted-foreground">Checking the model server…</p>}
         {(isError || (models && !models.ollama_reachable)) && (
-          <p className="text-sm text-destructive">
+          <p className="text-sm text-danger">
             Model server unreachable at <span className="font-mono">{models?.ollama_url ?? "?"}</span>
             {models?.ollama_error ? ` — ${models.ollama_error}` : ""}. Is the <span className="font-mono">ollama</span>{" "}
             container running? (<span className="font-mono">docker compose ps</span>)
@@ -767,7 +767,7 @@ function SystemTab() {
               "Base model",
               "Un-fine-tuned Mistral 7B Instruct — enables the fine-tuned vs. base comparison in Settings. Optional. ~4.1 GB.",
             )}
-            {installError && <p className="text-sm text-destructive">Install failed: {installError}</p>}
+            {installError && <p className="text-sm text-danger">Install failed: {installError}</p>}
             {models.installed_models.length > 0 && (
               <p className="text-xs text-muted-foreground">
                 All installed models: {models.installed_models.join(", ")}

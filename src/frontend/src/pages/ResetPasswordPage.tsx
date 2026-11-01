@@ -45,7 +45,7 @@ export function ResetPasswordPage() {
 
         <div className="rounded-lg border border-border bg-card p-6 flex flex-col gap-5 shadow-lg">
           {!token ? (
-            <p className="text-sm text-destructive bg-destructive/10 rounded-md px-3 py-2">
+            <p className="text-sm text-danger bg-destructive/10 rounded-md px-3 py-2">
               This link is missing its reset token. Request a new one from{" "}
               <Link to="/forgot-password" className="underline underline-offset-4">Forgot Password</Link>.
             </p>
@@ -77,7 +77,7 @@ export function ResetPasswordPage() {
                   className="w-full rounded-md border border-input bg-background px-3 py-2.5 text-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring transition-shadow"
                 />
                 {error && (
-                  <p className="text-sm text-destructive bg-destructive/10 rounded-md px-3 py-2">{error}</p>
+                  <p className="text-sm text-danger bg-destructive/10 rounded-md px-3 py-2">{error}</p>
                 )}
                 <button
                   type="submit"

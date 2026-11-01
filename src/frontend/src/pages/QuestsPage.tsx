@@ -7,8 +7,8 @@ import type { Campaign, Quest, QuestStatus } from "../types";
 
 const STATUS_STYLES: Record<QuestStatus, string> = {
   active:    "text-blue-600 bg-blue-500/10 border-blue-500/20",
-  completed: "text-green-600 bg-green-500/10 border-green-500/20",
-  failed:    "text-red-500 bg-red-500/10 border-red-500/20",
+  completed: "text-success bg-success/14 border-success/40",
+  failed:    "text-danger bg-destructive/14 border-destructive/40",
   abandoned: "text-muted-foreground bg-muted/40 border-border",
 };
 const STATUS_ICONS: Record<QuestStatus, string> = {
@@ -37,7 +37,7 @@ function QuestCard({ quest, onCycle, onDelete, onSelect }: { quest: Quest; onCyc
           </button>
           <button
             onClick={(e) => { e.stopPropagation(); onDelete(); }}
-            className="p-1 rounded text-muted-foreground hover:text-destructive transition-colors"
+            className="p-1 rounded text-muted-foreground hover:text-danger transition-colors"
             title="Delete"
           >
             <svg width="13" height="13" viewBox="0 0 20 20" fill="currentColor">
