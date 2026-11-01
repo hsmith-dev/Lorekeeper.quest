@@ -7,7 +7,7 @@ name: Backend tests
 # torch install for nothing.
 on:
   push:
-    branches: [master]
+    branches: [main]
     paths:
       - "src/backend/**"
       - ".github/workflows/backend-tests.yml"
