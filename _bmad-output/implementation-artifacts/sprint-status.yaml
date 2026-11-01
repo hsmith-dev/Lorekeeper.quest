@@ -128,7 +128,7 @@ development_status:
   6-1-typed-llm-errors-and-one-llm-config-resolver: done
   6-2-one-priority-gate-for-the-local-llm-and-one-fixed-local-mode: done
   6-3-backend-detection-and-prompt-budgets: done
-  6-4-complete_structured-with-schema-enforcement-and-at-most-two: backlog
+  6-4-complete_structured-with-schema-enforcement-and-at-most-two: done
   6-5-deterministic-fake-llm-provider-and-the-ev-4-context-capture: backlog
   6-6-act-on-spike-6-calibrate-prompt-budgets-decide-the-extractio: backlog
   epic-6-retrospective: optional
