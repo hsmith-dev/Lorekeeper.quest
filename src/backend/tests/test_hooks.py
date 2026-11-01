@@ -203,12 +203,13 @@ def test_the_primitive_refuses_unknown_and_conflicting_channels():
 async def test_a_raising_handler_is_logged_and_the_route_still_returns_200(db, rec, caplog):
     c = await _campaign(db)
     secret = f"secret-{uuid.uuid4().hex}"
+    canary = f"canary-{uuid.uuid4().hex}"
     written = f"hookwrite-{uuid.uuid4().hex}@example.com"
 
     async def writes_then_raises(hdb, event, payload):
         hdb.add(User(email=written, hashed_password="x", display_name="w"))
         await hdb.flush()
-        raise RuntimeError("handler boom")
+        raise RuntimeError(f"handler boom {canary}")
 
     hooks.register_handler(E.ENTRY_SAVED, writes_then_raises)
     hooks.register_handler(E.ENTRY_SAVED, rec.handler("after"))
@@ -232,7 +233,9 @@ async def test_a_raising_handler_is_logged_and_the_route_still_returns_200(db, r
     assert len(failed) == 1
     msg = failed[0].getMessage()
     assert '"hook_event": "entry_saved"' in msg and "writes_then_raises" in msg and str(c.id) in msg
+    assert '"error_type": "RuntimeError"' in msg
     assert secret not in caplog.text  # never the refs
+    assert canary not in caplog.text and "Traceback" not in caplog.text  # nor the exception's message
     assert await db.scalar(sa.select(sa.func.count()).select_from(User).where(User.email == written)) == 0
 
 
@@ -377,3 +380,26 @@ async def test_the_reaper_emits_job_finished_for_an_interrupted_last_attempt(db,
     by_job = {p.refs["job_id"]: p for p in rec.of(E.JOB_FINISHED)}
     assert by_job[job_id] == HookPayload(c.id, {"job_id": job_id, "kind": SYSTEM_NOOP.name,
                                                 "status": JobStatus.FAILED}, None)
+
+
+async def test_perform_drains_job_finished_handlers_on_its_own_loop(db, rec, monkeypatch):
+    """The RQ path: `perform` runs the Job under its own `asyncio.run` and
+    must let the job_finished handler run before that loop ends."""
+    c = await _campaign(db)
+    hooks.register_handler(E.JOB_FINISHED, rec.handler("h"))  # a plain list append: thread-safe
+    conn = fakeredis.FakeRedis(server=fakeredis.FakeServer())
+    monkeypatch.setattr(get_settings(), "jobs_eager", False)
+    monkeypatch.setattr(get_settings(), "database_url", db.bind.url.render_as_string(hide_password=False))
+    outbox.set_connection(conn)
+    try:
+        ctx = await ctx_for(db, c.user_id, c.id)
+        job_id = await enqueue(db, ctx, SYSTEM_NOOP.name, {}, idempotency_key=f"test:{uuid.uuid4().hex}")
+        await db.commit()
+        assert rec.calls == []
+        await asyncio.to_thread(worker.perform, str(job_id))
+    finally:
+        outbox.set_connection(None)
+        for q in JobQueue:
+            Queue(q.value, connection=conn).empty()
+    by_job = {p.refs["job_id"]: p for p in rec.of(E.JOB_FINISHED)}
+    assert by_job[job_id].refs == {"job_id": job_id, "kind": SYSTEM_NOOP.name, "status": JobStatus.DONE}

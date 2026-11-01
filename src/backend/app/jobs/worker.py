@@ -115,6 +115,9 @@ logger = logging.getLogger(__name__)
 # Delay before attempt n+1, indexed by attempts - 1 (AD-4: +10 s, then +60 s).
 RETRY_DELAYS_S: tuple[int, ...] = (10, 60)
 HEARTBEAT_INTERVAL_S: float = 10
+# How long a short-lived loop (a work horse's Job, a reaper pass) waits for
+# hook handlers (job_finished) before it ends: one handler's budget plus slack.
+HOOK_DRAIN_TIMEOUT_S: float = hooks.HANDLER_TIMEOUT_S + 5
 # How long the heartbeat and `job.report` wait for the row lock (the handler's
 # own session may hold it if it changed the Job row) before giving up.
 _LOCK_TIMEOUT = "2s"
@@ -855,8 +858,10 @@ class Reaper:
                 logger.exception("files.gc scheduling failed")
             return result
         finally:
-            await hooks.drain()  # job_finished handlers, before this loop and engine go
-            await engine.dispose()
+            try:
+                await _drain_hooks()
+            finally:
+                await engine.dispose()
 
 
 # ── The RQ side ────────────────────────────────────────────────────────────
@@ -871,6 +876,15 @@ def _worker_id() -> str:
     return _WORKER_ID or f"{socket.gethostname()}:{os.getpid()}"
 
 
+async def _drain_hooks() -> None:
+    """Let job_finished handlers finish before this loop and its engine go,
+    bounded (HOOK_DRAIN_TIMEOUT_S). Never raises: the caller's cleanup runs."""
+    try:
+        await hooks.drain(timeout=HOOK_DRAIN_TIMEOUT_S)
+    except Exception:
+        logger.exception("hook drain failed")
+
+
 async def _perform(job_id: str) -> JobStatus | None:
     # Per RQ job: asyncio.run gives each call a new event loop, and asyncpg
     # connections and asyncio redis clients belong to the loop that opened them.
@@ -881,10 +895,12 @@ async def _perform(job_id: str) -> JobStatus | None:
     try:
         return await run_job(job_id, async_sessionmaker(engine, expire_on_commit=False), _worker_id())
     finally:
-        await hooks.drain()  # job_finished handlers, before this loop and engine go
-        set_valkey(previous)
-        await valkey.aclose()
-        await engine.dispose()
+        try:
+            await _drain_hooks()
+        finally:
+            set_valkey(previous)
+            await valkey.aclose()
+            await engine.dispose()
 
 
 def perform(job_id: str) -> None:

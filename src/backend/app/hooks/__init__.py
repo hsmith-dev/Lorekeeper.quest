@@ -13,12 +13,15 @@ A handler is `async def handler(db, event, payload)`; `payload` is a
 HookPayload `{campaign_id, refs, actor_ctx}`. It runs after the commit, in a
 fresh session the dispatcher commits when it returns, so it may `enqueue`
 (app.jobs.enqueue). A per-user handler builds `access.ctx_for(db, user_id,
-campaign_id)` itself. A failure is logged `hook_failed` and never reaches the
+campaign_id)` itself. `actor_ctx` is None for worker events (`job_finished`):
+build a ctx from the Job's starter and Campaign instead of reading it. A failure is logged `hook_failed` and never reaches the
 code that committed.
 
 `visibility_changed` is not emitted here: `set_visibility` already queues it
 (app/access/visibility.py), and the listener below hands it to the dispatcher
-with `refs` = the changed RecordRefs and `actor_ctx` = the GM's ctx.
+with `refs` = the changed RecordRefs and `actor_ctx` = the GM's ctx. It is
+scheduled as its own task per Campaign, so it is ordered per Campaign only,
+not interleaved with the `emit` order of the same commit.
 
 Imported by app/main.py (web) and on first use by app/core/hooks.py
 (`load_handlers`, so the worker registers them too).

@@ -11,13 +11,19 @@ A handler is `async def handler(db, event, payload)`, registered for one event
         ctx = await ctx_for(db, payload.actor_ctx.user_id, payload.campaign_id)
         await enqueue(db, ctx, "extraction.run", {...}, idempotency_key=...)
 
+`actor_ctx` is None for worker events (`job_finished`): such a handler builds
+a ctx itself, e.g. from the Job's starter (`jobs.ctx_user_id`) and Campaign.
+
 * **When.** `emit` defers the event on the session (app/core/after_commit.py).
   Nothing happens unless the root transaction commits; rolling back the root,
   or the savepoint the emit was made in, discards it.
 * **Where.** After commit the events are handed to a background task on the
   running event loop (`schedule`): `commit()` never waits for a handler, and
   a hung handler cannot block it. Events run in emit order, each event's
-  handlers in registration order.
+  handlers in registration order. `visibility_changed` comes through the
+  set_visibility bridge (app/hooks/__init__.py) as a task of its own per
+  Campaign: ordered within that Campaign's refs, not interleaved with the
+  `emit`ted events of the same commit.
 * **How.** Every handler call gets a fresh session on the committed session's
   engine (never the committed session), and the dispatcher commits it after
   the handler returns, so an `enqueue` goes through the Jobs outbox.
@@ -142,11 +148,15 @@ def _name(handler: Any) -> str:
     return f"{module}.{qualname}" if module else qualname
 
 
-def _log_failure(event: HookEvent, handler: Handler, payload: HookPayload, reason: str) -> None:
-    # Never the refs or the payload: they can name GM-only rows.
-    logger.error(json.dumps({"event": "hook_failed", "hook_event": event.value, "handler": _name(handler),
-                             "campaign_id": str(payload.campaign_id), "reason": reason}),
-                 exc_info=reason == "error")
+def _log_failure(event: HookEvent, handler: Handler, payload: HookPayload, reason: str,
+                 error: BaseException | None = None) -> None:
+    # Never the refs, the payload or the exception's message or traceback:
+    # they can carry GM-only text, bound SQL parameters or refs. Only its class.
+    fields = {"event": "hook_failed", "hook_event": event.value, "handler": _name(handler),
+              "campaign_id": str(payload.campaign_id), "reason": reason}
+    if error is not None:
+        fields["error_type"] = type(error).__name__
+    logger.error(json.dumps(fields))
 
 
 async def _call(factory: async_sessionmaker[AsyncSession], event: HookEvent, payload: HookPayload,
@@ -161,11 +171,11 @@ async def _call(factory: async_sessionmaker[AsyncSession], event: HookEvent, pay
             await db.commit()
         except Exception as exc:
             timed_out = isinstance(exc, TimeoutError) and timeout.expired()
-            _log_failure(event, handler, payload, "timeout" if timed_out else "error")
+            _log_failure(event, handler, payload, "timeout" if timed_out else "error", exc)
             try:
                 await db.rollback()
-            except Exception:
-                logger.warning("hook session rollback failed", exc_info=True)
+            except Exception as rollback_exc:
+                logger.warning("hook session rollback failed: %s", type(rollback_exc).__name__)
 
 
 async def _run(factory: async_sessionmaker[AsyncSession],

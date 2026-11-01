@@ -4,10 +4,11 @@
     defer(db, "visibility_changed", item)                 # inside a transaction
     await db.commit()                                     # on_commit(session, [item, ...])
 
-The one copy of the "collect in `session.info`, drop on rollback, act after
-commit" plumbing that `set_visibility` (app/access/visibility.py) and the hook
-dispatcher (app/core/hooks.py) share. The Jobs outbox (app/jobs/outbox.py) has
-its own, with flush-tracked semantics.
+The shared copy of the "collect in `session.info`, drop on rollback, act
+after commit" plumbing, used by `set_visibility` (app/access/visibility.py) and
+the hook dispatcher (app/core/hooks.py). Two modules keep their own copies:
+the Jobs outbox (app/jobs/outbox.py, flush-tracked semantics) and the grant
+changes in app/access/grants.py (E0-Access.10-owned).
 
 * `defer` tags each item with the innermost open transaction. Rolling back a
   savepoint drops the items deferred inside it; rolling back (or closing) the
