@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { useCampaigns, useLeaveCampaign } from "../hooks/useCampaigns";
+import { usePageCampaign } from "../hooks/useCurrentCampaign";
 import {
   useShareTokens, useCreateShareToken, useRevokeShareToken,
   useCampaignMembers, useRemoveCampaignMember,
@@ -219,7 +220,7 @@ function SharedWithMeCard({ campaign }: { campaign: Campaign }) {
 
 export function SharingPage() {
   const { data: campaigns } = useCampaigns();
-  const [selected, setSelected] = useState<Campaign | null>(null);
+  const [selected, setSelected] = usePageCampaign((c) => c.is_owner);
   const ownedCampaigns = (campaigns ?? []).filter((c) => c.is_owner);
   const sharedCampaigns = (campaigns ?? []).filter((c) => !c.is_owner);
   const [tab, setTab] = useState<"mine" | "shared">("mine");

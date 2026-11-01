@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { useCampaigns } from "../hooks/useCampaigns";
+import { usePageCampaign } from "../hooks/useCurrentCampaign";
 import { useJournals } from "../hooks/useJournals";
 import { PageHeader } from "../components/PageHeader";
 import type { Campaign, JournalEntry, TagType } from "../types";
@@ -226,7 +227,7 @@ function CampaignTimeline({ campaign }: { campaign: Campaign }) {
 
 export function TimelinePage() {
   const { data: campaigns } = useCampaigns();
-  const [selected, setSelected] = useState<Campaign | null>(null);
+  const [selected, setSelected] = usePageCampaign();
 
   return (
     <div className="max-w-3xl mx-auto px-4 py-6 md:py-10 flex flex-col gap-6">

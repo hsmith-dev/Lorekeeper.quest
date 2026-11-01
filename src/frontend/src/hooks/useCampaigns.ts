@@ -2,13 +2,16 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import * as api from "../services/api";
 import type { Campaign } from "../types";
 
-export function useCampaigns() {
+// `enabled` lets the app-wide CurrentCampaignProvider share this query while
+// staying idle when logged out (a logged-out 401 would redirect to /login).
+export function useCampaigns(options: { enabled?: boolean } = {}) {
   return useQuery<Campaign[]>({
     queryKey: ["campaigns"],
     queryFn: async () => {
       const { data } = await api.getCampaigns();
       return data;
     },
+    enabled: options.enabled ?? true,
   });
 }
 

@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useCampaigns } from "../hooks/useCampaigns";
+import { usePageCampaign } from "../hooks/useCurrentCampaign";
 import {
   useCharacterTemplates, useCreateCharacterTemplate, useUpdateCharacterTemplate, useDeleteCharacterTemplate,
   useCharacterSheets, useCreateCharacterSheet, useUpdateCharacterSheet, useDeleteCharacterSheet,
@@ -473,7 +474,7 @@ function CampaignCharacterSheets({ campaign }: { campaign: Campaign }) {
 
 export function CharacterSheetsPage() {
   const { data: campaigns } = useCampaigns();
-  const [selected, setSelected] = useState<Campaign | null>(null);
+  const [selected, setSelected] = usePageCampaign();
 
   return (
     <div className="max-w-3xl mx-auto px-4 py-6 md:py-10 flex flex-col gap-6">

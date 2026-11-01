@@ -1,5 +1,6 @@
 import { useRef, useState } from "react";
 import { useCampaigns } from "../hooks/useCampaigns";
+import { usePageCampaign } from "../hooks/useCurrentCampaign";
 import { useSources, useUploadSource, useDeleteSource } from "../hooks/useSources";
 import { PageHeader } from "../components/PageHeader";
 import type { Campaign, SourceDocument } from "../types";
@@ -99,7 +100,7 @@ function CampaignSources({ campaign }: { campaign: Campaign }) {
 
 export function SourcesPage() {
   const { data: campaigns } = useCampaigns();
-  const [selected, setSelected] = useState<Campaign | null>(null);
+  const [selected, setSelected] = usePageCampaign();
 
   return (
     <div className="max-w-5xl mx-auto px-4 py-6 md:py-10 flex flex-col gap-6">

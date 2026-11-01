@@ -6,6 +6,7 @@ import { JournalList } from "../components/JournalList";
 import { CampaignSelector } from "../components/CampaignSelector";
 import { TagFilter } from "../components/TagFilter";
 import { useCampaigns } from "../hooks/useCampaigns";
+import { usePageCampaign } from "../hooks/useCurrentCampaign";
 import { useRecap } from "../hooks/useJournals";
 import type { Campaign } from "../types";
 
@@ -116,19 +117,30 @@ function RecapPanel({ campaign }: { campaign: Campaign }) {
 
 export function DashboardPage() {
   const { data: campaigns } = useCampaigns();
-  const [selectedCampaign, setSelectedCampaign] = useState<Campaign | null>(null);
+  const [selectedCampaign, setSelectedCampaign] = usePageCampaign();
   const [selectedTagId, setSelectedTagId] = useState<string | undefined>();
   const [searchParams, setSearchParams] = useSearchParams();
+
+  // The tag filter belongs to one campaign: drop it when the campaign changes
+  // (from this page's picker or from the nav's CampaignSwitcher).
+  const selectedCampaignId = selectedCampaign?.id;
+  useEffect(() => setSelectedTagId(undefined), [selectedCampaignId]);
 
   // Lets other pages (e.g. Sharing's "Shared With Me" cards) deep-link
   // straight into a specific campaign here rather than just dropping the
   // user on the page and making them find it in the picker themselves.
+  // The pick is global, so the parameter is dropped once applied; left in
+  // place it would pull the selection back after every later switch.
   useEffect(() => {
     const campaignId = searchParams.get("campaign");
-    if (!campaignId || !campaigns || selectedCampaign?.id === campaignId) return;
+    if (!campaignId || !campaigns) return;
     const match = campaigns.find((c) => c.id === campaignId);
-    if (match) setSelectedCampaign(match);
-  }, [searchParams, campaigns, selectedCampaign]);
+    if (!match) return;
+    if (selectedCampaignId !== campaignId) setSelectedCampaign(match);
+    const next = new URLSearchParams(searchParams);
+    next.delete("campaign");
+    setSearchParams(next, { replace: true });
+  }, [searchParams, campaigns, selectedCampaignId, setSelectedCampaign, setSearchParams]);
 
   const handleSelect = (c: Campaign) => {
     setSelectedCampaign(c);

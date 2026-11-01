@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useCampaigns } from "../hooks/useCampaigns";
+import { usePageCampaign } from "../hooks/useCurrentCampaign";
 import { useGenerateJournal, useGenerateJournalDraft } from "../hooks/useJournals";
 import { useDedup } from "../hooks/useDedup";
 import { transcribeVoice, summarizeSession } from "../services/api";
@@ -300,7 +301,7 @@ function RecordingPanel({ campaign }: { campaign: Campaign }) {
 
 export function RecordSessionPage() {
   const { data: campaigns } = useCampaigns();
-  const [selected, setSelected] = useState<Campaign | null>(null);
+  const [selected, setSelected] = usePageCampaign();
   const navigate = useNavigate();
 
   return (

@@ -1,12 +1,16 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { useCreateCampaign, useGenerateCampaignConcept } from "../hooks/useCampaigns";
+import { useCurrentCampaign } from "../hooks/useCurrentCampaign";
 import { exportCampaign } from "../services/api";
 import type { Campaign, Genre } from "../types";
 
 interface CampaignSelectorProps {
   campaigns: Campaign[];
-  selected: Campaign | null;
-  onSelect: (campaign: Campaign) => void;
+  /** Defaults to the app-wide current campaign. */
+  selected?: Campaign | null;
+  /** Defaults to making the campaign current app-wide. */
+  onSelect?: (campaign: Campaign) => void;
 }
 
 const GENRES: { value: Genre; label: string }[] = [
@@ -17,7 +21,11 @@ const GENRES: { value: Genre; label: string }[] = [
   { value: "other", label: "Other" },
 ];
 
-export function CampaignSelector({ campaigns, selected, onSelect }: CampaignSelectorProps) {
+export function CampaignSelector({ campaigns, selected: selectedProp, onSelect: onSelectProp }: CampaignSelectorProps) {
+  const global = useCurrentCampaign();
+  const selected = selectedProp === undefined ? global.current : selectedProp;
+  const onSelect = onSelectProp ?? global.setCurrent;
+  const [searchParams, setSearchParams] = useSearchParams();
   const [showNew, setShowNew] = useState(false);
   const [name, setName] = useState("");
   const [genre, setGenre] = useState<Genre>("fantasy");
@@ -38,6 +46,29 @@ export function CampaignSelector({ campaigns, selected, onSelect }: CampaignSele
     selected && !selected.is_owner ? "shared" : "mine"
   );
   const visible = tab === "mine" ? mine : shared;
+
+  // The selection can change from elsewhere (the nav's CampaignSwitcher):
+  // keep the tab on the side the selected campaign lives in.
+  const selectedSide = selected ? (selected.is_owner ? "mine" : "shared") : null;
+  useEffect(() => {
+    if (selectedSide) setTab(selectedSide);
+  }, [selected?.id, selectedSide]);
+
+  // "Create a campaign" in the switcher links to /dashboard?new=1: open the
+  // form, then drop the parameter so a reload doesn't reopen it.
+  const wantsNew = searchParams.get("new") === "1";
+  useEffect(() => {
+    if (!wantsNew) return;
+    setShowNew(true);
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        next.delete("new");
+        return next;
+      },
+      { replace: true },
+    );
+  }, [wantsNew, setSearchParams]);
 
   const handleExport = async (format: "pdf" | "markdown") => {
     if (!selected) return;

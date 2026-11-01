@@ -17,6 +17,7 @@ import { ChatWidget } from "./components/ChatWidget";
 import { Toaster } from "./components/ui/toast";
 import { Footer } from "./components/Footer";
 import { PreviewBanner } from "./components/shell/PreviewBanner";
+import { CurrentCampaignProvider } from "./hooks/useCurrentCampaign";
 
 // Lazy-loaded: everything past the core "log in → journal → history" loop.
 // Each of these used to be one static import in this file, which meant every
@@ -77,6 +78,7 @@ export default function App() {
     <ThemeProvider>
       <QueryClientProvider client={queryClient}>
         <BrowserRouter>
+          <CurrentCampaignProvider>
           <TourProvider>
           <div className="min-h-screen flex flex-col">
           <PreviewBanner />
@@ -121,6 +123,7 @@ export default function App() {
           <TourOverlay />
           <TutorialWelcomePrompt />
         </TourProvider>
+          </CurrentCampaignProvider>
         </BrowserRouter>
       </QueryClientProvider>
     </ThemeProvider>

@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import { Link, useNavigate, useLocation } from "react-router-dom";
 import { ThemeSelector } from "./ThemeSelector";
+import { CampaignSwitcher } from "./shell/CampaignSwitcher";
 import { uploadAvatar, getMe } from "../services/api";
 import { setPreviewCampaignId } from "@/lib/preview";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -211,11 +212,11 @@ export function NavBar() {
 
   return (
     <nav className="border-b border-border bg-background/95 backdrop-blur-sm sticky top-[var(--lk-preview-offset,0px)] z-50">
-      <div className="max-w-5xl mx-auto px-4 h-14 flex items-center gap-3">
+      <div className="max-w-5xl mx-auto px-4 h-14 flex items-center gap-2 sm:gap-3">
         {/* Logo — left, always goes to the dashboard once signed in */}
         <Link
           to="/dashboard"
-          className="shrink-0 text-xl font-bold tracking-wide text-primary"
+          className="shrink-0 flex min-h-11 items-center text-xl font-bold tracking-wide text-primary"
           style={{ fontFamily: "var(--font-heading)" }}
         >
           Lorekeeper
@@ -224,15 +225,18 @@ export function NavBar() {
         {/* Nav menu — a single dropdown at every screen size, instead of a
             flat row of ~10 links that gets cluttered even on desktop */}
         <div className="relative" ref={menuRef}>
+          {/* Icon-only below sm so the switcher and avatar fit at 375px; the
+              aria-label keeps the page name for screen readers. */}
           <button
             onClick={() => setMenuOpen((v) => !v)}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm text-foreground hover:bg-muted/60 transition-colors border border-border"
+            aria-label={current ? `Menu: ${current.label}` : "Menu"}
+            className="flex min-h-11 min-w-11 items-center justify-center gap-1.5 px-3 rounded-md text-sm text-foreground hover:bg-muted/60 transition-colors border border-border"
           >
-            <svg width="15" height="15" viewBox="0 0 20 20" fill="currentColor">
+            <svg width="15" height="15" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true" className="shrink-0">
               <path fillRule="evenodd" clipRule="evenodd" d="M3 5a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm0 5a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm0 5a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1z" />
             </svg>
-            <span className="max-w-[10rem] truncate">{current?.label ?? "Menu"}</span>
-            <svg width="12" height="12" viewBox="0 0 20 20" fill="currentColor" className={`transition-transform shrink-0 ${menuOpen ? "rotate-180" : ""}`}>
+            <span className="hidden sm:inline max-w-[10rem] truncate">{current?.label ?? "Menu"}</span>
+            <svg width="12" height="12" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true" className={`hidden sm:block transition-transform shrink-0 ${menuOpen ? "rotate-180" : ""}`}>
               <path fillRule="evenodd" clipRule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" />
             </svg>
           </button>
@@ -262,12 +266,18 @@ export function NavBar() {
           )}
         </div>
 
+        {/* Current campaign + role (E0-UX.7) */}
+        <CampaignSwitcher />
+
+        {/* Reserved: JobTrayButton slot (E0-Jobs.10) sits here, before the avatar. */}
+
         {/* Profile — right */}
         <div className="relative shrink-0 ml-auto" ref={profileRef}>
           <button
             onClick={() => setProfileOpen((o) => !o)}
-            className="flex items-center gap-2 rounded-full p-0.5 hover:ring-2 hover:ring-primary/30 transition-all"
+            className="flex min-h-11 min-w-11 items-center justify-center gap-2 rounded-full hover:ring-2 hover:ring-primary/30 transition-all"
             title="Profile"
+            aria-label="Profile"
           >
             <Avatar src={profile?.avatar_data} name={profile?.display_name} size={32} />
           </button>
