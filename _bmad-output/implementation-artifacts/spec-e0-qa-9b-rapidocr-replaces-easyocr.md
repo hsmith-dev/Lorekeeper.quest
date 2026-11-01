@@ -51,7 +51,7 @@ Inside the built ml images, offline (`--network none`), `--cpus 4`:
 
 | | printed CER | photo CER | handwriting CER | handwriting WER* | mean latency | OCR RSS delta |
 |---|---|---|---|---|---|---|
-| EasyOCR (main) | 0.015 | 0.032 | 0.108 | 0.290 | 2.4 s | +327 MB |
+| EasyOCR (main) | 0.015 | 0.032 | 0.108 | 0.290 | 2.3 s | +374 MB |
 | RapidOCR PP-OCRv6 small | 0.000 | 0.000 | 0.011 | 0.021 | 3.3 s | +230 MB |
 
 *punctuation-insensitive. Also benchmarked (standalone): PP-OCRv4 mobile en
