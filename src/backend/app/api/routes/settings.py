@@ -19,9 +19,9 @@ from app.schemas.settings import (
 )
 from app.api.deps import get_current_user, get_user_llm_config
 from app.core.config import get_settings
-from app.services.llm_provider import LLMConfig, test_provider_connection, is_hosted_default
+from app.services.llm_provider import LLMConfig, test_provider_connection
 from app.services.eval_service import run_evaluation
-from app.services import billing_service
+from app.services import llm_config_service
 
 router = APIRouter()
 
@@ -249,9 +249,9 @@ async def evaluate_model(
     # An evaluation run is many completions in a row, not one — meter it as
     # such (avg response length × how many were actually generated), same as
     # any other hosted-model usage, so it can't be used to bypass the quota.
-    if is_hosted_default(cfg) and result.get("sample_size"):
+    if result.get("sample_size"):
         generated_chars = result["avg_length"] * result["sample_size"]
-        await billing_service.record_hosted_usage(db, user, "x" * int(generated_chars))
+        await llm_config_service.meter(db, user, cfg, "x" * int(generated_chars))
 
     evaluation = ModelEvaluation(user_id=user.id, label=body.label.strip()[:100], **result)
     db.add(evaluation)

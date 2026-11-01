@@ -406,9 +406,9 @@ async def record_hosted_usage(db: AsyncSession, user: User, *texts: str) -> None
     """Call after a hosted-LLM completion for a subscriber — pass whatever text
     changed hands (prompt and/or response; route handlers generally only have
     the response text handy, which is fine, see estimate_tokens). No-op if the
-    user has no subscription row: BYO-key usage never counts against a quota,
-    and this should only ever be called when
-    app.services.llm_provider.is_hosted_default(config) is True."""
+    user has no subscription row: BYO-key usage never counts against a quota.
+    Callers go through app.services.llm_config_service.meter, which only
+    calls this when the config is the platform's hosted default."""
     result = await db.execute(select(Subscription).where(Subscription.user_id == user.id))
     sub = result.scalar_one_or_none()
     if sub is None:

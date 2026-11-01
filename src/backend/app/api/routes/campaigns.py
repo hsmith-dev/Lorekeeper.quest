@@ -23,8 +23,8 @@ from app.schemas.tag_category import TagCategoryCreate, TagCategoryResponse
 from app.api.deps import get_current_user, get_campaign_with_access, get_user_llm_config
 from app.services.export_service import build_campaign_markdown, build_campaign_pdf
 from app.services.chat_service import generate_campaign_concept
-from app.services.llm_provider import LLMConfig, is_hosted_default
-from app.services import billing_service
+from app.services.llm_provider import LLMConfig
+from app.services import llm_config_service
 
 router = APIRouter()
 
@@ -63,8 +63,7 @@ async def generate_campaign_concept_route(
     anything. The New Campaign form pre-fills with this and the user edits it
     like any other AI draft before actually submitting POST /."""
     name, description = await generate_campaign_concept(body.genre.value, body.prompt, config=config)
-    if is_hosted_default(config):
-        await billing_service.record_hosted_usage(db, user, description)
+    await llm_config_service.meter(db, user, config, description)
     return CampaignConceptResponse(name=name, description=description)
 
 

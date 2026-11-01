@@ -19,8 +19,8 @@ from app.schemas.session_plan import (
 )
 from app.api.deps import get_current_user, get_user_llm_config, get_campaign_with_access
 from app.services.chat_service import generate_session_plan
-from app.services.llm_provider import LLMConfig, is_hosted_default
-from app.services import billing_service
+from app.services.llm_provider import LLMConfig
+from app.services import llm_config_service
 
 router = APIRouter()
 
@@ -80,8 +80,7 @@ async def generate_plan_draft(
         focus=body.focus,
         config=config,
     )
-    if is_hosted_default(config):
-        await billing_service.record_hosted_usage(db, user, content)
+    await llm_config_service.meter(db, user, config, content)
     return SessionPlanGenerateResponse(content=content)
 
 

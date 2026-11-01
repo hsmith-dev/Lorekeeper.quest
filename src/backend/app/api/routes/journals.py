@@ -30,8 +30,8 @@ from app.services.journal_service import create_journal_entry, generate_draft_na
 from app.services.dedup_service import check_hash
 from app.services.chat_service import autocomplete_notes, generate_session_recap, summarize_session_transcript
 from app.services.embedding_service import embed
-from app.services.llm_provider import LLMConfig, is_hosted_default
-from app.services import billing_service
+from app.services.llm_provider import LLMConfig
+from app.services import llm_config_service
 
 router = APIRouter()
 
@@ -53,8 +53,7 @@ async def generate_journal_draft(
     trace."""
     await get_campaign_with_access(db, body.campaign_id, user)
     narrative = await generate_draft_narrative(db, user.id, body.campaign_id, body.notes, config)
-    if is_hosted_default(config):
-        await billing_service.record_hosted_usage(db, user, body.notes, narrative)
+    await llm_config_service.meter(db, user, config, body.notes, narrative)
     return GenerateDraftResponse(narrative=narrative)
 
 
@@ -89,8 +88,8 @@ async def generate_journal(
         config=config,
         narrative=body.narrative,
     )
-    if body.narrative is None and is_hosted_default(config):
-        await billing_service.record_hosted_usage(db, user, body.notes, entry.narrative)
+    if body.narrative is None:
+        await llm_config_service.meter(db, user, config, body.notes, entry.narrative)
     return entry
 
 
@@ -252,8 +251,7 @@ async def autocomplete_journal_notes(
             campaign_name = campaign.name
             genre = campaign.genre.value
     suggestion = await autocomplete_notes(body.text, campaign_name, genre, config=config)
-    if is_hosted_default(config):
-        await billing_service.record_hosted_usage(db, user, body.text, suggestion)
+    await llm_config_service.meter(db, user, config, body.text, suggestion)
     return AutocompleteResponse(suggestion=suggestion)
 
 
@@ -280,8 +278,7 @@ async def recap_campaign_session(
 
     entries_data = [{"shorthand": e.shorthand, "narrative": e.narrative} for e in entries]
     recap = await generate_session_recap(entries_data, campaign.name, campaign.genre.value, config=config)
-    if is_hosted_default(config):
-        await billing_service.record_hosted_usage(db, user, recap)
+    await llm_config_service.meter(db, user, config, recap)
     return RecapResponse(recap=recap)
 
 
@@ -302,8 +299,7 @@ async def summarize_session(
     suggested_notes = await summarize_session_transcript(
         body.transcript, campaign.name, campaign.genre.value, config=config
     )
-    if is_hosted_default(config):
-        await billing_service.record_hosted_usage(db, user, suggested_notes)
+    await llm_config_service.meter(db, user, config, suggested_notes)
     return SessionSummaryResponse(suggested_notes=suggested_notes)
 
 

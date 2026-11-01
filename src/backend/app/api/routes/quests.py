@@ -12,8 +12,8 @@ from app.schemas.quest import QuestCreate, QuestUpdate, QuestResponse, QuestSugg
 from app.schemas.journal import JournalLiteResponse
 from app.api.deps import get_current_user, get_user_llm_config, get_campaign_with_access
 from app.services.chat_service import suggest_quests, generate_quest_description
-from app.services.llm_provider import LLMConfig, is_hosted_default
-from app.services import billing_service
+from app.services.llm_provider import LLMConfig
+from app.services import llm_config_service
 
 router = APIRouter()
 
@@ -145,8 +145,7 @@ async def generate_quest_description_route(
         campaign.genre.value if campaign else None,
         config=config,
     )
-    if is_hosted_default(config):
-        await billing_service.record_hosted_usage(db, user, desc)
+    await llm_config_service.meter(db, user, config, desc)
     return {"description": desc}
 
 
@@ -171,6 +170,5 @@ async def suggest_quests_from_journals(
 
     entries_data = [{"shorthand": r.shorthand} for r in rows]
     suggestions = await suggest_quests(entries_data, campaign.name, campaign.genre.value, config=config)
-    if is_hosted_default(config):
-        await billing_service.record_hosted_usage(db, user, "\n".join(suggestions))
+    await llm_config_service.meter(db, user, config, "\n".join(suggestions))
     return QuestSuggestResponse(suggestions=suggestions)

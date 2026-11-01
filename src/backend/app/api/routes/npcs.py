@@ -13,8 +13,8 @@ from app.schemas.journal import JournalLiteResponse
 from app.api.deps import get_current_user, get_user_llm_config, get_campaign_with_access
 from app.services.nlp_service import extract_tags
 from app.services.chat_service import generate_npc_bio
-from app.services.llm_provider import LLMConfig, is_hosted_default
-from app.services import billing_service
+from app.services.llm_provider import LLMConfig
+from app.services import llm_config_service
 from app.db.models.tag import TagType
 
 router = APIRouter()
@@ -146,8 +146,7 @@ async def generate_npc_bio_route(
         campaign.genre.value if campaign else None,
         config=config,
     )
-    if is_hosted_default(config):
-        await billing_service.record_hosted_usage(db, user, bio)
+    await llm_config_service.meter(db, user, config, bio)
     return {"description": bio}
 
 
