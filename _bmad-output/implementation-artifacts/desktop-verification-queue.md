@@ -92,3 +92,7 @@ Stories were merged on green GitHub CI while the desktop was offline (owner deci
 ## E0-QA.9 (PDF half) — WeasyPrint replaces fpdf2 (PR #47)
 - [x] ~~Parity on a real export~~ — desktop, seeded demo campaign: 13 pages both, same sections/order; non-Latin names ("Ōkami", "Þórr", "Ведьма") now print instead of "?"; backend image +54 MB; in-image licence scan 0 violations both editions
 - [ ] Known gaps: DejaVu lacks CJK/emoji/Thai glyphs (bundled fonts are E8.2); Pyphen hyphenation dictionary licences unreviewed
+
+## E0-Access.7 — Party-only search and retrieval (PR #49)
+- [ ] **Deploy step (put in release notes):** after deploying, run once in the backend container `python scripts/backfill_party_embeddings.py` (fills empty/stale `party_tsv` + `party_embedding`; idempotent)
+- [ ] Known: a duplicate entry that slips past Valkey in the first 24 h after deploy hits the DB constraint → 500 instead of 409 (deferred)
