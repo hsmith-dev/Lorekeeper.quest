@@ -14,13 +14,22 @@ from app.db.models.tag import Tag
 from app.db.models.npc import NpcEntry
 from app.db.models.quest import Quest
 from app.db.models.share_token import CampaignShareToken
-from app.schemas.share import PublicCampaignResponse, JoinCampaignResponse
-from app.schemas.journal import JournalListResponse, JournalResponse
-from app.schemas.npc import NpcResponse
-from app.schemas.quest import QuestResponse
+from app.schemas.share import (
+    PublicCampaignResponse,
+    JoinCampaignResponse,
+    PublicJournalListResponse,
+    PublicJournalResponse,
+    PublicNpcResponse,
+    PublicQuestResponse,
+)
 from app.api.deps import require_active_account
 
 router = APIRouter()
+
+# Read-only share links are anonymous and player-facing. Every endpoint here
+# returns the Public* schemas from app/schemas/share.py, which leave out
+# GM-private fields (journal shorthand, NPC/quest notes). Don't return the
+# owner-facing Journal/Npc/Quest response schemas from this router.
 
 
 async def _resolve_token(db: AsyncSession, token: str, kind: str | None = None) -> CampaignShareToken:
@@ -55,7 +64,7 @@ async def get_shared_campaign(
     )
 
 
-@router.get("/{token}/journals", response_model=JournalListResponse)
+@router.get("/{token}/journals", response_model=PublicJournalListResponse)
 @limiter.limit("30/minute")
 async def get_shared_journals(
     request: Request,
@@ -63,7 +72,7 @@ async def get_shared_journals(
     page: int = Query(1, ge=1),
     limit: int = Query(20, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
-) -> JournalListResponse:
+) -> PublicJournalListResponse:
     share = await _resolve_token(db, token, "read_only")
     query = (
         select(JournalEntry)
@@ -74,17 +83,17 @@ async def get_shared_journals(
     total = (await db.execute(select(func.count()).select_from(query.subquery()))).scalar()
     query = query.offset((page - 1) * limit).limit(limit)
     items = (await db.execute(query)).scalars().all()
-    return JournalListResponse(items=items, total=total, page=page, limit=limit)
+    return PublicJournalListResponse(items=items, total=total, page=page, limit=limit)
 
 
-@router.get("/{token}/journals/{journal_id}", response_model=JournalResponse)
+@router.get("/{token}/journals/{journal_id}", response_model=PublicJournalResponse)
 @limiter.limit("30/minute")
 async def get_shared_journal(
     request: Request,
     token: str,
     journal_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-) -> JournalResponse:
+) -> PublicJournalResponse:
     share = await _resolve_token(db, token, "read_only")
     result = await db.execute(
         select(JournalEntry)
@@ -97,13 +106,13 @@ async def get_shared_journal(
     return entry
 
 
-@router.get("/{token}/npcs", response_model=list[NpcResponse])
+@router.get("/{token}/npcs", response_model=list[PublicNpcResponse])
 @limiter.limit("30/minute")
 async def get_shared_npcs(
     request: Request,
     token: str,
     db: AsyncSession = Depends(get_db),
-) -> list[NpcResponse]:
+) -> list[PublicNpcResponse]:
     share = await _resolve_token(db, token, "read_only")
     result = await db.execute(
         select(NpcEntry).where(NpcEntry.campaign_id == share.campaign_id).order_by(NpcEntry.name)
@@ -111,13 +120,13 @@ async def get_shared_npcs(
     return list(result.scalars().all())
 
 
-@router.get("/{token}/quests", response_model=list[QuestResponse])
+@router.get("/{token}/quests", response_model=list[PublicQuestResponse])
 @limiter.limit("30/minute")
 async def get_shared_quests(
     request: Request,
     token: str,
     db: AsyncSession = Depends(get_db),
-) -> list[QuestResponse]:
+) -> list[PublicQuestResponse]:
     share = await _resolve_token(db, token, "read_only")
     result = await db.execute(
         select(Quest).where(Quest.campaign_id == share.campaign_id).order_by(Quest.title)
