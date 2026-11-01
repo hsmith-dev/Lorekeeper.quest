@@ -192,7 +192,7 @@ export function SubscribePage() {
               </p>
             )}
             {checkout.isError && (
-              <p className="text-sm text-destructive text-center">
+              <p className="text-sm text-danger text-center">
                 {(checkout.error as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
                   "Couldn't start checkout. Try again in a moment."}
               </p>
@@ -217,7 +217,7 @@ export function SubscribePage() {
                 </button>
               </form>
               {redeem.isError && (
-                <p className="text-xs text-destructive text-center">
+                <p className="text-xs text-danger text-center">
                   {(redeem.error as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
                     "That code isn't valid."}
                 </p>

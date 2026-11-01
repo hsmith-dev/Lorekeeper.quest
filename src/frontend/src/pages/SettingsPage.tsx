@@ -419,8 +419,8 @@ function LLMSettingsSection() {
       {testResult && (
         <div className={`rounded-lg px-4 py-2.5 text-sm border ${
           testResult.success
-            ? "bg-green-500/10 border-green-500/30 text-green-700 dark:text-green-400"
-            : "bg-destructive/10 border-destructive/30 text-destructive"
+            ? "bg-success/14 border-success/40 text-success"
+            : "bg-destructive/10 border-destructive/30 text-danger"
         }`}>
           {testResult.success ? "✓ " : "✗ "}{testResult.message}
         </div>
@@ -514,7 +514,7 @@ function ReindexSection() {
         </div>
 
         {result && (
-          <div className="rounded-lg px-4 py-2.5 text-sm border bg-green-500/10 border-green-500/30 text-green-700 dark:text-green-400">
+          <div className="rounded-lg px-4 py-2.5 text-sm border bg-success/14 border-success/40 text-success">
             ✓ {result}
           </div>
         )}
@@ -641,7 +641,7 @@ function EvaluationSection() {
             {" "}— this can take a minute or more depending on the model.
           </p>
         )}
-        {error && <p className="text-sm text-destructive">{error}</p>}
+        {error && <p className="text-sm text-danger">{error}</p>}
 
         {isLoading && <div className="h-16 rounded-lg bg-muted/40 animate-pulse" />}
 
@@ -675,7 +675,7 @@ function EvaluationSection() {
                     <td className="py-2 pr-3 text-muted-foreground">{e.has_content_pct.toFixed(0)}%</td>
                     <td className="py-2 pr-3 text-muted-foreground">{e.error_count}</td>
                     <td className="py-2">
-                      <button onClick={() => handleDelete(e.id)} className="text-xs text-muted-foreground hover:text-destructive transition-colors">
+                      <button onClick={() => handleDelete(e.id)} className="text-xs text-muted-foreground hover:text-danger transition-colors">
                         Remove
                       </button>
                     </td>
@@ -802,7 +802,7 @@ function BillingSection() {
               />
             </div>
             {pct >= 100 && (
-              <p className="text-xs text-destructive mt-1">
+              <p className="text-xs text-danger mt-1">
                 Quota used up — add your own LLM API key above to keep generating until it resets.
               </p>
             )}

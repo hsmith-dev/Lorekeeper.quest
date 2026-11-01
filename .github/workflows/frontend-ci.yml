@@ -32,8 +32,10 @@ jobs:
       - run: npm ci --no-audit --no-fund
       - name: Type-check and build (tsc && vite build)
         run: npm run build
-      - name: Theme token contrast (WCAG AA)
-        run: node scripts/check-ui-tokens.mjs --contrast
+      - name: UI token gate (hardcoded colours + theme contrast, CI-15)
+        run: npm run lint:tokens
+      - name: UI token gate self-test (fixtures)
+        run: node scripts/check-ui-tokens.mjs --self-test
       - name: Semantic-token fallback for custom themes
         run: node scripts/check-semantic-fallback.mjs
       - name: UI primitive behaviour checks

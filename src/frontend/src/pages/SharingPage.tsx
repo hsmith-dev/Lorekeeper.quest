@@ -41,7 +41,7 @@ function TokenRow({ campaignId, tok }: { campaignId: string; tok: ShareToken }) 
         <button
           onClick={() => revoke.mutate(tok.id)}
           disabled={revoke.isPending}
-          className="text-xs px-2.5 py-1 rounded-md border border-destructive/30 text-destructive hover:bg-destructive/10 transition-colors disabled:opacity-50"
+          className="text-xs px-2.5 py-1 rounded-md border border-destructive/30 text-danger hover:bg-destructive/10 transition-colors disabled:opacity-50"
         >
           Revoke
         </button>
@@ -113,7 +113,7 @@ function MembersSection({ campaignId }: { campaignId: string }) {
               onClick={() => remove.mutate({ memberId: m.id })}
               disabled={remove.isPending}
               title="Revoke their access — their existing entries stay in the campaign, visible to everyone"
-              className="text-xs px-2.5 py-1 rounded-md border border-destructive/30 text-destructive hover:bg-destructive/10 transition-colors disabled:opacity-50"
+              className="text-xs px-2.5 py-1 rounded-md border border-destructive/30 text-danger hover:bg-destructive/10 transition-colors disabled:opacity-50"
             >
               Remove
             </button>
@@ -124,7 +124,7 @@ function MembersSection({ campaignId }: { campaignId: string }) {
               }}
               disabled={remove.isPending}
               title="Also permanently deletes everything they wrote in this campaign"
-              className="text-xs px-2.5 py-1 rounded-md border border-destructive/30 bg-destructive/10 text-destructive hover:bg-destructive/20 transition-colors disabled:opacity-50"
+              className="text-xs px-2.5 py-1 rounded-md border border-destructive/30 bg-destructive/10 text-danger hover:bg-destructive/20 transition-colors disabled:opacity-50"
             >
               Remove + Delete Entries
             </button>
@@ -187,7 +187,7 @@ function SharedWithMeCard({ campaign }: { campaign: Campaign }) {
         {!confirming ? (
           <button
             onClick={() => setConfirming(true)}
-            className="text-xs px-2.5 py-1.5 rounded-md border border-destructive/30 text-destructive hover:bg-destructive/10 transition-colors"
+            className="text-xs px-2.5 py-1.5 rounded-md border border-destructive/30 text-danger hover:bg-destructive/10 transition-colors"
           >
             Leave Campaign
           </button>
@@ -211,7 +211,7 @@ function SharedWithMeCard({ campaign }: { campaign: Campaign }) {
         )}
       </div>
       {leave.isError && (
-        <p className="text-xs text-destructive">Couldn't leave — try again in a moment.</p>
+        <p className="text-xs text-danger">Couldn't leave — try again in a moment.</p>
       )}
     </div>
   );

@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { TriangleAlert } from "lucide-react";
 import { getCampaigns, getChatHealth, getChatSessions, deleteChatSession } from "../services/api";
 import { useDebounce } from "../hooks/useDebounce";
 import { useChat } from "../hooks/useChat";
@@ -50,7 +51,7 @@ function RetrievalPanel({ retrieval }: { retrieval: RetrievalDebug }) {
               <div className="flex flex-col gap-1">
                 {retrieval.candidates.map((c) => (
                   <div key={c.id} className={`flex items-baseline gap-2 ${c.used ? "" : "opacity-55"}`}>
-                    <span className={`shrink-0 font-mono ${c.used ? "text-green-600 dark:text-green-400" : c.passed_gate ? "text-muted-foreground" : "text-amber-600 dark:text-amber-400"}`}>
+                    <span className={`shrink-0 font-mono ${c.used ? "text-success" : c.passed_gate ? "text-muted-foreground" : "text-warning"}`}>
                       {c.used ? "✓ used" : c.passed_gate ? "· passed" : "✗ gated"}
                     </span>
                     <span className="truncate text-muted-foreground">{c.shorthand}</span>
@@ -125,7 +126,7 @@ function AIStatus() {
   if (isLoading) return null;
   return (
     <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-      <span className={`w-2 h-2 rounded-full ${data?.ai_online ? "bg-green-500" : "bg-red-500"}`} />
+      <span className={`w-2 h-2 rounded-full ${data?.ai_online ? "bg-success" : "bg-danger"}`} />
       {data?.ai_online ? "AI online" : "AI offline"}
     </div>
   );
@@ -163,7 +164,7 @@ function SessionItem({
       </div>
       <button
         onClick={(e) => { e.stopPropagation(); onDelete(); }}
-        className="shrink-0 opacity-0 group-hover:opacity-100 p-1 rounded text-muted-foreground hover:text-destructive transition-all"
+        className="shrink-0 opacity-0 group-hover:opacity-100 p-1 rounded text-muted-foreground hover:text-danger transition-all"
         title="Delete conversation"
       >
         <svg width="14" height="14" viewBox="0 0 20 20" fill="currentColor">
@@ -377,8 +378,8 @@ export function ChatPage() {
                   <SourcesPanel sources={msg.sources!} />
                 )}
                 {msg.role === "assistant" && msg.grounded === false && (
-                  <p className="mt-1 text-xs text-amber-600 dark:text-amber-400 flex items-center gap-1">
-                    <span aria-hidden="true">⚠</span>
+                  <p className="mt-1 text-xs text-warning flex items-center gap-1">
+                    <TriangleAlert aria-hidden="true" className="h-3 w-3 shrink-0" />
                     Not from your journal — no campaign records matched this question, so this is improvised.
                   </p>
                 )}
@@ -398,7 +399,7 @@ export function ChatPage() {
 
             {error && (
               <div className="flex flex-col gap-2">
-                <div className="bg-destructive/10 border border-destructive/30 rounded-lg px-4 py-3 text-sm text-destructive">
+                <div className="bg-destructive/10 border border-destructive/30 rounded-lg px-4 py-3 text-sm text-danger">
                   {error.includes("503") || error.includes("unavailable")
                     ? "Lorekeeper.Quest AI is temporarily unavailable. Please try again in a moment."
                     : error}

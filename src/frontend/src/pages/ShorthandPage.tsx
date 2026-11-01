@@ -96,7 +96,7 @@ function TermRow({ term, campaignId }: { term: ShorthandTerm; campaignId: string
         </button>
         <button
           onClick={handleDelete} disabled={del.isPending}
-          className="text-xs px-2.5 py-1 rounded-md border border-destructive/30 text-destructive hover:bg-destructive/10 transition-colors disabled:opacity-50"
+          className="text-xs px-2.5 py-1 rounded-md border border-destructive/30 text-danger hover:bg-destructive/10 transition-colors disabled:opacity-50"
         >
           Delete
         </button>

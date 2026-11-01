@@ -209,8 +209,8 @@ function RecordingPanel({ campaign }: { campaign: Campaign }) {
                 key={s.index}
                 title={s.text}
                 className={`text-[10px] px-2 py-0.5 rounded-full border font-medium ${
-                  s.status === "done" ? "bg-green-500/10 text-green-600 border-green-500/20"
-                  : s.status === "error" ? "bg-destructive/10 text-destructive border-destructive/20"
+                  s.status === "done" ? "bg-success/14 text-success border-success/40"
+                  : s.status === "error" ? "bg-destructive/10 text-danger border-destructive/20"
                   : "bg-muted text-muted-foreground border-border animate-pulse"
                 }`}
               >
@@ -240,7 +240,7 @@ function RecordingPanel({ campaign }: { campaign: Campaign }) {
               {summarizing ? "Summarizing…" : "Summarize into Session Notes"}
             </button>
           )}
-          {summaryError && <p className="text-xs text-destructive">{summaryError}</p>}
+          {summaryError && <p className="text-xs text-danger">{summaryError}</p>}
         </div>
       )}
 
@@ -269,7 +269,7 @@ function RecordingPanel({ campaign }: { campaign: Campaign }) {
               </div>
             )}
           </div>
-          {saveError && <p className="text-xs text-destructive">{saveError}</p>}
+          {saveError && <p className="text-xs text-danger">{saveError}</p>}
         </div>
       )}
 
@@ -287,9 +287,9 @@ function RecordingPanel({ campaign }: { campaign: Campaign }) {
       )}
 
       {saved && (
-        <div className="rounded-lg border border-green-500/20 bg-green-500/10 p-4 flex items-center justify-between">
-          <p className="text-sm text-green-600">Journal entry saved.</p>
-          <button onClick={() => navigate("/history")} className="text-xs underline underline-offset-2 text-green-600">
+        <div className="rounded-lg border border-success/40 bg-success/14 p-4 flex items-center justify-between">
+          <p className="text-sm text-success">Journal entry saved.</p>
+          <button onClick={() => navigate("/history")} className="text-xs underline underline-offset-2 text-success">
             View History
           </button>
         </div>

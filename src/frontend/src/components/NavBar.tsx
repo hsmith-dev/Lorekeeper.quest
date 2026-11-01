@@ -155,7 +155,7 @@ function ProfileDropdown({ onClose }: { onClose: () => void }) {
       <div className="px-2 py-2">
         <button
           onClick={logout}
-          className="w-full flex items-center gap-2.5 px-3 py-2 rounded-md text-sm text-destructive hover:bg-destructive/10 transition-colors"
+          className="w-full flex items-center gap-2.5 px-3 py-2 rounded-md text-sm text-danger hover:bg-destructive/10 transition-colors"
         >
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
             <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" /><polyline points="16 17 21 12 16 7" /><line x1="21" y1="12" x2="9" y2="12" />

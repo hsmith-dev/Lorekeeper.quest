@@ -95,7 +95,7 @@ export function NarrativeReviewPanel({
         </button>
       </div>
       {error && (
-        <p className="text-sm text-destructive bg-destructive/10 rounded-md px-3 py-2">{error}</p>
+        <p className="text-sm text-danger bg-destructive/10 rounded-md px-3 py-2">{error}</p>
       )}
     </div>
   );

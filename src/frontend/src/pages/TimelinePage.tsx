@@ -11,7 +11,7 @@ const TAG_STYLES: Record<TagType, string> = {
   location:  "bg-accent/15 text-accent-foreground border-accent/30",
   item:      "bg-secondary/20 text-secondary-foreground border-secondary/40",
   quest:     "bg-muted text-muted-foreground border-border",
-  faction:   "bg-destructive/15 text-destructive-foreground border-destructive/30",
+  faction:   "bg-destructive/15 text-danger border-destructive/30",
 };
 
 // Solid fills for the timeline node itself — TAG_STYLES above are all

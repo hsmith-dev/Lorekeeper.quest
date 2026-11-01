@@ -93,7 +93,7 @@ function SessionPlanCard({ plan, campaignId }: { plan: SessionPlan; campaignId: 
                 </button>
                 <button
                   onClick={() => remove.mutate(plan.id)}
-                  className="text-xs text-destructive hover:underline underline-offset-2 transition-colors"
+                  className="text-xs text-danger hover:underline underline-offset-2 transition-colors"
                 >
                   Delete
                 </button>
@@ -176,7 +176,7 @@ function CampaignSessionPlans({ campaign }: { campaign: Campaign }) {
             Draws on this campaign's recent entries, open quests, and known NPCs.
           </p>
           {generateDraft.isError && (
-            <p className="text-sm text-destructive bg-destructive/10 rounded-md px-3 py-2">Something went wrong. Try again.</p>
+            <p className="text-sm text-danger bg-destructive/10 rounded-md px-3 py-2">Something went wrong. Try again.</p>
           )}
         </div>
       ) : (

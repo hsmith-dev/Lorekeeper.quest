@@ -202,7 +202,7 @@ export function CampaignSelector({ campaigns, selected, onSelect }: CampaignSele
                   </button>
                 </div>
                 {generateConcept.isError && (
-                  <p className="text-xs text-destructive">Couldn't generate a concept. Try again.</p>
+                  <p className="text-xs text-danger">Couldn't generate a concept. Try again.</p>
                 )}
                 <p className="text-[10px] text-muted-foreground">Fills in the fields below — edit freely before creating.</p>
               </>

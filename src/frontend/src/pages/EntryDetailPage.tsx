@@ -15,7 +15,7 @@ const TAG_STYLES: Record<TagType, string> = {
   location:  "bg-accent/15 text-accent-foreground border-accent/30",
   item:      "bg-secondary/20 text-secondary-foreground border-secondary/40",
   quest:     "bg-muted text-muted-foreground border-border",
-  faction:   "bg-destructive/15 text-destructive-foreground border-destructive/30",
+  faction:   "bg-destructive/15 text-danger border-destructive/30",
 };
 
 const TAG_LABELS: Record<TagType, string> = {
@@ -109,7 +109,7 @@ export function EntryDetailPage() {
 
   if (!entry) {
     return (
-      <div className="max-w-2xl mx-auto px-4 py-10 text-sm text-destructive">
+      <div className="max-w-2xl mx-auto px-4 py-10 text-sm text-danger">
         Entry not found.
       </div>
     );
@@ -127,7 +127,7 @@ export function EntryDetailPage() {
         </Link>
         <button
           onClick={handleDelete}
-          className="text-sm text-destructive hover:text-destructive/80 transition-colors"
+          className="text-sm text-danger hover:text-danger/80 transition-colors"
         >
           Delete
         </button>
@@ -256,7 +256,7 @@ export function EntryDetailPage() {
                   className="rounded-md border border-input bg-background px-3 py-2 text-sm"
                 />
               )}
-              {tagError && <p className="text-xs text-destructive">{tagError}</p>}
+              {tagError && <p className="text-xs text-danger">{tagError}</p>}
               <button
                 onClick={handleAddTag}
                 disabled={saving || !tagName.trim()}
