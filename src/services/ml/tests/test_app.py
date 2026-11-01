@@ -132,6 +132,9 @@ def test_lazy_config_from_env():
                        "ML_NLI_BATCH_SIZE": "8", "ML_NLI_MODEL_PATH": "/m/nli", "ML_OCR_MODEL_DIR": "/m/ocr"})
     assert (cfg.resident_budget_mb, cfg.nli_cost_mb, cfg.ocr_cost_mb, cfg.nli_batch_size) == (1500, 1200, 1000, 8)
     assert (cfg.nli_model_path, cfg.ocr_model_dir) == ("/m/nli", "/m/ocr")
+    # docker-compose.prod.yml sends ${ML_RESIDENT_BUDGET_MB:-}: empty means default.
+    cfg = load_config({"ML_RESIDENT_BUDGET_MB": "", "ML_NLI_COST_MB": ""})
+    assert (cfg.resident_budget_mb, cfg.nli_cost_mb) == (2000, 600)
     try:
         load_config({"ML_NLI_BATCH_SIZE": "0"})
     except ValueError:

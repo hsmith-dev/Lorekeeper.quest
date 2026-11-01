@@ -8,7 +8,46 @@ review_loop_iteration: 0
 followup_review_recommended: false
 context: []
 warnings: [oversized]
-deferred: []
+deferred:
+  - summary: >-
+      Resident models plus the full 2000 MB lazy budget may not fit under the 2.5g ml limit; the default declared costs (NLI 600, OCR 900) are unmeasured.
+    evidence: |-
+      AD-7 fixes ml at 2.5g and ML_RESIDENT_BUDGET_MB=2000; MiniLM + en_core_web_trf + torch are already resident.
+      SPIKE-1 measured 844 MB peak for a whole xsmall process. Only a desktop RSS run settles it (E0-Platform.7 / .10).
+    location: >-
+      docker-compose.prod.yml (ml deploy.resources); src/services/ml/ml_service/config.py DEFAULT_*_COST_MB
+    severity: medium (unverified)
+  - summary: >-
+      The first NLI/OCR call pays the model load inside the client's single 30 s ml_timeout_s.
+    evidence: |-
+      Cold EasyOCR/DeBERTa load on cpus 1.0 plus a large image or 256 pairs could exceed 30 s; the client then retries
+      behind the still-running request. Needs desktop timing.
+    location: >-
+      src/backend/app/clients/ml.py; src/backend/app/core/config.py ml_timeout_s
+    severity: medium (unverified)
+  - summary: >-
+      OCR decode has no pixel cap; a highly compressed 10 MiB PNG can decode to ~100M+ pixels outside the declared budget.
+    evidence: |-
+      PIL only raises DecompressionBombError above 2x MAX_IMAGE_PIXELS. Same exposure as today's in-process vision_service;
+      the sidecar is internal-only and the backend route caps uploads at 10 MB.
+    location: >-
+      src/services/ml/ml_service/models.py (EasyOcrReader.read)
+    severity: medium
+  - summary: >-
+      python-multipart 0.0.12 (shared pin with the backend) predates the CVE-2024-53981 fix (0.0.18).
+    evidence: |-
+      Pre-existing backend pin, now also in the ml image. Bump both images and the register together in a separate change.
+    location: >-
+      src/services/ml/requirements.txt; src/backend/requirements.txt; licenses/register.yaml
+    severity: medium
+  - summary: >-
+      NLI/OCR are never called inside a --network none container in CI (story AC 5).
+    evidence: |-
+      Offline is configured (HF/TRANSFORMERS offline env, download_enabled=False, baked paths) but the CI-5 sidecar smoke
+      job is not wired (E0-QA); desktop verification runs it.
+    location: >-
+      scripts/sidecar_smoke.sh; .github/workflows
+    severity: medium
 ---
 
 <intent-contract>
@@ -120,6 +159,55 @@ deferred: []
 ## Spec Change Log
 
 ## Review Triage Log
+
+### 2026-11-01 — Review pass
+- verdicts: 45 findings — high 0, medium 11, low 22, false 7, maybe-false 5
+- findings:
+  - `[medium]` `[defer]` (blind) ml 2560m limit vs resident models + 2000 MB lazy budget — AD-7/story fix both numbers; desktop RSS measurement. Deferred.
+  - `[medium]` `[patch]` (blind) OCR bake only prints its result — bake now fails on empty OCR text.
+  - `[medium]` `[patch]` (blind) NLI silently truncates to 512 tokens while accepting 4000 chars/side — documented in the sidecar and client docstrings (E2 sends sentence-sized pairs).
+  - `[low]` `[patch]` (blind) Fake OCR docstring claims 422 parity for non-images — docstring reworded (fake mirrors size/emptiness only).
+  - `[low]` `[reject]` (blind) Cost > budget accepted by config — the 503 and /v1/status (cost_mb, resident_budget_mb) make it visible; a guard adds surface for an operator misconfiguration.
+  - `[low]` `[reject]` (blind) Failed lazy loads retry per request and 500 is retryable — baked weights are proven by the build bake; retries are bounded by the Jobs lifecycle (10 s, 60 s).
+  - `[low]` `[patch]` (blind) Cost knobs undocumented — commented ML_NLI_COST_MB / ML_OCR_COST_MB added to .env.example; compose passthrough rejected (keep compose minimal, wave sibling edits it).
+  - `[maybe-false]` `[defer]` (blind) First lazy load inside 30 s timeout — needs desktop timing. Deferred medium (unverified).
+  - `[medium]` `[defer]` (blind) No pixel cap on decoded images — pre-existing exposure (vision_service today); internal network. Deferred.
+  - `[medium]` `[defer]` (blind) python-multipart 0.0.12 CVE — pre-existing backend pin reused. Deferred.
+  - `[low]` `[reject]` (blind) Queued requests count as in_use and block eviction — intended: never evict a model with work pending; the other model gets a retryable 503.
+  - `[low]` `[reject]` (blind) Missing tests for several waiters on a failed load, OCR 500, non-JSON 5xx suffix, fake cost constants — rare paths; the 500 path is covered on NLI and the suffix falls back to raw text.
+  - `[low]` `[patch]` (blind) Stale torchvision note and prod compose comment — both updated.
+  - `[low]` `[patch]` (edge) PIL EOFError escapes as 500 — EOFError added to the caught decode errors.
+  - `[maybe-false]` `[reject]` (edge) readtext raising on a degenerate image — would only be low; not shown reachable for decodable images.
+  - `[medium]` `[defer]` (edge) Pixel bomb up to ~178M pixels — same root cause as the blind pixel-cap row. Deferred.
+  - `[low]` `[reject]` (edge) Starlette spools the body before the 413 — internal-only service behind the backend's 10 MB cap.
+  - `[low]` `[reject]` (edge) Waiters re-run a failing loader — rare (baked weights proven at build); adds state.
+  - `[low]` `[reject]` (edge) ml_load_failed treated as retryable — same as the blind retry row.
+  - `[medium]` `[patch]` (edge) NLI truncation past 512 tokens — same root cause as the blind truncation row; documented.
+  - `[false]` `[reject]` (edge) NaN/inf scores — softmax over finite logits is finite, and the sidecar's pydantic floats come from torch softmax.
+  - `[false]` `[reject]` (edge) lazy as string "false" — the sidecar's response model types it as bool.
+  - `[low]` `[reject]` (edge) A non-2-tuple pair raises ValueError — caller programming error, fails loudly.
+  - `[low]` `[reject]` (edge) Non-numeric env value error does not name the key — fails loudly at boot with the value shown.
+  - `[medium]` `[patch]` (edge) OCR bake not asserted — same as the blind bake row.
+  - `[false]` `[reject]` (verification-gap) Sidecar suite runs in no CI workflow — src/backend/tests/test_ml_sidecar_suite.py runs it in backend CI (subprocess), and the backend env has numpy, pillow and python-multipart.
+  - `[low]` `[patch]` (verification-gap) Empty-string ML_RESIDENT_BUDGET_MB untested — test added (code already handles it).
+  - `[low]` `[patch]` (verification-gap) numpy missing from requirements-dev so reader tests skip locally — numpy==2.4.6 added (in CI they already run).
+  - `[medium]` `[patch]` (verification-gap other) OCR bake output not asserted — same as the blind bake row.
+  - `[low]` `[reject]` (intent 1) Contract reading A implemented with D1 fakes — descriptive; matches the caller's "tiny fakes" instruction.
+  - `[maybe-false]` `[defer]` (intent 2) Declared costs not tied to real memory; NLI 600 < spike's 844 MB process peak — the spike figure is a whole process with torch; desktop RSS settles it. Grouped with the memory-limit deferral.
+  - `[false]` `[reject]` (intent 3) AC4 never reached at defaults — the story states the budget and the behaviour; the tests reach it with tighter costs as the spec records.
+  - `[maybe-false]` `[defer]` (intent 4) AC5 offline calls not exercised — desktop verification item; CI-5 wiring is E0-QA's. Deferred.
+  - `[maybe-false]` `[reject]` (intent 5) OCR output parity with vision_service not shown on a real image — would be settled on the desktop (listed); the reader copies the post-processing and the drift test pins vision_service.
+  - `[false]` `[reject]` (intent 6) Desktop checklist absent — it lives in this spec's Auto Run Result and the final report (the queue file is the orchestrator's).
+  - `[false]` `[reject]` (intent 7) D2 tiny real checkpoints not used — the caller asked for tiny fakes; the real loaders run in the CI image bake.
+  - `[false]` `[reject]` (intent 8) Memory-limit sum not checked — ML_MEM_LIMIT is unchanged and CI-14 runs on the PR.
+  - `[low]` `[reject]` (intent 9) imageio became an `ml` tag on the existing ImageIO row — correct: the checker is case-insensitive and a duplicate row would fail.
+  - `[low]` `[reject]` (blind) The prod comment staleness duplicate of the memory row — covered by the comment patch.
+  - `[low]` `[reject]` (edge) OCR route 500 path untested — same as the blind missing-tests row.
+  - `[low]` `[reject]` (blind) Fake cost constants not drift-tested — status fake values are informational only.
+  - `[low]` `[reject]` (verification-gap) Backend 503 test uses a hand-built response — the sidecar side is tested in test_lazy through the wrapper.
+  - `[low]` `[reject]` (intent) Eviction tested only as logic with fakes — by instruction; desktop RSS before/after eviction is listed.
+  - `[low]` `[reject]` (edge) Whitespace-only env value — int(" ") raises loudly at boot.
+  - `[low]` `[reject]` (blind) 256-pair NLI request duration — bounded by MAX_NLI_PAIRS; timing deferred with the timeout row.
 
 ## Design Notes
 

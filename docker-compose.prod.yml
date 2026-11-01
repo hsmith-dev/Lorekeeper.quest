@@ -223,7 +223,8 @@ services:
       timeout: 5s
       retries: 5
       start_period: 180s
-    # Provisional ceiling: MiniLM + en_core_web_trf in one process; measured
+    # Provisional ceiling: MiniLM + en_core_web_trf resident in one process,
+    # plus the lazy NLI/OCR models under ML_RESIDENT_BUDGET_MB; measured
     # limits come with E0-Platform.7. Override with ML_MEM_LIMIT in .env.
     deploy:
       resources:

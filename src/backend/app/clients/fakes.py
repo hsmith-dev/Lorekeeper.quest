@@ -5,8 +5,9 @@ vector (seeded from its sha256), and NER is a handful of regex rules that
 return the same shape and ordering as the real sidecar (entities first,
 then ITEM / QUEST matches). NLI gives each pair a stable softmax seeded
 from its sha256; OCR returns the bytes' UTF-8 text (so a test can "scan" a
-known string) or "" for real image bytes. Inputs the sidecar would reject
-with a 422 raise ModelServiceError here too.
+known string) or "" for real image bytes. The fake mirrors the sidecar's
+size and emptiness limits only (raising ModelServiceError with 422 / 413),
+not image decoding: it accepts non-image bytes the sidecar would reject.
 """
 
 from __future__ import annotations

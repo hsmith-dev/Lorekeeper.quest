@@ -7,6 +7,8 @@
   POST /v1/ner     {text: str (<= 100k chars)} -> {ents: [{text, label, start, end}]}
   POST /v1/nli     {pairs: [{premise, hypothesis}] (<= 256, each side <= 4000 chars)}
                    -> {scores: [{entailment, neutral, contradiction}]}
+                   Each pair (premise + hypothesis) is silently truncated to the
+                   model's 512-token window, so send sentence-sized texts.
   POST /v1/ocr     multipart `file` (<= 10 MiB) -> {text}
 
 The resident models (embeddings, NER) load in the lifespan, before uvicorn

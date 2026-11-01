@@ -172,7 +172,11 @@ class MLClient:
             raise ModelServiceError("ml /v1/ner: malformed response") from exc
 
     async def nli(self, pairs: list[tuple[str, str]]) -> list[NliScores]:
-        """Scores in input order; batches of MAX_NLI_PAIRS per request."""
+        """Scores in input order; batches of MAX_NLI_PAIRS per request.
+
+        The sidecar accepts up to 4000 chars per side, but each pair (premise +
+        hypothesis) is silently truncated to the model's 512-token window, so
+        send sentence-sized texts."""
         pairs = [(str(p), str(h)) for p, h in pairs]
         scores: list[NliScores] = []
         for i in range(0, len(pairs), MAX_NLI_PAIRS):

@@ -170,7 +170,7 @@ class EasyOcrReader:
             raise InvalidImage("empty upload")
         try:
             image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        except (OSError, ValueError, SyntaxError, Image.DecompressionBombError) as exc:
+        except (OSError, EOFError, ValueError, SyntaxError, Image.DecompressionBombError) as exc:
             # UnidentifiedImageError and truncated files are OSErrors.
             raise InvalidImage(f"not a decodable image: {type(exc).__name__}") from exc
         results = self._reader.readtext(np.array(image), detail=0, paragraph=True)

@@ -140,6 +140,9 @@ def main() -> int:
 
     text = EasyOcrReader(str(ocr_dir)).read(_text_png(OCR_CHECK_TEXT))
     print(f"OCR of a rendered {OCR_CHECK_TEXT!r}: {text!r}")
+    if not text.strip():
+        print("OCR read no text from the rendered check image", file=sys.stderr)
+        return 1
 
     print(f"baked {EMBED_MODEL_REPO}@{EMBED_MODEL_REVISION} into {embed_dir}; "
           f"{NLI_MODEL_REPO}@{NLI_MODEL_REVISION} into {nli_dir}; EasyOCR en into {ocr_dir}; "
