@@ -2,9 +2,9 @@
 # table). Run from src/backend:  lint-imports
 # CI: .github/workflows/gates.yml (static job, "AD-1 import contracts").
 #
-# Packages the spine adds later (access, hooks, jobs) join these contracts in
-# the PR that creates them: a contract cannot name a package that does not
-# exist yet.
+# app.access joined these contracts in E0-Access.2. Packages the spine adds
+# later (hooks, jobs) join them in the PR that creates them: a contract
+# cannot name a package that does not exist yet.
 #
 # Exceptions go in a contract's ignore_imports, each under a "# ratchet:" line
 # saying why it is there and which story removes it. The list only shrinks:
@@ -15,15 +15,17 @@
 root_package = app
 include_external_packages = True
 
-# Transport > services > schemas > persistence > cross-cutting > pure domain.
+# Transport > services > access > schemas > persistence > cross-cutting > pure
+# domain. app.access (AD-13) imports schemas, db, core and domain only.
 # A higher layer may import a lower one, never the reverse (direct or
 # indirect). app.clients sits beside services/db and has its own contract.
 [importlinter:contract:layers]
-name = AD-1 layers: api > services > schemas > db > core > domain
+name = AD-1 layers: api > services > access > schemas > db > core > domain
 type = layers
 layers =
     app.api
     app.services
+    app.access
     app.schemas
     app.db
     app.core
@@ -38,6 +40,7 @@ source_modules =
 forbidden_modules =
     app.api
     app.services
+    app.access
     app.schemas
     app.db
     app.core
@@ -53,16 +56,18 @@ source_modules =
 forbidden_modules =
     app.api
     app.services
+    app.access
     app.schemas
     app.db
     app.main
 
 # Only services (and transport above them) use the model clients; the layers
-# below services never reach a sidecar.
+# below services (app.access included) never reach a sidecar.
 [importlinter:contract:clients_callers]
 name = AD-1 only services and above import app.clients
 type = forbidden
 source_modules =
+    app.access
     app.schemas
     app.db
     app.core
@@ -81,6 +86,7 @@ source_modules =
     app.api
     app.clients
     app.services
+    app.access
     app.schemas
     app.db
     app.core
