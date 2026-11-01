@@ -62,6 +62,10 @@ CAMPAIGN_EVENT_WINDOW_S: float = 30
 # cancellable at any point; this only bounds a single read).
 LISTEN_READ_S: float = 1
 CLOSE_TIMEOUT_S: float = 2
+# A trail re-checks a key that outlived its sleep for at most this long a
+# remainder, this many times (timer and PTTL rounding), before giving up.
+TRAIL_SETTLE_MS: int = 50
+TRAIL_SETTLE_STEPS: int = 5
 # Throttle keys in Valkey (no pub/sub: keys only).
 THROTTLE_PREFIX = "pubsub_throttle"
 
@@ -168,6 +172,15 @@ async def _run_trail(key: str, trail: _Trail) -> None:
             ttl_ms = await asyncio.wait_for(client.pttl(key), PUBLISH_TIMEOUT_S)
             if ttl_ms is not None and ttl_ms > 0:
                 await asyncio.sleep(ttl_ms / 1000)
+            # PTTL is whole milliseconds and a sleep is not exact: the key can
+            # outlive the sleep by a little. Wait out that remainder (a short
+            # TTL, the same window ending), never a new window another
+            # process took (a TTL near the full window).
+            for _ in range(TRAIL_SETTLE_STEPS):
+                ttl_ms = await asyncio.wait_for(client.pttl(key), PUBLISH_TIMEOUT_S)
+                if ttl_ms is None or ttl_ms <= 0 or ttl_ms > TRAIL_SETTLE_MS:
+                    break
+                await asyncio.sleep(ttl_ms / 1000 + 0.001)
             if not await _acquire(client, key, trail.window_s):
                 return  # another process's newer publish holds the window
         except asyncio.CancelledError:
