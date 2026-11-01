@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 10-31-2026 23:30
-last_updated: 11-01-2026 01:27
+last_updated: 11-01-2026 01:33
 project: Lorekeeper.quest
 project_key: NOKEY
 tracking_system: file-system
@@ -152,8 +152,8 @@ development_status:
   8-9-shortcut-registry-help-overlay-and-touch-target-audit: backlog
   epic-8-retrospective: optional
 
-  epic-9: backlog  # E0-WorldCore
-  9-1-entity-type-registry-and-closed-set-enums: backlog
+  epic-9: in-progress  # E0-WorldCore
+  9-1-entity-type-registry-and-closed-set-enums: done
   9-2-f3-world-migration-with-the-legacy-npc-quest-copy: backlog
   9-3-apply_change-history-and-revert: backlog
   9-4-name-matching-with-normalize_name-and-match_names: backlog
