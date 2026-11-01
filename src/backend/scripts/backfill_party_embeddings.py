@@ -190,7 +190,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     result = asyncio.run(run(args))
     print(result.summary())
-    return 0
+    return 1 if result.failed else 0  # failed rows stay NULL; a rerun retries them
 
 
 if __name__ == "__main__":

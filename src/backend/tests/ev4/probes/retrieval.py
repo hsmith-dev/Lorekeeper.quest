@@ -143,7 +143,8 @@ async def probe_journal_search(ev4, actor):
     a = ev4.a.campaign_id
     with fake_embeddings():
         await index_seeded(ev4)
-        urls = [f"/api/journals/?campaign_id={a}&search=innkeeper", "/api/journals/?search=innkeeper"]
+        urls = [f"/api/journals/?campaign_id={a}&search=innkeeper", "/api/journals/?search=innkeeper",
+                f"/api/journals/?campaign_id={a}", "/api/journals/"]
         for url in urls:
             assert_no_canary(actor, await actor.get(url))
         if actor.user_id is None:
@@ -224,9 +225,11 @@ async def probe_reindex(ev4, actor):
     search = f"/api/journals/?campaign_id={a}&search=innkeeper"
     with fake_embeddings():
         await index_seeded(ev4)
-        assert_no_canary(actor, await actor.post(url))
+        r = await actor.post(url)
+        assert_no_canary(actor, r)
         if actor.user_id is None:
             return
+        assert r.status_code == 404, r.text  # reindex is GM only (its count covers hidden rows)
         gm = await ev4.actor("gm_owner")
 
         async def mutate():

@@ -397,6 +397,20 @@ async def test_journal_search_route(db, world, client):
     assert "shorthand" not in body["items"][0] and "tags" in body["items"][0]
     assert "SECRETWORD" not in r.text
 
+    # No search: the Player's list is filtered and Party-shaped too.
+    private_q = await add_entry(db, world.a, world.q, "Q's own note.", kind="player", visibility="private")
+    own_p = await add_entry(db, world.a, world.p, "P's own note.", kind="player", visibility="private")
+    await db.commit()
+    r = await client.get(f"/api/journals/?campaign_id={world.a}", headers=bearer(world.p))
+    assert r.status_code == 200, r.text
+    body = r.json()
+    listed = {i["id"] for i in body["items"]}
+    assert listed == {str(seen.id), str(hidden.id), str(own_p.id)} and body["total"] == 3
+    assert str(private_q.id) not in listed
+    assert all("shorthand" not in i for i in body["items"]) and "SECRETWORD" not in r.text
+    r = await client.get(f"/api/journals/?campaign_id={world.a}", headers=bearer(world.owner))
+    assert r.json()["total"] == 5 and all("shorthand" in i for i in r.json()["items"])
+
     r = await client.get(url, headers=bearer(world.owner))
     body = r.json()
     assert str(seen.id) in {i["id"] for i in body["items"]} and str(hidden.id) in {i["id"] for i in body["items"]}
@@ -489,7 +503,55 @@ async def test_chat_without_campaign_uses_own_gm_entries(db, world, client):
 
 WORDS = ("lantern", "Zorblax", "mill", "dragon", "Quillon", "river", "goblin", "tower")
 words = st.sampled_from(WORDS)
-row_spec = st.fixed_dictionaries({
+
+
+async def test_chat_canon_sources_are_gm_only(db, world, client):
+    from app.db.models.source import SourceChunk, SourceDocument
+
+    message = "Where is the phylactery hidden?"
+    doc = SourceDocument(user_id=world.owner.id, campaign_id=world.a, title="CANONTITLE", filename="c.md",
+                         visibility="gm")
+    db.add(doc)
+    await db.flush()
+    # The chunk's vector is the query's own: distance 0, well inside the gate.
+    db.add(SourceChunk(source_document_id=doc.id, user_id=world.owner.id, campaign_id=world.a, chunk_index=0,
+                       content="CANONCHUNK the phylactery is in the cellar", embedding=fake_vector(message)))
+    await _fake_llm_for(db, world.owner, world.p)
+    body = {"message": message, "campaign_id": str(world.a)}
+
+    with llm_provider.capture() as cap:
+        r = await client.post("/api/chat/", headers=bearer(world.p), json=body)
+    assert r.status_code == 200, r.text
+    assert r.json()["canon_sources"] == []
+    prompt = json.dumps([c.messages for c in cap.calls])
+    assert "CANONCHUNK" not in prompt and "CANONTITLE" not in prompt and "CANON" not in r.text
+
+    with llm_provider.capture() as cap:
+        r = await client.post("/api/chat/", headers=bearer(world.owner), json=body)
+    assert r.status_code == 200, r.text
+    assert r.json()["canon_sources"] == ["CANONTITLE"]
+    prompt = json.dumps([c.messages for c in cap.calls])
+    assert "CANONCHUNK" in prompt and "CANONTITLE" in prompt
+
+
+async def test_source_documents_provider_ignores_journal_options(db, world):
+    gm = await world.ctx(db, "owner")
+    found = await retrieve_sources(db, "anything", ctx=gm, entry_ids=set(), narrative_only=True)
+    assert found[SOURCE_DOCUMENTS] == (None, []) and found["journal"] == []
+
+
+async def test_journal_providers_filter_kind_before_the_limit(db, world):
+    gm_entries = [await add_entry(db, world.a, world.owner, f"Zorblax lantern {i}.") for i in range(4)]
+    player = await add_entry(db, world.a, world.p, "Zorblax lantern, the Player's.", kind="player")
+    gm = await world.ctx(db, "owner")
+    found = await retrieve_sources(db, "Find Zorblax", ctx=gm, kinds=[SourceKind.PLAYER_JOURNAL], limit=1)
+    used = [r.entry.id for r in found["player_journal"] if r.used]
+    assert used == [player.id]  # not crowded out of the top-1 by the GM entries
+    assert all(r.entry.kind == "player" for r in found["player_journal"])
+    assert len(gm_entries) == 4
+
+
+row_spec =st.fixed_dictionaries({
     "shorthand": st.lists(words, min_size=1, max_size=3),
     "narrative": st.lists(words, min_size=1, max_size=4),
     "visibility": st.sampled_from(("party", "gm", "private")),

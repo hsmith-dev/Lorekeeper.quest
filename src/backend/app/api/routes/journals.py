@@ -26,7 +26,7 @@ from app.schemas.journal import (
     SessionSummaryResponse,
 )
 from app.schemas.tag import TagAttachRequest, TagResponse, TagCategoryRef
-from app.access import GM, ctx_for, role_map, visible_clause
+from app.access import GM, NotFound, ctx_for, not_found, role_map, visible_clause
 from app.api.deps import get_current_user, get_user_llm_config, get_campaign_with_access, accessible_campaign_ids
 from app.services.journal_service import create_journal_entry, generate_draft_narrative
 from app.services.dedup_service import check_hash
@@ -112,7 +112,7 @@ async def list_journals(
     Narrative). In a Campaign where they are not, only entries visible to
     them are listed and `search` uses `party_tsv` (Narrative only), so a
     Shorthand-only word never changes what they find or its order
-    (E0-Access.7). A search that covers any non-GM Campaign returns Party
+    (E0-Access.7). A list that covers any non-GM Campaign returns Party
     items (no Shorthand)."""
     if campaign_id:
         ctxs = [await ctx_for(db, user.id, campaign_id)]
@@ -121,7 +121,12 @@ async def list_journals(
         # see (owned or joined), not just entries they personally authored —
         # a collaborator's entries are as much "yours to read" as your own.
         roles = await role_map(db, user)
-        ctxs = [await ctx_for(db, user.id, cid) for cid in roles]
+        ctxs = []
+        for cid in roles:
+            try:
+                ctxs.append(await ctx_for(db, user.id, cid))
+            except NotFound:
+                continue  # membership revoked mid-request: that Campaign drops out
     gm_ids = [c.campaign_id for c in ctxs if c.role == GM]
     party_ctxs = [c for c in ctxs if c.role != GM]
 
@@ -149,10 +154,11 @@ async def list_journals(
             )
         else:
             rank = func.ts_rank(JournalEntry.narrative_tsv, tsq)
-        # Party searches break ties by row, so a hidden row can never
-        # shuffle equal-ranked visible ones.
-        query = query.order_by(rank.desc(), JournalEntry.created_at.desc(), JournalEntry.id) if party_ctxs \
-            else query.order_by(rank.desc())
+        # Ties break by row, so a hidden row can never shuffle equal-ranked
+        # visible ones.
+        query = query.order_by(rank.desc(), JournalEntry.created_at.desc(), JournalEntry.id)
+    else:
+        query = query.order_by(JournalEntry.created_at.desc(), JournalEntry.id)
     if tag_id:
         from app.db.models.tag import JournalTag
         query = query.join(JournalTag).where(JournalTag.tag_id == tag_id)
@@ -164,7 +170,7 @@ async def list_journals(
     result = await db.execute(query)
     items = result.scalars().all()
 
-    if search and party_ctxs:
+    if party_ctxs:
         return JournalListPartyResponse(items=items, total=total, page=page, limit=limit)
     return JournalListResponse(items=items, total=total, page=page, limit=limit)
 
@@ -341,8 +347,11 @@ async def reindex_journal_embeddings(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """Regenerate vector embeddings for all journal entries in a campaign."""
-    await get_campaign_with_access(db, campaign_id, user)
+    """Regenerate vector embeddings for all journal entries in a campaign.
+    GM only: the count covers every row, hidden ones included."""
+    ctx = await ctx_for(db, user.id, campaign_id)
+    if ctx.role != GM:
+        not_found()
     entries_result = await db.execute(
         select(JournalEntry).where(JournalEntry.campaign_id == campaign_id)
     )

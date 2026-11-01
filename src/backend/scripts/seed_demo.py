@@ -355,11 +355,16 @@ async def seed_campaign(
                 {"doc": doc, "id": str(entry.id)},
             )
             result.created["entries"] += 1
-        elif entry.embedding is None and embedder is not None:
-            entry.embedding = _checked(embedder(doc))
-            result.embedded += 1
-        if entry.party_embedding is None and embedder is not None:
-            entry.party_embedding = _checked(embedder(entry.narrative))
+        else:
+            # `embedded` counts entries that got any vector this run, once each.
+            filled = False
+            if entry.embedding is None and embedder is not None:
+                entry.embedding = _checked(embedder(doc))
+                filled = True
+            if entry.party_embedding is None and embedder is not None:
+                entry.party_embedding = _checked(embedder(entry.narrative))
+                filled = True
+            result.embedded += int(filled)
         # Party search fields (E0-Access.7): the Narrative alone, never the Shorthand.
         await session.execute(
             text("UPDATE journal_entries SET party_tsv = to_tsvector('english', narrative) "

@@ -102,11 +102,30 @@ async def hybrid_search_journal(
     `entry_ids` (the NPC Knowledge contract) restricts candidates to those
     ids after visibility; an empty set means no candidates. Both
     `entry_ids` and `narrative_only` can only narrow."""
+    return await _ctx_search(db, query_text, ctx, limit=limit, max_distance=max_distance, entry_ids=entry_ids,
+                             narrative_only=narrative_only)
+
+
+async def _ctx_search(
+    db: AsyncSession,
+    query_text: str,
+    ctx: CampaignContext,
+    *,
+    limit: int = 3,
+    max_distance: float = RAG_RELEVANCE_MAX_DISTANCE,
+    entry_ids: Iterable[uuid.UUID] | None = None,
+    narrative_only: bool = False,
+    kind: EntryKind | None = None,
+) -> list[RetrievedEntry]:
+    """hybrid_search_journal, optionally restricted to one entry `kind` in
+    SQL (before fusion and the top-`limit` cut)."""
     party = narrative_only or ctx.role != GM
     base_filter = and_(JournalEntry.campaign_id == ctx.campaign_id, visible_clause(JournalEntry, ctx))
     if entry_ids is not None:
         ids = list(entry_ids)
         base_filter = and_(base_filter, JournalEntry.id.in_(ids) if ids else false())
+    if kind is not None:
+        base_filter = and_(base_filter, JournalEntry.kind == kind.value)
     return await _search(db, query_text, base_filter, party=party, limit=limit, max_distance=max_distance)
 
 
@@ -155,7 +174,7 @@ async def _search(
         result = await db.execute(
             select(JournalEntry, distance.label("dist"))
             .where(base_filter, vec_col.isnot(None))
-            .order_by(distance)
+            .order_by(distance, JournalEntry.id)  # id: ties never depend on heap order
             .limit(_CANDIDATE_POOL)
         )
         for rank, (entry, dist) in enumerate(result.all(), start=1):
@@ -199,7 +218,7 @@ async def _search(
         rows = await db.execute(
             select(JournalEntry, *[expr.label(f"m{i}") for i, (_, expr) in enumerate(match_cases)])
             .where(base_filter, total_expr > 0)
-            .order_by(total_expr.desc())
+            .order_by(total_expr.desc(), JournalEntry.id)
             .limit(_CANDIDATE_POOL)
         )
         scored: list[tuple[JournalEntry, int, bool]] = []
@@ -231,7 +250,7 @@ async def _search(
             # unlock the gate.
             strong = matched_proper or (matched >= 3 and matched / max(len(content), 1) >= 0.75)
             scored.append((entry, matched, strong))
-        scored.sort(key=lambda t: t[1], reverse=True)
+        scored.sort(key=lambda t: t[1], reverse=True)  # stable: ties keep the SQL (id) order
         for rank, (entry, _matched, strong) in enumerate(scored, start=1):
             lexical_hits[entry.id] = (entry, rank)
             if strong:
@@ -351,8 +370,7 @@ async def retrieve_sources(
 
 async def _journal_kind(db: AsyncSession, query_text: str, ctx: CampaignContext, kind: EntryKind,
                         **options: Any) -> list[RetrievedEntry]:
-    results = await hybrid_search_journal(db, query_text, ctx=ctx, **options)
-    return [r for r in results if r.entry.kind == kind]
+    return await _ctx_search(db, query_text, ctx, kind=kind, **options)
 
 
 async def journal_source(db: AsyncSession, query_text: str, *, ctx: CampaignContext,
@@ -373,7 +391,10 @@ async def source_documents_source(db: AsyncSession, query_text: str, *, ctx: Cam
     ctx; `(None, [])` for any other ctx while source documents are GM-only."""
     if ctx.role != GM:
         return None, []
-    return await source_service.retrieve_canon_context(db, query_text, ctx.user_id, ctx.campaign_id, **options)
+    # Only the options canon retrieval understands; journal ones (entry_ids,
+    # narrative_only) do not apply to source documents.
+    passed = {k: options[k] for k in ("limit", "max_distance") if k in options}
+    return await source_service.retrieve_canon_context(db, query_text, ctx.user_id, ctx.campaign_id, **passed)
 
 
 register_source(SourceKind.JOURNAL, journal_source)
