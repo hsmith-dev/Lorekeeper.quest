@@ -56,6 +56,37 @@ Also E0-Access.5: the deprecated helpers `get_campaign_with_access` and
 deprecated definition of `get_campaign_with_access` in app/api/deps.py
 stays); no baseline.
 
+E0-Access.9 part, the one Visibility writer (AD-13): outside app/access/,
+nothing writes a `visibility`, `field_visibility` or `visibility_floor`
+column. These fail:
+
+  * an assignment to the attribute (`x.visibility = ...`, `x.visibility_floor
+    += ...`, `a.visibility, b.visibility = ...`), an item assignment or
+    delete under `.field_visibility` (`x.field_visibility["k"] = ...`), or an
+    in-place mutation of it (`x.field_visibility.update(...)`), at any depth
+    (`x.field_visibility["a"]["b"] = ...`), and as a `for`, `with` or
+    comprehension target;
+  * `setattr(x, "visibility", ...)` (and the other two names);
+  * `.values(visibility=...)`, `.values({"visibility": ...})`,
+    `.values({Model.visibility: ...})`, `.values(**{...})`,
+    `.values(dict(visibility=...))`, and `set_=` of `on_conflict_do_update`
+    likewise. `insert().values(visibility=...)` is flagged on purpose: a
+    create sets its initial value through the constructor;
+  * a mapping with a Visibility key passed to any `.update(...)` (the legacy
+    `Query.update({...})`), or to `.execute(...)` / `bulk_update_mappings(...)`
+    as a dict or a list/tuple of dicts
+    (`db.execute(update(M), [{"id": i, "visibility": v}])`);
+  * raw SQL (`text(...)`, `exec_driver_sql(...)`) whose `UPDATE ... SET`
+    clause sets one of them.
+
+Constructor keywords (`Model(visibility=...)`) are a create's initial value,
+which `check_create` gates; they are not a change and pass. The one allowed
+site is VISIBILITY_WRITE_ALLOWED: `world_service.apply_change` may write
+`visibility_floor` (the merge, AD-10, Decision B3-D7), inside that
+module-level function only. It is a separate allowance from OWNER_INFRA, has
+no baseline, and scripts/test_check_scoped_queries.py freezes it. Use
+`app.access.set_visibility` instead.
+
 Run: python scripts/check_scoped_queries.py   (stdlib only; exit 0 clean, 1 on failure)
 """
 from __future__ import annotations
@@ -455,6 +486,227 @@ def check_ratchet(app_dir: Path = APP, baseline: Path = BASELINE) -> list[str]:
     return errors
 
 
+# ── E0-Access.9: the one Visibility writer ────────────────────────────────
+
+VISIBILITY_COLUMNS = frozenset({"visibility", "field_visibility", "visibility_floor"})
+FIELD_VISIBILITY = "field_visibility"
+# (path relative to the app package's parent, module-level function) -> the
+# columns it may write. Never widen it to make a gate pass: the frozen test
+# in scripts/test_check_scoped_queries.py must change with it. A registry
+# `writer` such as `apply_change` writes `visibility` / `field_visibility` for
+# set_visibility through its generic field update (`setattr(row, name, value)`
+# with a variable name), not a literal attribute write, so this allowlist
+# stays exactly as E0-Access.9 fixes it.
+VISIBILITY_WRITE_ALLOWED: dict[tuple[str, str], frozenset[str]] = {
+    ("app/services/world_service.py", "apply_change"): frozenset({"visibility_floor"}),
+}
+VISIBILITY_HINT = ("change Visibility only through `app.access.set_visibility` / `set_visibility_many` "
+                   "(the one writer, AD-13); the only other write is world_service.apply_change's merge "
+                   "`visibility_floor`")
+_MAPPING_SINKS = frozenset({"update", "execute", "bulk_update_mappings"})
+_MUTATING_METHODS = frozenset({"update", "setdefault", "pop", "popitem", "clear", "__setitem__", "__delitem__"})
+_SQL_SET_RE = re.compile(r"\bUPDATE\b.*?\bSET\b(?P<set>.*?)(?:\bWHERE\b|\bFROM\b|\bRETURNING\b|;|$)",
+                         re.IGNORECASE | re.DOTALL)
+_SQL_COLUMN_RE = re.compile(r"(?:^|[\s,(])\"?(field_visibility|visibility_floor|visibility)\"?\s*=(?!=)",
+                            re.IGNORECASE)
+
+
+def _key_column(node: ast.expr) -> str | None:
+    """The Visibility column a `.values()` key names: "visibility" or
+    Model.visibility."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value in VISIBILITY_COLUMNS:
+        return node.value
+    if isinstance(node, ast.Attribute) and node.attr in VISIBILITY_COLUMNS:
+        return node.attr
+    return None
+
+
+def sql_visibility_writes(text: str) -> list[str]:
+    """The Visibility columns an UPDATE ... SET in `text` assigns."""
+    out: list[str] = []
+    for m in _SQL_SET_RE.finditer(text):
+        for col in _SQL_COLUMN_RE.findall(m.group("set")):
+            if col.lower() not in out:
+                out.append(col.lower())
+    return out
+
+
+class _VisibilityVisitor(ast.NodeVisitor):
+    def __init__(self, rel: str) -> None:
+        self.rel = rel
+        self.functions: list[str] = []
+        self.classes: list[str] = []
+        self.found: list[Violation] = []
+
+    def _allowed(self, column: str) -> bool:
+        # Only inside the module-level allowed function itself (closures in
+        # it included); not a method or a nested def of the same name.
+        if not self.functions or self.classes:
+            return False
+        return column in VISIBILITY_WRITE_ALLOWED.get((self.rel, self.functions[0]), frozenset())
+
+    def _flag(self, node: ast.AST, column: str, how: str) -> None:
+        if not self._allowed(column):
+            self.found.append(Violation(self.rel, getattr(node, "lineno", 0) or 0,
+                                        f"writes `{column}` outside app/access/ ({how})", VISIBILITY_HINT))
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        self.classes.append(node.name)
+        self.generic_visit(node)
+        self.classes.pop()
+
+    def _visit_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        self.functions.append(node.name)
+        self.generic_visit(node)
+        self.functions.pop()
+
+    visit_FunctionDef = _visit_function
+    visit_AsyncFunctionDef = _visit_function
+
+    def _target(self, target: ast.expr, how: str) -> None:
+        if isinstance(target, (ast.Tuple, ast.List)):
+            for elt in target.elts:
+                self._target(elt, how)
+        elif isinstance(target, ast.Starred):
+            self._target(target.value, how)
+        elif isinstance(target, ast.Attribute) and target.attr in VISIBILITY_COLUMNS:
+            self._flag(target, target.attr, how)
+        elif isinstance(target, ast.Subscript):
+            base = target.value
+            while isinstance(base, ast.Subscript):  # x.field_visibility["a"]["b"]
+                base = base.value
+            if isinstance(base, ast.Attribute) and base.attr in VISIBILITY_COLUMNS:
+                self._flag(target, base.attr, f"item {how}")
+
+    def visit_For(self, node: ast.For | ast.AsyncFor) -> None:
+        self._target(node.target, "for target")
+        self.generic_visit(node)
+
+    visit_AsyncFor = visit_For
+
+    def visit_With(self, node: ast.With | ast.AsyncWith) -> None:
+        for item in node.items:
+            if item.optional_vars is not None:
+                self._target(item.optional_vars, "with target")
+        self.generic_visit(node)
+
+    visit_AsyncWith = visit_With
+
+    def visit_comprehension(self, node: ast.comprehension) -> None:
+        self._target(node.target, "comprehension target")
+        self.generic_visit(node)
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        for target in node.targets:
+            self._target(target, "assignment")
+        self.generic_visit(node)
+
+    def visit_AugAssign(self, node: ast.AugAssign) -> None:
+        self._target(node.target, "assignment")
+        self.generic_visit(node)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        if node.value is not None:
+            self._target(node.target, "assignment")
+        self.generic_visit(node)
+
+    def visit_Delete(self, node: ast.Delete) -> None:
+        for target in node.targets:
+            self._target(target, "delete")
+        self.generic_visit(node)
+
+    def _mapping(self, node: ast.expr, how: str, *, sequences: bool = False) -> None:
+        """Flag a Visibility key in a dict literal or `dict(...)` call (and,
+        with `sequences`, in each element of a list/tuple of them)."""
+        if isinstance(node, ast.Dict):
+            for key, value in zip(node.keys, node.values):
+                if key is None:  # {**other}
+                    self._mapping(value, how)
+                    continue
+                column = _key_column(key)
+                if column:
+                    self._flag(node, column, how)
+        elif isinstance(node, ast.Call) and _call_name(node.func) == "dict":
+            for kw in node.keywords:
+                if kw.arg in VISIBILITY_COLUMNS:
+                    self._flag(node, kw.arg, how)
+                elif kw.arg is None:
+                    self._mapping(kw.value, how)
+            for arg in node.args:
+                self._mapping(arg, how, sequences=True)
+        elif sequences and isinstance(node, (ast.List, ast.Tuple)):
+            for elt in node.elts:
+                self._mapping(elt, how)
+
+    def visit_Call(self, node: ast.Call) -> None:
+        func = node.func
+        name = _call_name(func)
+        if (isinstance(func, ast.Name) and func.id == "setattr" and len(node.args) >= 2
+                and isinstance(node.args[1], ast.Constant) and node.args[1].value in VISIBILITY_COLUMNS):
+            self._flag(node, node.args[1].value, "setattr()")
+        elif name == "values" and isinstance(func, ast.Attribute):
+            for kw in node.keywords:
+                if kw.arg in VISIBILITY_COLUMNS:
+                    self._flag(node, kw.arg, ".values()")
+                elif kw.arg is None:  # .values(**{...})
+                    self._mapping(kw.value, ".values()")
+            for arg in node.args:
+                self._mapping(arg, ".values()", sequences=True)
+        elif (name in _MUTATING_METHODS and isinstance(func, ast.Attribute)
+              and isinstance(func.value, ast.Attribute) and func.value.attr == FIELD_VISIBILITY):
+            self._flag(node, FIELD_VISIBILITY, f".{name}()")
+        elif name in RAW_SQL_NAMES:
+            text = " ".join(s.value for arg in node.args for s in ast.walk(arg)
+                            if isinstance(s, ast.Constant) and isinstance(s.value, str))
+            for column in sql_visibility_writes(text):
+                self._flag(node, column, "raw SQL UPDATE ... SET")
+        # `.execute(...)` only with an UPDATE statement (`execute(update(M), [{...}])`): a read's bind
+        # parameters (`execute(text("... WHERE visibility = :visibility"), {"visibility": v})`) are not writes.
+        is_update_execute = (name != "execute" or (bool(node.args) and isinstance(node.args[0], ast.Call)
+                                                   and _call_name(node.args[0].func) == "update"))
+        if name in _MAPPING_SINKS and is_update_execute and not (
+                isinstance(func, ast.Attribute) and isinstance(func.value, ast.Attribute)
+                and func.value.attr == FIELD_VISIBILITY):
+            for arg in node.args:
+                self._mapping(arg, f"{name}()", sequences=True)
+            for kw in node.keywords:
+                self._mapping(kw.value, f"{name}()", sequences=True)
+        if name == "on_conflict_do_update":
+            for kw in node.keywords:
+                if kw.arg == "set_":
+                    self._mapping(kw.value, "on_conflict_do_update(set_=)")
+                    if isinstance(kw.value, ast.Call) and _call_name(kw.value.func) == "dict":
+                        for inner in kw.value.keywords:
+                            if inner.arg in VISIBILITY_COLUMNS:
+                                self._flag(node, inner.arg, "on_conflict_do_update(set_=)")
+        self.generic_visit(node)
+
+
+def check_visibility_source(text: str, rel: str) -> list[Violation]:
+    """Every Visibility write in one module's source (app/access/ is exempt)."""
+    if rel.startswith(ACCESS_PREFIX):
+        return []
+    try:
+        tree = ast.parse(text, filename=rel)
+    except SyntaxError:
+        return []  # check_source reports it
+    visitor = _VisibilityVisitor(rel)
+    visitor.visit(tree)
+    return visitor.found
+
+
+def check_visibility_writes(app_dir: Path = APP) -> list[Violation]:
+    """Scan every .py file under `app_dir` for Visibility writes outside app/access/."""
+    if not app_dir.is_dir():
+        return [Violation(str(app_dir), 0, "is not a directory", VISIBILITY_HINT)]
+    base = app_dir.parent
+    out: list[Violation] = []
+    for path in sorted(app_dir.rglob("*.py")):
+        rel = path.relative_to(base).as_posix()
+        out.extend(check_visibility_source(path.read_text(encoding="utf-8"), rel))
+    return out
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--app", type=Path, default=APP, help="the app package directory (default: src/backend/app)")
@@ -462,6 +714,7 @@ def main(argv: list[str] | None = None) -> int:
                         help="the scoped-query baseline (default: scripts/scoped_queries_baseline.txt)")
     args = parser.parse_args(argv)
     problems = [str(v) for v in check(args.app)] + check_ratchet(args.app, args.baseline)
+    problems += [str(v) for v in check_visibility_writes(args.app)]
     if args.app == APP:  # the cross-check reads the real table-owner map
         problems += check_owner_infra(args.app)
     for p in problems:
@@ -471,7 +724,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     print("check_scoped_queries: ok (as_system used only at its allowed sites; no read_only= outside app/access/; "
           "no deprecated access helpers; scoped-query sites within the baseline; OWNER_INFRA "
-          "matches the table-owner map)")
+          "matches the table-owner map; no Visibility write outside app/access/ but the allowed merge floor)")
     return 0
 
 

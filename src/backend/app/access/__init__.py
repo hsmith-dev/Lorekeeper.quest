@@ -13,7 +13,11 @@ Share Links (`share_ctx`, `resolve_share_token`), `ctx_for_request`,
 `role_ctx` and the `Vary` middleware. E0-Access.5 adds `role_map_for_request`
 (cross-Campaign lists honour the preview header). E0-Access.8 adds citations
 (`register_resolver`, `visible_refs`, `resolve_sources`, `message_refs`) and
-the chat projections (`project_chat`, `replay_history`).
+the chat projections (`project_chat`, `replay_history`). E0-Access.9 adds
+the one Visibility writer (`set_visibility`, `set_visibility_many`), its kind
+map (`register_visibility_kind`), the extension points
+(`register_stale_marker`, `register_visibility_listener`) and
+`mark_dependents_stale`.
 """
 from app.access.audience import (
     ALWAYS_GM_FIELDS, GM_AUDIENCE, MEMBERS, PUBLIC, AnyOf, Audience, AudienceLevel, covers, ctx_audience,
@@ -43,8 +47,23 @@ from app.access.sources import (
     field_visible, message_refs, register_resolver, registered_resolvers, resolve_sources, visible_refs,
 )
 from app.access.share import COLLABORATE, READ_ONLY, ctx_for_share, resolve_share_token, share_ctx
+from app.access.visibility import (
+    VisibilityError, VisibilityKind, mark_dependents_stale, register_stale_marker, register_visibility_kind,
+    register_visibility_listener, set_visibility, set_visibility_many, visibility_exception_handler,
+    visibility_kinds,
+)
 
 __all__ = [
+    "VisibilityError",
+    "VisibilityKind",
+    "mark_dependents_stale",
+    "register_stale_marker",
+    "register_visibility_kind",
+    "register_visibility_listener",
+    "set_visibility",
+    "set_visibility_many",
+    "visibility_exception_handler",
+    "visibility_kinds",
     "CHAT_DETAIL",
     "CHAT_META",
     "CHAT_REPLY",
