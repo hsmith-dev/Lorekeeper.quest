@@ -1,9 +1,35 @@
-"""Unified LLM provider — routes completions to KoboldCpp, OpenAI, Anthropic, or Gemini."""
+"""Unified LLM provider — routes completions to KoboldCpp, OpenAI, Anthropic, or Gemini.
 
+Platform-LLM calls (the operator's own Ollama/KoboldCpp, see
+uses_platform_llm) go through the priority gate in app/core/llm_gate.py and
+always name the one fixed local model (model_for), so Ollama never reloads
+between tasks. BYOK calls (any other provider, or kobold at the user's own
+URL) bypass the gate and keep their own model. Per-call `num_ctx`, `num_gpu`
+and `keep_alive` options are stripped for every provider: they would make
+Ollama reload the model.
+"""
+
+from collections.abc import AsyncIterator
+from contextlib import aclosing, asynccontextmanager
 from dataclasses import dataclass, field
 import httpx
 from fastapi import HTTPException
+from app.core import llm_gate
 from app.core.config import get_settings
+from app.core.llm_gate import GateClass, Slot
+
+# Tests swap in an httpx.MockTransport here; None = real network.
+_transport: httpx.AsyncBaseTransport | None = None
+
+# Options that change how Ollama loads the model. Any one of them differing
+# between calls forces a reload, so they are never sent per call.
+LOCAL_ONLY_OPTIONS = frozenset({"num_ctx", "num_gpu", "keep_alive"})
+
+
+def _client(timeout: float) -> httpx.AsyncClient:
+    if _transport is not None:
+        return httpx.AsyncClient(timeout=timeout, transport=_transport)
+    return httpx.AsyncClient(timeout=timeout)
 
 
 @dataclass
@@ -38,25 +64,109 @@ def is_hosted_default(cfg: LLMConfig) -> bool:
     return cfg.provider == default.provider and cfg.api_url == default.api_url
 
 
+def uses_platform_llm(cfg: LLMConfig) -> bool:
+    """True if cfg runs on the platform's own local LLM (provider kobold at
+    KOBOLD_URL, or with no URL, which defaults there): the calls the gate
+    orders and the fixed model applies to. Unlike is_hosted_default this
+    ignores a trailing "/" and treats an empty URL as the platform's."""
+    if cfg.provider != "kobold":
+        return False
+    if not cfg.api_url:
+        return True
+    return cfg.api_url.rstrip("/") == get_settings().kobold_url.rstrip("/")
+
+
+def model_for(task: str | None, cfg: LLMConfig) -> str | None:
+    """The model a call names. Platform LLM: settings.local_llm_model for
+    every task, so Ollama keeps one model resident. The one exception is a
+    `narrative` call on the "base" variant (the resolver sets cfg.model to
+    kobold_base_model): it names that model and accepts the reload. Any other
+    cfg.model (the default config always fills in kobold_model) is ignored.
+    BYOK: cfg.model, unchanged (None lets the provider branch pick its own
+    default)."""
+    if uses_platform_llm(cfg):
+        s = get_settings()
+        if task == "narrative" and cfg.model and cfg.model == s.kobold_base_model:
+            return s.kobold_base_model
+        return s.local_llm_model
+    return cfg.model
+
+
+def strip_local_options(options: dict | None) -> dict:
+    """Copy of options without num_ctx/num_gpu/keep_alive (LOCAL_ONLY_OPTIONS)."""
+    return {k: v for k, v in (options or {}).items() if k not in LOCAL_ONLY_OPTIONS}
+
+
+@asynccontextmanager
+async def gated(cfg: LLMConfig, gate_class: GateClass | str | None = None) -> AsyncIterator[None]:
+    """Hold a gate slot for the block when cfg is the platform LLM; a no-op
+    for BYOK (never touches Redis). Reentrant, so wrapping a block that also
+    calls complete_messages takes one slot, not two."""
+    if uses_platform_llm(cfg):
+        async with llm_gate.llm_slot(gate_class):
+            yield
+    else:
+        yield
+
+
+async def reserve_slot(cfg: LLMConfig, gate_class: GateClass | str | None = None) -> Slot:
+    """Acquire a slot up front, for SSE routes: call it before building the
+    StreamingResponse so LLMBusy is a normal 503, then run the stream inside
+    `with slot.held():` and `await slot.release()` in its finally. A no-op
+    Slot for BYOK."""
+    if not uses_platform_llm(cfg):
+        return Slot()
+    return await llm_gate.acquire(gate_class)
+
+
 async def complete_messages(
     messages: list[dict],
     config: LLMConfig | None = None,
     max_tokens: int | None = None,
     temperature: float | None = None,
     timeout: float = 120,
+    *,
+    task: str | None = None,
+    gate_class: GateClass | str | None = None,
+    options: dict | None = None,
 ) -> str:
-    """Send messages (OpenAI format) to configured provider and return completion text."""
+    """Send messages (OpenAI format) to configured provider and return completion text.
+
+    task: picks the model via model_for ("narrative" keeps the user's variant).
+    gate_class: priority for platform-LLM calls (default llm_gate.current_class).
+    options: extra OpenAI-compatible payload fields (e.g. top_p), minus the
+    model-reloading ones; ignored for anthropic/gemini. Raises errors.LLMBusy
+    if no gate slot frees up in time."""
     cfg = config or get_default_config()
     mt = max_tokens if max_tokens is not None else cfg.max_tokens
     temp = temperature if temperature is not None else cfg.temperature
+    opts = strip_local_options(options)
 
-    if cfg.provider in ("kobold", "openai", "custom"):
-        return await _openai_compat(messages, cfg, mt, temp, timeout)
-    if cfg.provider == "anthropic":
-        return await _anthropic(messages, cfg, mt, temp, timeout)
-    if cfg.provider == "gemini":
-        return await _gemini(messages, cfg, mt, temp, timeout)
-    return await _openai_compat(messages, cfg, mt, temp, timeout)
+    async with gated(cfg, gate_class):
+        if cfg.provider == "anthropic":
+            return await _anthropic(messages, cfg, mt, temp, timeout)
+        if cfg.provider == "gemini":
+            return await _gemini(messages, cfg, mt, temp, timeout)
+        return await _openai_compat(messages, cfg, mt, temp, timeout, task=task, options=opts)
+
+
+def _openai_compat_target(cfg: LLMConfig, task: str | None) -> tuple[str, str]:
+    """(base URL, model) for an OpenAI-compatible provider."""
+    if cfg.provider == "openai":
+        return "https://api.openai.com", cfg.model or "gpt-4o-mini"
+    if cfg.provider == "kobold":
+        # "koboldcpp" used to be a safe placeholder here because real
+        # KoboldCpp ignores the "model" field entirely. Ollama's OpenAI-compat
+        # endpoint (the actual backend behind KOBOLD_URL on this deployment —
+        # see config.py's kobold_model) does NOT ignore it: it 404s with
+        # "model 'koboldcpp' not found" if the field doesn't match a real
+        # model name. So a kobold config always names a real model: the fixed
+        # local model for the platform (model_for), else the configured
+        # default.
+        base = (cfg.api_url or get_settings().kobold_url).rstrip("/")
+        return base, model_for(task, cfg) or get_settings().kobold_model
+    base = (cfg.api_url or "http://localhost:5001").rstrip("/")
+    return base, cfg.model or "local-model"
 
 
 async def stream_messages(
@@ -65,6 +175,10 @@ async def stream_messages(
     max_tokens: int | None = None,
     temperature: float | None = None,
     timeout: float = 120,
+    *,
+    task: str | None = None,
+    gate_class: GateClass | str | None = None,
+    options: dict | None = None,
 ):
     """Async generator of completion-text deltas. True token streaming for
     every OpenAI-compatible provider (the self-hosted Ollama default, OpenAI,
@@ -72,30 +186,58 @@ async def stream_messages(
     reply as one chunk — the streaming chat endpoint stays correct for every
     provider, just progressively rendered only where the wire format is the
     one we speak. Raises the same 503 HTTPException as complete_messages on
-    failure (before the first chunk; mid-stream errors end the stream)."""
+    failure (before the first chunk; mid-stream errors end the stream).
+
+    task/gate_class/options as for complete_messages. For the platform LLM
+    the whole upstream stream runs inside one gate slot, released when the
+    stream ends or the generator is closed (client disconnect). SSE routes
+    should reserve_slot() first so a busy gate is a 503, not a broken stream."""
     cfg = config or get_default_config()
     if cfg.provider not in ("kobold", "openai", "custom"):
-        yield await complete_messages(messages, cfg, max_tokens, temperature, timeout)
+        yield await complete_messages(
+            messages, cfg, max_tokens, temperature, timeout,
+            task=task, gate_class=gate_class, options=options,
+        )
         return
+    # A plain reserve/release, not gated(): held() would set the _held
+    # contextvar inside this generator, leaking it into the consumer's
+    # context between yields. Reentrancy still holds: reserve_slot returns a
+    # no-op Slot when the caller already holds one.
+    slot = await reserve_slot(cfg, gate_class)
+    try:
+        # aclosing: on an early close the upstream HTTP stream is shut before
+        # the slot is released, not whenever the inner generator is collected.
+        async with aclosing(_stream_openai_compat(
+            messages, cfg, max_tokens, temperature, timeout,
+            task=task, options=strip_local_options(options),
+        )) as upstream:
+            async for delta in upstream:
+                yield delta
+    finally:
+        await slot.release()
 
+
+async def _stream_openai_compat(
+    messages: list[dict],
+    cfg: LLMConfig,
+    max_tokens: int | None,
+    temperature: float | None,
+    timeout: float,
+    *,
+    task: str | None,
+    options: dict,
+):
     mt = max_tokens if max_tokens is not None else cfg.max_tokens
     temp = temperature if temperature is not None else cfg.temperature
-
-    if cfg.provider == "openai":
-        base = "https://api.openai.com"
-        model = cfg.model or "gpt-4o-mini"
-    elif cfg.provider == "kobold":
-        base = (cfg.api_url or get_settings().kobold_url).rstrip("/")
-        model = cfg.model or get_settings().kobold_model
-    else:
-        base = (cfg.api_url or "http://localhost:5001").rstrip("/")
-        model = cfg.model or "local-model"
+    base, model = _openai_compat_target(cfg, task)
 
     headers: dict[str, str] = {}
     if cfg.api_key:
         headers["Authorization"] = f"Bearer {cfg.api_key}"
 
+    # Explicit arguments win over same-named options.
     payload = {
+        **options,
         "model": model,
         "messages": messages,
         "max_tokens": mt,
@@ -106,7 +248,7 @@ async def stream_messages(
     import json as _json
     got_any = False
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with _client(timeout) as client:
             async with client.stream("POST", f"{base}/v1/chat/completions", json=payload, headers=headers) as r:
                 r.raise_for_status()
                 async for line in r.aiter_lines():
@@ -138,40 +280,28 @@ async def _openai_compat(
     max_tokens: int,
     temperature: float,
     timeout: float,
+    *,
+    task: str | None = None,
+    options: dict | None = None,
 ) -> str:
-    if cfg.provider == "openai":
-        base = "https://api.openai.com"
-        model = cfg.model or "gpt-4o-mini"
-    elif cfg.provider == "kobold":
-        base = (cfg.api_url or get_settings().kobold_url).rstrip("/")
-        # "koboldcpp" used to be a safe placeholder here because real
-        # KoboldCpp ignores the "model" field entirely. Ollama's OpenAI-compat
-        # endpoint (the actual backend behind KOBOLD_URL on this deployment —
-        # see config.py's kobold_model) does NOT ignore it: it 404s with
-        # "model 'koboldcpp' not found" if the field doesn't match a real
-        # model name. Every caller that builds an LLMConfig(provider="kobold")
-        # without an explicit model (e.g. Settings' Test Connection / Evaluate
-        # routes when the user picked "Use Lorekeeper AI") was hitting this —
-        # fall back to the configured default model instead of the old
-        # KoboldCpp-only placeholder.
-        model = cfg.model or get_settings().kobold_model
-    else:
-        base = (cfg.api_url or "http://localhost:5001").rstrip("/")
-        model = cfg.model or "local-model"
+    base, model = _openai_compat_target(cfg, task)
 
     headers: dict[str, str] = {}
     if cfg.api_key:
         headers["Authorization"] = f"Bearer {cfg.api_key}"
 
+    # Explicit arguments win over same-named options.
     payload = {
+        **strip_local_options(options),
         "model": model,
         "messages": messages,
         "max_tokens": max_tokens,
         "temperature": temperature,
+        "stream": False,  # options must not turn this into an SSE response
     }
 
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with _client(timeout) as client:
             r = await client.post(f"{base}/v1/chat/completions", json=payload, headers=headers)
             r.raise_for_status()
             content = r.json()["choices"][0]["message"]["content"].strip()
@@ -221,7 +351,7 @@ async def _anthropic(
     }
 
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with _client(timeout) as client:
             r = await client.post("https://api.anthropic.com/v1/messages", json=payload, headers=headers)
             r.raise_for_status()
             content = r.json()["content"][0]["text"].strip()
@@ -274,7 +404,7 @@ async def _gemini(
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with _client(timeout) as client:
             # Header auth, not the ?key= query param — Google's own current
             # quickstart uses X-goog-api-key, and at least one real key 404'd
             # via the query param even against a model id confirmed to exist.
@@ -331,4 +461,8 @@ async def test_provider_connection(cfg: LLMConfig) -> str:
     # crashed with a bare `KeyError: 'parts'` instead of a real error
     # message. 128 leaves headroom for a few dozen thinking tokens plus the
     # one-word answer on every provider we support, not just Gemini.
-    return await complete_messages(messages, cfg, max_tokens=128, temperature=0.1, timeout=timeout)
+    # task="narrative": Test Connection checks the variant the user picked
+    # (Fine-Tuned/Base), not the fixed local model.
+    return await complete_messages(
+        messages, cfg, max_tokens=128, temperature=0.1, timeout=timeout, task="narrative"
+    )

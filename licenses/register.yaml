@@ -541,6 +541,7 @@ entries:
   - {name: "easyocr", kind: python, version: "1.7.2", license: "Apache-2.0", source_url: "https://pypi.org/project/easyocr/", editions: [agpl, commercial], images: [backend], notes: ""}
   - {name: "ecdsa", kind: python, version: "0.19.2", license: "MIT", source_url: "https://pypi.org/project/ecdsa/", editions: [agpl, commercial], images: [backend], notes: ""}
   - {name: "email-validator", kind: python, version: "2.3.0", license: "Unlicense", source_url: "https://pypi.org/project/email-validator/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "fakeredis", kind: python, version: "2.26.2", license: "BSD-3-Clause", source_url: "https://pypi.org/project/fakeredis/", editions: [agpl, commercial], notes: "dev/test only (requirements-dev.txt); not shipped"}
   - {name: "fastapi", kind: python, version: "0.115.0", license: "MIT", source_url: "https://pypi.org/project/fastapi/", editions: [agpl, commercial], images: [backend], notes: ""}
   - {name: "filelock", kind: python, version: "4.2.6", license: "MIT", source_url: "https://pypi.org/project/filelock/", editions: [agpl, commercial], images: [backend], notes: ""}
   - {name: "fonttools", kind: python, version: "4.68.0", license: "MIT", source_url: "https://pypi.org/project/fonttools/", editions: [agpl, commercial], images: [backend], notes: ""}
@@ -564,6 +565,7 @@ entries:
   - {name: "lazy-loader", kind: python, version: "0.6", license: "BSD-3-Clause", source_url: "https://pypi.org/project/lazy-loader/", editions: [agpl, commercial], images: [backend], notes: ""}
   - {name: "limits", kind: python, version: "5.8.0", license: "MIT", source_url: "https://pypi.org/project/limits/", editions: [agpl, commercial], images: [backend], notes: ""}
   - {name: "llvmlite", kind: python, version: "0.50.0", license: "BSD-2-Clause AND Apache-2.0 WITH LLVM-exception", source_url: "https://pypi.org/project/llvmlite/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "lupa", kind: python, version: "2.8", license: "MIT", source_url: "https://pypi.org/project/lupa/", editions: [agpl, commercial], notes: "dev/test only (requirements-dev.txt); not shipped"}
   - {name: "Mako", kind: python, version: "1.4.3", license: "MIT", source_url: "https://pypi.org/project/Mako/", editions: [agpl, commercial], images: [backend], notes: ""}
   - {name: "markdown-it-py", kind: python, version: "4.2.0", license: "MIT", source_url: "https://pypi.org/project/markdown-it-py/", editions: [agpl, commercial], images: [backend], notes: ""}
   - {name: "MarkupSafe", kind: python, version: "3.0.4", license: "BSD-3-Clause", source_url: "https://pypi.org/project/MarkupSafe/", editions: [agpl, commercial], images: [backend], notes: ""}
@@ -611,6 +613,7 @@ entries:
   - {name: "slowapi", kind: python, version: "0.1.9", license: "MIT", source_url: "https://pypi.org/project/slowapi/", editions: [agpl, commercial], images: [backend], notes: ""}
   - {name: "smart_open", kind: python, version: "7.7.1", license: "MIT", source_url: "https://pypi.org/project/smart_open/", editions: [agpl, commercial], images: [backend], notes: ""}
   - {name: "sniffio", kind: python, version: "1.3.1", license: "MIT OR Apache-2.0", source_url: "https://pypi.org/project/sniffio/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "sortedcontainers", kind: python, version: "2.4.0", license: "Apache-2.0", source_url: "https://pypi.org/project/sortedcontainers/", editions: [agpl, commercial], notes: "dev/test only (requirements-dev.txt); not shipped"}
   - {name: "spacy", kind: python, version: "3.7.6", license: "MIT", source_url: "https://pypi.org/project/spacy/", editions: [agpl, commercial], images: [backend], notes: ""}
   - {name: "spacy-legacy", kind: python, version: "3.0.12", license: "MIT", source_url: "https://pypi.org/project/spacy-legacy/", editions: [agpl, commercial], images: [backend], notes: ""}
   - {name: "spacy-loggers", kind: python, version: "1.0.5", license: "MIT", source_url: "https://pypi.org/project/spacy-loggers/", editions: [agpl, commercial], images: [backend], notes: ""}

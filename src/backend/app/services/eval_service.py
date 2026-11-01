@@ -77,7 +77,9 @@ async def run_evaluation(config: LLMConfig, sample_size: int) -> dict:
             {"role": "user", "content": f"Input: {record['input']}\nOutput:"},
         ]
         try:
-            generated = await complete_messages(messages, config, max_tokens=400, timeout=90)
+            # task="narrative": the validation set is narrative generation,
+            # and the Fine-Tuned/Base compare must keep each run's model.
+            generated = await complete_messages(messages, config, max_tokens=400, timeout=90, task="narrative")
             scores.append(_score(record["output"], generated))
         except Exception:
             errors += 1

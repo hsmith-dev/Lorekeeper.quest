@@ -1,4 +1,5 @@
 from pathlib import Path
+from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings
 from functools import lru_cache
 
@@ -56,6 +57,22 @@ class Settings(BaseSettings):
     # the capstone proposal's stretch goal, which previously only had the
     # fine-tuned model reachable anywhere in production.
     kobold_base_model: str = "lorekeeper-base"
+    # The one model every platform-LLM task uses (llm_provider.model_for), so
+    # Ollama keeps a single model resident and never reloads between tasks on
+    # the 16 GB box. Only `narrative` may differ (it honours the user's
+    # Fine-Tuned/Base pick). Empty = kobold_model (filled in below).
+    local_llm_model: str = ""
+    # How long a request waits for a local-LLM slot (app/core/llm_gate.py)
+    # before giving up with LLMBusy (503 llm_busy) instead of hanging.
+    llm_gate_wait_s: float = Field(60.0, ge=0)
+    # Concurrent local-LLM calls the gate admits. Matches Ollama's own
+    # OLLAMA_NUM_PARALLEL (1 on the Reference Box), so the gate decides the
+    # order and Ollama never queues behind our back.
+    llm_gate_capacity: int = Field(
+        1,
+        ge=1,
+        validation_alias=AliasChoices("LLM_GATE_CAPACITY", "OLLAMA_NUM_PARALLEL", "llm_gate_capacity"),
+    )
     # Where the admin model installer stages the ~4.4GB fine-tune GGUF while
     # it downloads it from Hugging Face and hands it to Ollama (see
     # ollama_service.install_finetuned_events). Unset = the system temp dir.
@@ -121,6 +138,22 @@ class Settings(BaseSettings):
     # this instance. Unset by default so admin routes 403 for everyone until
     # deliberately configured; case-insensitive since email addresses are.
     admin_email: str | None = None
+
+    @field_validator("llm_gate_capacity", mode="before")
+    @classmethod
+    def _auto_capacity_is_one(cls, v):
+        # OLLAMA_NUM_PARALLEL=0 is Ollama's "auto"; a shared .env with it must
+        # not stop the backend from starting. The gate stays conservative at 1.
+        if isinstance(v, (int, str)) and str(v).strip() == "0":
+            return 1
+        return v
+
+    @model_validator(mode="after")
+    def _default_local_llm_model(self) -> "Settings":
+        # Always a real model name, so callers never need their own fallback.
+        if not self.local_llm_model:
+            self.local_llm_model = self.kobold_model
+        return self
 
     class Config:
         env_file = str(_ROOT_ENV)

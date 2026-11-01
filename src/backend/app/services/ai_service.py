@@ -1,5 +1,6 @@
 import httpx
 from app.core.config import get_settings
+from app.services import llm_provider
 from app.services.llm_provider import LLMConfig, complete_messages
 
 settings = get_settings()
@@ -111,18 +112,23 @@ async def generate_narrative(
     # despite otherwise being OpenAI-compatible, so on failure fall through
     # to the generic chat-completions path below instead of raising. Same
     # reasoning as check_kobold_health's KoboldCpp-then-Ollama fallback.
-    if config is None or config.provider == "kobold":
-        try:
-            return await _generate_kobold_native(notes, genre, config, canon_context, shorthand_glossary, paragraph_limit)
-        except Exception:
-            pass
+    #
+    # Both attempts are one local-LLM use, so they share one gate slot
+    # (a no-op for BYOK; complete_messages' own acquire is reentrant).
+    async with llm_provider.gated(config or llm_provider.get_default_config()):
+        if config is None or config.provider == "kobold":
+            try:
+                return await _generate_kobold_native(notes, genre, config, canon_context, shorthand_glossary, paragraph_limit)
+            except Exception:
+                pass
 
-    return await complete_messages(
-        messages,
-        config,
-        max_tokens=settings.kobold_max_length,
-        timeout=settings.kobold_timeout_seconds,
-    )
+        return await complete_messages(
+            messages,
+            config,
+            max_tokens=settings.kobold_max_length,
+            timeout=settings.kobold_timeout_seconds,
+            task="narrative",
+        )
 
 
 async def _generate_kobold_native(
@@ -155,7 +161,8 @@ async def _generate_kobold_native(
         "rep_pen": 1.1,
     }
 
-    async with httpx.AsyncClient(timeout=settings.kobold_timeout_seconds) as client:
+    # llm_provider's client, so tests' MockTransport covers this path too.
+    async with llm_provider._client(settings.kobold_timeout_seconds) as client:
         for attempt in range(3):
             try:
                 r = await client.post(f"{base}/api/v1/generate", json=payload)
