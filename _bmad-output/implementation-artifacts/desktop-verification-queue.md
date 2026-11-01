@@ -120,3 +120,8 @@ Stories were merged on green GitHub CI while the desktop was offline (owner deci
 
 ## E0-Journal.1 — Hook dispatcher on after_commit (PR #63)
 - [ ] Real worker with a `job_finished` handler registered: handler runs before the work horse exits (no `hook drain timed out` in logs)
+
+## E0-Jobs.6 — pubsub + SSE (PR #65)
+- [ ] (after E0-Jobs.7/E0-Access.11 add the first stream route) Behind nginx: `curl -N -H "Authorization: Bearer <t>" https://<host>/api/<stream>` → ping within 15 s, events arrive immediately, `X-Accel-Buffering: no`
+- [ ] Keep a stream open ≥30 min through nginx — pings continue, no 504/60 s idle cut
+- [ ] After disconnects, `valkey-cli CLIENT LIST | grep -c "sub=[1-9]"` returns to baseline; demote/remove a member → their stream ends with `access_changed` within 2 s
