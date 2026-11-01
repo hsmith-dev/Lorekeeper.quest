@@ -19,6 +19,8 @@ on:
       - "scripts/test_check_licenses.py"
       - ".github/workflows/license-check.yml"
       - "licenses/**"
+      - "src/backend/Dockerfile*"
+      - "nginx/**"
   pull_request:
     paths:
       - "src/backend/requirements*.txt"
@@ -29,6 +31,13 @@ on:
       - "scripts/test_check_licenses.py"
       - ".github/workflows/license-check.yml"
       - "licenses/**"
+      - "src/backend/Dockerfile*"
+      - "nginx/**"
+  # Weekly: the shipped images float on their base tags (python:3.11-slim,
+  # nginx:1.27-alpine), so a base-image rebuild can add an OS package nobody
+  # registered without any change in this repo.
+  schedule:
+    - cron: "17 5 * * 1"
   workflow_dispatch:
 
 permissions:
@@ -200,9 +209,11 @@ jobs:
             root="$RUNNER_TEMP/rootfs-$IMAGE"
             mkdir -p "$root"
             cid=$(docker create "$TAG")
-            # Device nodes etc. cannot be recreated unprivileged; the package
-            # databases and docs are plain files.
-            docker export "$cid" | tar -x -C "$root" --no-same-owner 2>/dev/null || true
+            # Device nodes etc. cannot be recreated unprivileged, so tar errors
+            # are shown but not fatal; the package databases and docs are
+            # plain files, and the checker fails on a missing or empty one.
+            docker export "$cid" | tar -x -C "$root" --no-same-owner \
+              || echo "::warning::tar reported errors extracting the $IMAGE filesystem (see above)"
             docker rm "$cid" >/dev/null
           fi
           rc=0

@@ -2,7 +2,7 @@
 title: 'E0-QA.8 The licence check scans the Docker images we actually ship'
 type: 'feature'
 created: '2026-11-01'
-status: 'in-progress'
+status: 'in-review'
 baseline_revision: 'a099a75fe69cea03dd65f0175a153d96f1a4d0f2'
 review_loop_iteration: 0
 followup_review_recommended: false

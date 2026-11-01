@@ -584,6 +584,23 @@ def test_unregistered_dynamic_system_lib_resolves_to_the_allowlist(tmp_path, edi
     # ...but not when it is GPL, or a pip package of that name
     failures, _, _, _ = scan(reg, [("libglib2.0-0t64", "2.84", "GPL-3+")], edition, eco="apt")
     assert len(failures) == 1
+    failures, _, _, _ = scan(reg, [("libglib2.0-0t64", "2.84", "LGPL-2.1+")], edition, eco="python")
+    assert len(failures) == 1
+
+
+def test_absolute_doc_symlink_never_reads_the_host(tmp_path):
+    """An absolute link whose target also exists on the host must resolve inside ROOT."""
+    root = tmp_path / "rootfs"
+    host_dir = tmp_path / "host-doc"  # stands in for a host path the link would hit
+    host_dir.mkdir()
+    (host_dir / "copyright").write_text("see /usr/share/common-licenses/GPL-3\n")
+    (root / "var/lib/dpkg").mkdir(parents=True)
+    (root / "var/lib/dpkg/status").write_text("Package: pkg\nStatus: install ok installed\nVersion: 1\n")
+    (root / "usr/share/doc").mkdir(parents=True)
+    (root / str(host_dir).lstrip("/")).mkdir(parents=True)
+    (root / str(host_dir).lstrip("/") / "copyright").write_text("see /usr/share/common-licenses/Apache-2.0\n")
+    (root / "usr/share/doc/pkg").symlink_to(host_dir)  # absolute, and it exists on the host
+    assert cl.load_dpkg(root) == [("pkg", "1", "Apache-2.0")]
 
 
 def test_scanned_license_pin_classifies_the_reviewed_licence(tmp_path):
@@ -619,6 +636,9 @@ def test_pending_does_not_cover_the_cpu_backend_image(tmp_path, edition):
     reg = make_register(tmp_path, [])
     failures, _, _, _, _, pending = cl.check_register_scan(POLICY, reg, "python", CUDA, edition, "backend")
     assert pending == [] and sorted(f[0] for f in failures) == ["cuda-bindings", "nvidia-cublas-cu12"]
+    # reported with their real licence strings
+    assert sorted(f[2] for f in failures) == sorted(lic for _, _, lic in CUDA)
+    assert all("proprietary" in f[3] for f in failures)
 
 
 def test_pending_entries_need_tracking(tmp_path):
@@ -627,6 +647,29 @@ def test_pending_entries_need_tracking(tmp_path):
     path.write_text(text)
     with pytest.raises(SystemExit, match="tracking"):
         cl.Policy(path)
+
+
+@pytest.mark.parametrize("extra, msg", [
+    ('ecosystem = "pyhton"\npackage = "x"\ntracking = "t"\nreason = "r"\n', "ecosystem"),
+    ('ecosystem = "python"\npackage = "x"\ntracking = "t"\nreason = "r"\nimages = "ml-gpu"\n', "images"),
+    ('ecosystem = "python"\npackage = "x"\ntracking = "t"\nreason = "r"\nimages = []\n', "images"),
+])
+def test_pending_entries_are_validated(tmp_path, extra, msg):
+    path = tmp_path / "policy.toml"
+    path.write_text(cl.DEFAULT_POLICY.read_text() + "\n[[pending]]\n" + extra)
+    with pytest.raises(SystemExit, match=msg):
+        cl.Policy(path)
+
+
+def test_empty_package_database_is_an_error(tmp_path):
+    (tmp_path / "lib/apk/db").mkdir(parents=True)
+    (tmp_path / "lib/apk/db/installed").write_text("\n")
+    with pytest.raises(SystemExit, match="no packages"):
+        cl.load_os_packages(tmp_path)
+
+
+def test_cli_os_packages_needs_register(tmp_path):
+    assert run_cli("--os-packages", str(tmp_path)).returncode == 2
 
 
 def test_real_policy_lists_the_cuda_wheels_as_pending():

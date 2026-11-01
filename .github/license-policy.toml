@@ -145,7 +145,7 @@ os_aggregate_allowlist = [
   # envsubst, run by the nginx image's own entrypoint for config templates
   "^gettext-envsubst$",
   # LGPL / dual-licensed libraries that nginx and its modules load dynamically
-  # (geoip, xslt via libgcrypt, libcurl via libidn2); not linked by Lorekeeper
+  # (geoip; libgcrypt via libxslt; libidn2 via libcurl); not linked by Lorekeeper
   "^geoip$", "^libintl$", "^libgcrypt$", "^libgpg-error$", "^libidn2$", "^libunistring$",
   "^xz-libs$",
   # --- Debian (backend image: python:3.11-slim + build-essential + libpq-dev) ---

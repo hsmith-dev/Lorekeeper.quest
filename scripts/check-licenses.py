@@ -133,6 +133,12 @@ class Policy:
             missing = [f for f in ("ecosystem", "package", "tracking", "reason") if not pend.get(f)]
             if missing:
                 raise SystemExit(f"{path}: [[pending]] #{i + 1} is missing {missing}")
+            if pend["ecosystem"] not in KINDS:
+                raise SystemExit(f"{path}: [[pending]] #{i + 1} ecosystem must be one of {list(KINDS)}")
+            imgs = pend.get("images")
+            if imgs is not None and (not isinstance(imgs, list) or not imgs
+                                     or not all(isinstance(x, str) for x in imgs)):
+                raise SystemExit(f"{path}: [[pending]] #{i + 1} images must be a non-empty list of names")
             self.pending.append(pend)
         self.denied_packages = {
             eco: {norm_pkg(p) for p in pkgs}
@@ -306,7 +312,8 @@ def _under(root: Path, rel: str) -> Path:
     """`rel` inside the image filesystem at `root`, following absolute symlinks inside it."""
     path = root / rel.lstrip("/")
     for _ in range(10):
-        if path.exists() or not path.is_symlink():
+        # check is_symlink first: exists() would follow an absolute link onto the HOST
+        if not path.is_symlink():
             return path
         target = os.readlink(path)
         path = (root / target.lstrip("/")) if target.startswith("/") else path.parent / target
@@ -327,7 +334,8 @@ def load_dpkg(root: Path) -> list[tuple[str, str, str]] | None:
     out = []
     for st in parse_deb822(status):
         name = st.get("Package")
-        if not name or st.get("Status", "").split()[-1:] != ["installed"]:
+        # anything but not-installed / config-files has files on disk (incl. half-installed)
+        if not name or st.get("Status", "").split()[-1:] in (["not-installed"], ["config-files"]):
             continue
         doc = _under(root, f"/usr/share/doc/{name}")
         out.append((name, st.get("Version", "?"), debian_copyright_license(_read(doc / "copyright"))))
@@ -355,6 +363,9 @@ def load_os_packages(root: Path) -> list[tuple[str, list[tuple[str, str, str]]]]
     if not sources:
         raise SystemExit(f"--os-packages: no dpkg (var/lib/dpkg/status) or apk (lib/apk/db/installed) "
                          f"database under {root}")
+    if not any(deps for _, deps in sources):
+        raise SystemExit(f"--os-packages: the package database under {root} lists no packages "
+                         "(truncated export?)")
     return sources
 
 
@@ -802,6 +813,8 @@ def main() -> int:
     if args.register is None:
         if args.check_artifacts or args.emit_missing:
             ap.error("--check-artifacts and --emit-missing need --register")
+        if args.os_packages:
+            ap.error("--os-packages needs --register (the OS-package rules live in register mode)")
     else:
         if args.edition is None:
             args.edition = os.environ.get("LOREKEEPER_EDITION") or "commercial"

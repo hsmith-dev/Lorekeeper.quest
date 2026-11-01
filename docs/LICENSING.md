@@ -34,7 +34,11 @@ and scans it **from the inside**:
 | `nginx` | `nginx/Dockerfile` | its Alpine packages (the frontend bundle's npm set is the `frontend` job) |
 
 The checker, register and policy are mounted read-only into the container,
-never installed into the image. An image without Python (nginx) is exported to
+never installed into the image. Register mode needs PyYAML, and the backend
+image has it only as a runtime transitive dependency (registered as `PyYAML`).
+If that ever goes away, the in-image scan stops with "register mode needs
+pyyaml". The fix is then to scan the image's exported filesystem from the
+runner, as the nginx line does. An image without Python (nginx) is exported to
 the runner and its package database scanned from there. Adding an image (the
 planned `ml`, `stt` and `tts` sidecars) is one matrix line; the AGPL-only `tts`
 image gets `editions: "agpl"`. The job also runs weekly, because the images
@@ -48,7 +52,8 @@ Upstream images that compose only references and we run unmodified
 Reproduce locally:
 
 ```bash
-docker build -f src/backend/Dockerfile.prod -t lk-backend src/backend
+# CI scans linux/amd64; an arm64 build has a different package set
+docker build --platform linux/amd64 -f src/backend/Dockerfile.prod -t lk-backend src/backend
 docker run --rm --entrypoint python \
   -v "$PWD/scripts:/chk:ro" -v "$PWD/licenses:/lic:ro" -v "$PWD/.github:/pol:ro" \
   lk-backend /chk/check-licenses.py --policy /pol/license-policy.toml \
@@ -96,17 +101,29 @@ library that a new `apt-get install` pulls in fails until someone reviews it
 and adds it to the list in the same PR. The rule covers OS packages only, never
 a pip or npm package: those run inside Lorekeeper's own process.
 
+One caveat: the Python interpreter can itself load a few GPL-3 OS libraries
+into Lorekeeper's process. These are `libreadline8` (the `readline` module)
+and `libgdbm` (`dbm.gnu`). They come with the python:3.11-slim base, and
+Lorekeeper imports neither: gunicorn is non-interactive and there is no dbm
+usage. Their register notes record this. Code that starts importing
+`readline` or `dbm.gnu` needs a licence review first.
+
 Obligations that come with shipping these packages:
 
 - **Licence texts** ship inside the images (`/usr/share/doc/*/copyright` and
   `/usr/share/common-licenses` on Debian, `/usr/share/licenses` on Alpine). Do
   not strip them, for example with a `rm -rf /usr/share/doc` slimming step.
-- **Corresponding source** for the GPL packages comes from the distribution
+- **Corresponding source** for the GPL packages exists in the distribution
   archive at the exact version in the register (Debian: `apt-get source
   <pkg>=<version>` or snapshot.debian.org; Alpine: aports at the matching
-  release). If we distribute images ourselves (a registry), we must keep
-  offering that source for three years, by pointing at those archives or
-  mirroring them.
+  release). Today we publish Dockerfiles and users build the images
+  themselves, so we don't distribute these binaries. **If we ever distribute
+  built images** (a registry, a commercial download), pointing at someone
+  else's archive is not enough for commercial distribution: GPLv2 §3(c) is
+  for noncommercial distribution only. We must then ship the source alongside
+  the image, or give a written offer valid for three years (§3(a)/(b)), for
+  example by mirroring the source packages next to each published image tag.
+  Owner action before the first published image.
 
 Things to clean up later:
 
