@@ -2,10 +2,10 @@
 title: 'E0-Platform.4: `ml` lazy NLI and OCR under a resident-memory budget'
 type: 'feature'
 created: '2026-11-01'
-status: 'in-review'
+status: 'done'
 baseline_revision: '56a28028dbe46f881bb3e9f3bc72253051acf028'
 review_loop_iteration: 0
-followup_review_recommended: false
+followup_review_recommended: true
 context: []
 warnings: [oversized]
 deferred:
@@ -223,3 +223,61 @@ Do not install torch/transformers/easyocr on this Mac; real-model behaviour is v
 - `uv run --python 3.11 --with fastapi==0.115.0 --with httpx==0.27.2 --with python-multipart==0.0.12 --with pillow --with numpy --with pytest python -m pytest -q` in `src/services/ml`. Expected: pass.
 - `uv run --python 3.11 python -m py_compile` on the changed files. Expected: success.
 - GitHub CI on the draft PR. Expected: green, including `image-licenses (ml)`, which runs the real bake.
+
+## Auto Run Result
+
+Status: done
+
+**Summary:** The `ml` sidecar now has two lazily loaded models:
+- `POST /v1/nli` runs `cross-encoder/nli-deberta-v3-xsmall` at revision `a1508764…`. It scores in chunks of 32 and returns softmax `{entailment,neutral,contradiction}` in input order.
+- `POST /v1/ocr` runs EasyOCR "en" on a multipart `file` and returns `{text}`. Its post-processing is the same as `vision_service`.
+
+Both stay `not_loaded` until their first request. The budget sums each lazy model's declared cost (`ML_RESIDENT_BUDGET_MB`, default 2000; NLI 600 and OCR 900). When a load would go over, it evicts the least-recently-used idle models, only as many as needed. It never evicts a busy model. If eviction cannot make room, the request gets `503 {"detail":"ml budget exceeded","code":"ml_budget"}`. Evicted models are freed with `gc.collect()` and `malloc_trim(0)`.
+
+`/healthz` and the lifespan cover only the resident models. `/v1/status` adds `lazy`, `cost_mb`, `resident_budget_mb` and `lazy_resident_mb`. The client and fake gain `nli()` (batches of 256 pairs) and `ocr()`. Error messages carry the sidecar's `code`, and a 503 maps to `ModelServiceUnavailable`.
+
+The bake downloads and sha256-checks the NLI safetensors and both EasyOCR zips. It loads every model and fails the build unless NLI calls the spike's Mira pair a contradiction and OCR returns text. `ML_MEM_LIMIT` is unchanged.
+
+**Files changed:**
+- `src/services/ml/ml_service/budget.py` (new): the budget, `LazySlot`, `BudgetExceeded`, `ModelLoadFailed` and `release_memory`.
+- `src/services/ml/ml_service/{app,config,models}.py`: the routes, error handlers, constants, env settings, and the `TransformersNli` and `EasyOcrReader` models.
+- `src/services/ml/bake_models.py` and `Dockerfile`: the NLI and OCR bake. `torchvision==0.29.2+cpu` installs in the CPU-torch layer.
+- `src/services/ml/requirements.txt`: the lock grows to 87 packages, 13 more, identical on x86_64 and aarch64. `requirements-dev.txt` adds python-multipart, pillow and numpy.
+- `src/services/ml/tests/test_lazy.py` (new) plus `test_app.py` and `test_dockerfile.py`: the matrix rows, eviction, concurrency, load failure, OCR post-processing, and a check that the sha256 values match the register.
+- `src/backend/app/clients/{ml,fakes}.py` and `tests/test_ml_client.py`: `nli`, `ocr`, the status fields, error codes and the drift tests.
+- `licenses/register.yaml`: a new `nli-deberta-v3-xsmall` model row with its sha256. `ml` is added to 13 package rows and both EasyOCR model rows.
+- `docker-compose.prod.yml`: passes `ML_RESIDENT_BUDGET_MB` through and updates the comment. Limits are untouched.
+- `.env.example`: commented budget and cost settings.
+
+**Review:** 45 findings: high 0, medium 11, low 22, false 7, maybe-false 5.
+- Patched:
+  - Medium: the bake now asserts the OCR returns text, and NLI 512-token truncation is documented.
+  - Low: `EOFError` maps to a 422, the fake's docstring, numpy in the dev requirements, an empty-env test, stale notes and comments, and the cost settings documented.
+- Deferred: 5 items, listed in the frontmatter. They are the memory fit under 2.5g, the first-load time against the 30 s timeout, the missing pixel cap, the python-multipart CVE pin, and offline AC5 in CI.
+- Rejected: each has its reason in the triage log.
+- Sprint-sync: skipped, because the orchestrator owns `sprint-status.yaml`.
+
+**Follow-up review recommended: true.** Two medium entries were patched. The unverified risk is real memory: no measurement yet shows MiniLM, en_core_web_trf, NLI and OCR together fitting in the 2560m container, or that the declared costs are realistic.
+
+**Verification:**
+- Sidecar suite, locally: 51 passed, 5 skipped. The skips are the real-model tests.
+- Backend `test_ml_client.py`: 69 passed.
+- GitHub CI on draft PR #37 is all green.
+  - The backend suite passed 380 tests, including the sidecar wrapper.
+  - The licence jobs (backend, frontend, register) passed in both editions.
+  - `image-licenses (ml)` built the real image and scanned it in both editions. The bake output: NLI scored the Mira pair as contradiction 0.998, and OCR of the rendered "Lorekeeper bake check" image returned `'Lorekeeper bake check'`.
+
+### Needs desktop verification
+- **Real NLI on the spike pairs:** after `docker compose -f docker-compose.prod.yml up -d ml`, from the backend container, POST the 6 pairs from `spikes/cpu-benchmarks.md` §5 to `http://ml:8000/v1/nli`. Expect contradiction ≥ 0.97 on Mira, the black dagger and Grukk. Aldric is a known false positive (≈0.99). Also time 50 pairs; expect < 10 s, about 1 s.
+- **OCR on a sample image:** `curl -F file=@sample.png http://ml:8000/v1/ocr`. The text should equal `vision_service.extract_notes_from_image` on the same file in the backend container.
+- **RSS before and after lazy loading and eviction:**
+  1. Read `/v1/status` `rss_bytes` and `docker stats ml` at boot, then after the first NLI call, then after the first OCR call.
+  2. Restart with `ML_RESIDENT_BUDGET_MB=1000`, call NLI, then OCR. NLI should go to `not_loaded`, and RSS should fall after the eviction.
+  3. Use these numbers to tune `ML_NLI_COST_MB` and `ML_OCR_COST_MB`. Confirm the peak stays under `ML_MEM_LIMIT=2560m`.
+- **Offline:** `scripts/sidecar_smoke.sh ml`. Then `docker run --rm -d --network none --name mltest lorekeeper-ml`, and once it is healthy, `docker exec` a Python urllib POST to `/v1/nli` and `/v1/ocr` inside it. Both should work with no download attempted.
+- **First-load latency:** the time of the first `/v1/ocr` and `/v1/nli` calls against the client's 30 s `ML_TIMEOUT_S`.
+- **arm64:** `docker buildx build --platform linux/arm64 src/services/ml`. The bake should pass.
+
+**Residual risks:**
+- Memory fit under 2.5g (deferred).
+- With the default costs (600 + 900 < 2000), eviction is not exercised in production.
