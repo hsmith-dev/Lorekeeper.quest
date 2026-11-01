@@ -46,3 +46,5 @@ jobs:
         run: node scripts/check-spoiler-safety.mjs
       - name: Current campaign and CampaignSwitcher checks
         run: node scripts/check-campaign-switcher.mjs
+      - name: Route registry, nav sets, redirects, not-found and route announcer checks
+        run: node scripts/check-routes.mjs

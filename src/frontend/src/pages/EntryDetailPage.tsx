@@ -6,6 +6,12 @@ import { useNarration } from "../hooks/useNarration";
 import { formatDate } from "../utils/formatDate";
 import * as api from "../services/api";
 import type { JournalEntry, TagType } from "../types";
+import { InlineError } from "@/components/ui/inline-error";
+import { NotFound } from "./NotFoundPage";
+
+function isNotFoundError(err: unknown): boolean {
+  return (err as { response?: { status?: number } } | null)?.response?.status === 404;
+}
 
 const BUILTIN_TAG_TYPES: TagType[] = ["character", "location", "item", "quest", "faction"];
 const NEW_CATEGORY_VALUE = "__new__";
@@ -39,13 +45,15 @@ export function EntryDetailPage() {
   const [tagError, setTagError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
-  const { data: entry, isLoading } = useQuery<JournalEntry>({
+  const { data: entry, isLoading, error, refetch } = useQuery<JournalEntry>({
     queryKey: ["journal", id],
     queryFn: async () => {
       const { data } = await api.getJournal(id!);
       return data;
     },
     enabled: !!id,
+    // A 404 won't change on retry; other failures get the default one retry.
+    retry: (count, err) => !isNotFoundError(err) && count < 1,
   });
 
   const { data: categories } = useQuery({
@@ -107,13 +115,16 @@ export function EntryDetailPage() {
     );
   }
 
-  if (!entry) {
+  // Missing and not-shared look the same (E0-UX.8): one NotFound for both.
+  if (error && !isNotFoundError(error)) {
     return (
-      <div className="max-w-2xl mx-auto px-4 py-10 text-sm text-danger">
-        Entry not found.
+      <div className="max-w-2xl mx-auto px-4 py-10">
+        <InlineError error={error} fallback="Could not load this entry." onRetry={() => void refetch()} />
       </div>
     );
   }
+
+  if (!entry) return <NotFound />;
 
   return (
     <div className="max-w-2xl mx-auto px-4 py-6 md:py-10 flex flex-col gap-8">
