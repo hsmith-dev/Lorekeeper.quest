@@ -35,11 +35,13 @@ from typing import Any
 from app.access.visibility import register_visibility_listener
 from app.core.after_commit import committed_bind
 from app.core.hooks import Handler, HookEvent, HookPayload, emit, register_handler, schedule
+from app.hooks import world
 
 logger = logging.getLogger(__name__)
 
 # (event, handler) pairs, one line per feature: the shared append point.
 HANDLERS: list[tuple[HookEvent, Handler]] = [
+    *world.HANDLERS,            # E0-WorldCore.3: canon_changed -> campaign events
 ]
 
 for _event, _handler in HANDLERS:

@@ -19,8 +19,10 @@ whole field dict. `name` is never hidden, so asking for it raises.
 from __future__ import annotations
 
 import copy
+import uuid
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import StrEnum
 from types import MappingProxyType
 from typing import Any, Final
@@ -318,20 +320,60 @@ def attribute(entity_type: EntityType | str, key: str) -> AttributeDef:
     raise ValueError(f"{key!r} is not a {definition.type.value} attribute (allowed: {allowed})")
 
 
+def _check_value(entity_type: EntityType, a: AttributeDef, value: Any) -> Any:
+    """`value` checked against its ValueKind (None is unset, always allowed);
+    an ENTITY_REF comes back as its canonical UUID str."""
+    if value is None:
+        return None
+    where = f"{entity_type.value} {a.key}"
+    if a.value_kind is ValueKind.TEXT:
+        if not isinstance(value, str):
+            raise ValueError(f"{where} must be text, got {type(value).__name__}")
+        return value
+    if a.value_kind is ValueKind.CHOICE:
+        if not isinstance(value, str) or value not in a.choices:
+            raise ValueError(f"{value!r} is not a {where} (allowed: {', '.join(a.choices)})")
+        return value
+    if a.value_kind is ValueKind.DATETIME:
+        if not isinstance(value, str):
+            raise ValueError(f"{where} must be an ISO 8601 string, got {type(value).__name__}")
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError:
+            raise ValueError(f"{where} is not an ISO 8601 date-time: {value!r}") from None
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError(f"{where} needs a timezone: {value!r}")
+        return value
+    # ENTITY_REF: an Entity id (same Campaign and allowed type: world_service checks those).
+    if isinstance(value, uuid.UUID):
+        return str(value)
+    if not isinstance(value, str):
+        raise ValueError(f"{where} must be an Entity id, got {type(value).__name__}")
+    try:
+        return str(uuid.UUID(value))
+    except ValueError:
+        raise ValueError(f"{where} is not an Entity id: {value!r}") from None
+
+
 def validate_attributes(entity_type: EntityType | str, attrs: Mapping[str, Any]) -> dict[str, Any]:
-    """A copy of `attrs`; ValueError naming any key the type does not define,
-    or a CHOICE value (other than None) that is not one of its choices.
-    Other values are not checked here."""
+    """A copy of `attrs` with every value checked against its ValueKind:
+    TEXT a str, DATETIME an ISO 8601 str with a timezone, ENTITY_REF a UUID
+    (returned as its canonical str), CHOICE one of its choices; None is
+    unset for every kind. ValueError naming any key the type does not define
+    or any value of the wrong type. That an ENTITY_REF names a live Entity of
+    the same Campaign and an allowed type is world_service's check (it needs
+    the database)."""
+    definition = get(entity_type)
     known = set(attribute_keys(entity_type))
     unknown = sorted(k for k in attrs if k not in known)
     if unknown:
         allowed = ", ".join(attribute_keys(entity_type))
-        raise ValueError(f"unknown {_type(entity_type).value} attribute(s) {unknown} (allowed: {allowed})")
-    for a in get(entity_type).attributes:
-        if a.value_kind is ValueKind.CHOICE and attrs.get(a.key) is not None and attrs[a.key] not in a.choices:
-            raise ValueError(f"{attrs[a.key]!r} is not a {_type(entity_type).value} {a.key} "
-                             f"(allowed: {', '.join(a.choices)})")
-    return dict(attrs)
+        raise ValueError(f"unknown {definition.type.value} attribute(s) {unknown} (allowed: {allowed})")
+    out = dict(attrs)
+    for a in definition.attributes:
+        if a.key in out:
+            out[a.key] = _check_value(definition.type, a, out[a.key])
+    return out
 
 
 def party_unset(entity_type: EntityType | str, field_name: str) -> Any:

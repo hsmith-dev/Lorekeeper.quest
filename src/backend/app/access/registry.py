@@ -7,7 +7,7 @@ Audience is computed, and the two predicates generated from it.
 Each model registers exactly one class:
 
   * `stored(column="visibility", owner_field="user_id", kind_field=None,
-    field_visibility=None, writer=None, floor=None, narrowed_by=())`: the
+    field_visibility=None, writer=None, floor=None, narrowed_by=(), gm_when=())`: the
     row carries its Visibility. `column=None` means every row is
     Owner(owner_field) (chat sessions). `owner_field=None` means the row has
     no author: `private` is then GM (entity_relationships). `writer`
@@ -15,6 +15,9 @@ Each model registers exactly one class:
     is a nullable Visibility column that narrows the row further (the merge
     `visibility_floor`, AD-10); `narrowed_by` are `parent(...)` links whose
     Audiences narrow it too (an edge is never wider than either endpoint).
+    `gm_when` are nullable columns any of which, set, makes the row GM
+    (a soft-deleted or merged Entity). `register_writer(model, fn)` sets
+    `writer` after the fact (world_service registers `apply_change`'s).
   * `derived(derive_from=[...], field=None, floor=None, field_rule="audience")`:
     the row's Audience comes from other rows, through `parent(...)` links
     (the most restrictive parent, plus a `field=` rule such as
@@ -65,6 +68,7 @@ otherwise importing this module raises RuntimeError.
 """
 from __future__ import annotations
 
+import dataclasses
 import uuid
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, Iterable, Mapping, Sequence
@@ -147,12 +151,19 @@ class Stored:
     floor: str | None = None
     # Parents whose Audiences narrow the row (entity_relationships: both endpoints).
     narrowed_by: tuple[Parent, ...] = ()
+    # Nullable columns any of which, when set, makes the row GM whatever its
+    # Visibility (entities: a soft-deleted or merged-away Entity, E0-WorldCore.3).
+    gm_when: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.column is None and self.owner_field is None:
             raise ValueError("stored: column=None (every row is its Owner's) needs an owner_field")
         if any(not isinstance(link, Parent) for link in self.narrowed_by):
             raise ValueError("stored: narrowed_by takes parent(...) links")
+        if any(not isinstance(name, str) or not name for name in self.gm_when):
+            raise ValueError("stored: gm_when takes column names")
+        if self.gm_when and self.column is None:
+            raise ValueError("stored: gm_when needs a Visibility column")
 
 
 @dataclass(frozen=True)
@@ -226,9 +237,9 @@ Registration = Stored | Derived | AlwaysGM | Membership | DerivedFromSources
 def stored(column: str | None = "visibility", owner_field: str | None = "user_id", kind_field: str | None = None,
            field_visibility: str | None = None, *, gm_fields: Iterable[str] = (),
            writer: Callable[..., Any] | None = None, floor: str | None = None,
-           narrowed_by: Sequence[Parent] = ()) -> Stored:
+           narrowed_by: Sequence[Parent] = (), gm_when: Iterable[str] = ()) -> Stored:
     return Stored(column, owner_field, kind_field, field_visibility, tuple(gm_fields), writer, floor,
-                  tuple(narrowed_by))
+                  tuple(narrowed_by), tuple(gm_when))
 
 
 def parent(model: type, fk: str, *, remote: str = "id", attr: str | None = None) -> Parent:
@@ -287,8 +298,11 @@ REGISTRY: dict[type, Registration] = {
     CampaignShareToken: membership(GM_AUDIENCE),
     # The layout every sheet viewer needs.
     CharacterSheetTemplate: membership(PUBLIC),
-    # E0-WorldCore.2 (F3-world). Every copied Entity starts GM.
-    Entity: stored(owner_field="created_by_user_id", field_visibility="field_visibility", gm_fields=("gm_notes",)),
+    # E0-WorldCore.2 (F3-world). Every copied Entity starts GM. A soft-deleted
+    # or merged-away Entity is GM only (E0-WorldCore.3), and so is every row
+    # derived from or narrowed by it. world_service registers its writer.
+    Entity: stored(owner_field="created_by_user_id", field_visibility="field_visibility", gm_fields=("gm_notes",),
+                   gm_when=("deleted_at", "merged_into_id")),
     # An edge is never wider than either endpoint (FR-25), nor than its merge floor.
     EntityRelationship: stored(owner_field=None, floor=VISIBILITY_FLOOR, narrowed_by=[
         parent(Entity, "source_entity_id", attr="source_entity"),
@@ -313,6 +327,26 @@ REGISTRY: dict[type, Registration] = {
 UNSCOPED: dict[str, str] = {
     "feedback": "operator feedback, read by user_id (and by admins), not Campaign content",
 }
+
+
+def register_writer(model: type, fn: Callable[..., Any]) -> Stored:
+    """Make `fn` the `writer` of a stored model's Visibility columns (the
+    function `set_visibility` writes through, E0-Access.9). Registering the
+    same function again is a no-op; a different one raises ValueError, and so
+    does a model that is not `stored` with a Visibility column."""
+    reg = registration(model)
+    if not isinstance(reg, Stored) or reg.column is None:
+        raise ValueError(f"register_writer: {getattr(model, '__name__', model)!r} is not a stored model with a "
+                         "Visibility column")
+    if not callable(fn):
+        raise TypeError("register_writer: fn must be callable")
+    if reg.writer is not None:
+        if reg.writer is fn:
+            return reg
+        raise ValueError(f"register_writer: {model.__name__} already has the writer {reg.writer!r}")
+    updated = dataclasses.replace(reg, writer=fn)
+    REGISTRY[model] = updated
+    return updated
 
 
 def registration(model: type) -> Registration:
@@ -387,6 +421,8 @@ def _stored_clause(model: type, reg: Stored, ctx: "CampaignContext"):
         return owner_col == viewer.user_id if level is AudienceLevel.OWNER else sa.false()
     kind_col = _col(model, reg.kind_field) if reg.kind_field is not None else None
     base = _vis_clause(_col(model, reg.column), owner_col, kind_col, viewer)
+    if reg.gm_when:
+        base = sa.and_(base, *[_col(model, name).is_(None) for name in reg.gm_when])
     if reg.floor is None and not reg.narrowed_by:
         return base
     return sa.and_(base, _floor_clause(model, reg.floor, viewer),
@@ -820,7 +856,10 @@ def narrowed_audience(obj: Any, reg: Stored, base: Audience, parents: Any = None
     """`base` (a stored row's own Audience) narrowed by its `floor` and its
     `narrowed_by` parents (from `parents=`, else the loaded relationships;
     an unloaded one raises ValueError). `floor_value` stands in for a floor
-    column that is still None (check_create: its column default)."""
+    column that is still None (check_create: its column default). Any `gm_when`
+    column that is set makes it GM."""
+    if any(getattr(obj, name, None) is not None for name in reg.gm_when):
+        return GM_AUDIENCE
     if reg.floor is None and not reg.narrowed_by:
         return base
     auds = [base]

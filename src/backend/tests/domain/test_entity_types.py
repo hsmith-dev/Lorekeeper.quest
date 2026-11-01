@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import json
 import pickle
+import uuid
 from pathlib import Path
 from types import MappingProxyType
 
@@ -235,6 +236,35 @@ def test_validate_attributes():
     assert et.validate_attributes("item", {}) == {}
     with pytest.raises(ValueError, match="species"):
         et.validate_attributes("location", {"region": "North", "species": "elf"})
+
+
+@pytest.mark.parametrize("type_, attrs, out", [
+    ("character", {"species": "elf"}, {"species": "elf"}),
+    ("quest", {"completed_at": "2026-05-01T10:00:00+00:00"}, {"completed_at": "2026-05-01T10:00:00+00:00"}),
+    ("quest", {"completed_at": "2026-05-01T10:00:00Z"}, {"completed_at": "2026-05-01T10:00:00Z"}),
+    ("item", {"holder_entity_id": "6F9619FF-8B86-4011-B42D-00C04FC964FF"},
+     {"holder_entity_id": "6f9619ff-8b86-4011-b42d-00c04fc964ff"}),
+    ("item", {"holder_entity_id": uuid.UUID("6f9619ff-8b86-4011-b42d-00c04fc964ff")},
+     {"holder_entity_id": "6f9619ff-8b86-4011-b42d-00c04fc964ff"}),
+    ("item", {"holder_entity_id": None, "rarity": None}, {"holder_entity_id": None, "rarity": None}),
+])
+def test_validate_attributes_value_types(type_, attrs, out):
+    assert et.validate_attributes(type_, attrs) == out
+
+
+@pytest.mark.parametrize("type_, attrs", [
+    ("character", {"species": 3}),
+    ("character", {"goals": ["a"]}),
+    ("quest", {"completed_at": "2026-05-01T10:00:00"}),  # no timezone
+    ("quest", {"completed_at": "next tuesday"}),
+    ("quest", {"completed_at": 1714557600}),
+    ("item", {"holder_entity_id": "not-a-uuid"}),
+    ("item", {"holder_entity_id": 42}),
+    ("location", {"kind": ["settlement"]}),
+])
+def test_validate_attributes_rejects_wrong_value_types(type_, attrs):
+    with pytest.raises(ValueError):
+        et.validate_attributes(type_, attrs)
 
 
 # ---- Party rendering (AD-13) ------------------------------------------------

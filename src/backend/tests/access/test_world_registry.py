@@ -249,3 +249,46 @@ def test_check_create_counts_floor_and_endpoints():
 def test_gm_only_entity_is_not_found_for_a_player():
     with pytest.raises(NotFound):
         project(entity("gm"), PLAYER_CTX)
+
+
+# ── E0-WorldCore.3: deleted / merged Entities, register_writer ─────────────
+
+@pytest.mark.parametrize("gone", [{"deleted_at": NOW}, {"merged_into_id": uuid.uuid4()}])
+def test_a_deleted_or_merged_entity_is_gm_only(gone):
+    assert REGISTRY[Entity].gm_when == ("deleted_at", "merged_into_id")
+    e = entity("party", **gone)
+    assert audience_of(e) == GM_AUDIENCE
+    alias = EntityAlias(campaign_id=CID, alias="Al", normalized_alias="al")
+    assert audience_of(alias, parents=[e]) == GM_AUDIENCE
+    with pytest.raises(NotFound):
+        check_create(e, PLAYER_CTX)
+    with pytest.raises(NotFound):
+        project(e, PLAYER_CTX)
+    assert audience_of(entity("party")) == PUBLIC
+
+
+def test_gm_when_needs_column_names():
+    with pytest.raises(ValueError):
+        reg.stored(gm_when=("",))
+    with pytest.raises(ValueError):
+        reg.stored(column=None, gm_when=("deleted_at",))
+
+
+def test_register_writer(monkeypatch):
+    from app.db.models import NpcEntry, SessionPlan
+
+    monkeypatch.setitem(REGISTRY, SessionPlan, reg.stored())
+
+    def writer(db, ctx, row, field, value):  # pragma: no cover - never called
+        return None
+
+    assert reg.register_writer(SessionPlan, writer).writer is writer
+    assert REGISTRY[SessionPlan].writer is writer
+    assert reg.register_writer(SessionPlan, writer).writer is writer  # the same one: a no-op
+    with pytest.raises(ValueError):
+        reg.register_writer(SessionPlan, lambda *a: None)
+    with pytest.raises(ValueError):
+        reg.register_writer(NpcEntry, writer)  # always_gm
+    monkeypatch.setitem(REGISTRY, SessionPlan, reg.stored())
+    with pytest.raises(TypeError):
+        reg.register_writer(SessionPlan, "not callable")

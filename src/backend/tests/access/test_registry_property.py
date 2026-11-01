@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
 import pytest
@@ -140,8 +141,10 @@ entry_spec = st.fixed_dictionaries({"campaign": campaigns, "visibility": visibil
                                     "author": authors})
 stored_spec = st.fixed_dictionaries({"campaign": campaigns, "visibility": visibilities, "author": authors})
 # An Entity; a row that links to it takes the Entity's Campaign (composite FKs).
+# `gone`: a soft-deleted or merged-away Entity is GM only (gm_when, E0-WorldCore.3).
 entity_spec = st.fixed_dictionaries({"campaign": campaigns, "visibility": visibilities, "author": authors,
-                                     "fv": field_visibilities})
+                                     "fv": field_visibilities,
+                                     "gone": st.sampled_from([None, None, "deleted", "merged"])})
 
 SPECS = {
     JournalEntry: entry_spec,
@@ -227,10 +230,15 @@ async def _entry(db, w: World, s: dict) -> JournalEntry:
 
 
 async def _entity(db, w: World, s: dict, *, campaign: uuid.UUID | None = None, quest: bool = False) -> Entity:
-    e = Entity(campaign_id=campaign or w.cid(s["campaign"]), type="quest" if quest else "character",
+    entity_id = uuid.uuid4()
+    gone = s.get("gone")
+    e = Entity(id=entity_id, campaign_id=campaign or w.cid(s["campaign"]), type="quest" if quest else "character",
                kind=None if quest else "npc", name="n", status="active" if quest else "alive",
                visibility=s["visibility"], field_visibility=dict(s["fv"]),
-               created_by_user_id=w.users[s["author"]].id)
+               created_by_user_id=w.users[s["author"]].id,
+               deleted_at=datetime.now(timezone.utc) if gone == "deleted" else None,
+               # Merged into itself: the composite FK needs a row of the same Campaign.
+               merged_into_id=entity_id if gone == "merged" else None)
     db.add(e)
     await db.flush()
     return e
