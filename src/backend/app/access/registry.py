@@ -106,6 +106,8 @@ class Stored:
     # `field` is "visibility", "visibility_floor" or "field_visibility.<key>".
     # `set_visibility` calls it instead of setting the column itself
     # (E0-WorldCore registers `world_service.apply_change` for Canon tables).
+    # A writer must not call `mark_dependents_stale` itself: set_visibility
+    # does that once, after the writer returns.
     writer: Callable[..., Any] | None = None
 
 

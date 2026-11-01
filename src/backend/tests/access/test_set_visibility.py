@@ -296,6 +296,47 @@ def test_kinds_are_registered_for_the_schema_and_cannot_be_rebound():
         register_visibility_kind("session_plan", JournalEntry)
 
 
+def test_bulk_dedupes_on_the_write_target_not_the_raw_ref():
+    a, b = uuid.uuid4(), uuid.uuid4()
+    refs = [RecordRef(kind="journal", id=a), RecordRef(kind="journal", id=a, field="visibility"),
+            SourceRef(kind=SourceKind.JOURNAL, id=a), SourceRef(kind=SourceKind.JOURNAL, id=a, span=(0, 3)),
+            {"kind": "journal", "id": str(a)}, RecordRef(kind="journal", id=b)]
+    assert [(r.kind, r.id) for r in vis.dedupe_targets(refs)] == [("journal", a), ("journal", b)]
+    with pytest.raises(VisibilityError):
+        vis.dedupe_targets([RecordRef(kind="journal", id=a, field="shorthand")])
+
+
+def test_no_create_or_update_schema_declares_a_visibility_column():
+    """Routes apply an Update body with `setattr(row, field, value)` loops: a
+    Visibility field on one would write the column outside set_visibility.
+    No Create schema declares one either today (a create keeps its default),
+    so both are checked."""
+    import importlib
+    import inspect
+    import pkgutil
+
+    from pydantic import BaseModel
+
+    import app.schemas
+
+    columns = {"visibility", "visibility_floor", "field_visibility"}
+    assert vis._KINDS  # every kind's model is written only through set_visibility
+    checked, offenders = 0, []
+    for info in pkgutil.walk_packages(app.schemas.__path__, "app.schemas."):
+        module = importlib.import_module(info.name)
+        for name, obj in vars(module).items():
+            if not (inspect.isclass(obj) and issubclass(obj, BaseModel) and obj.__module__ == module.__name__):
+                continue
+            if not (name.endswith("Update") or name.endswith("Create")):
+                continue
+            checked += 1
+            bad = columns & set(obj.model_fields)
+            if bad:
+                offenders.append(f"{module.__name__}.{name}: {sorted(bad)}")
+    assert checked, "found no Create/Update schemas to check"
+    assert not offenders, offenders
+
+
 # ── Rollback ───────────────────────────────────────────────────────────────
 
 async def test_bulk_is_all_or_nothing(db, ev4, gm, recorder):

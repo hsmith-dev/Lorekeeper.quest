@@ -433,6 +433,22 @@ def test_repo_has_no_visibility_write_outside_access():
     ("def f():\n    return text('UPDATE journal_entries SET visibility = :v WHERE id = :id')\n", "visibility"),
     ("async def f(conn):\n    await conn.exec_driver_sql(\"update e set field_visibility = '{}'\")\n",
      "field_visibility"),
+    # E0-Access.9 review: more write forms.
+    ("def f(q, v):\n    return q.filter(M.id == 1).update({'visibility': v})\n", "visibility"),
+    ("def f(q, v):\n    return q.update({M.visibility_floor: v}, synchronize_session=False)\n", "visibility_floor"),
+    ("def f(M, v):\n    return update(M).values(**{'visibility': v})\n", "visibility"),
+    ("def f(M, v):\n    return update(M).values(dict(visibility=v))\n", "visibility"),
+    ("async def f(db, M, i, v):\n    await db.execute(update(M), [{'id': i, 'visibility': v}])\n", "visibility"),
+    ("async def f(db, M, i, v):\n    await db.execute(update(M), {'id': i, 'field_visibility': v})\n",
+     "field_visibility"),
+    ("def f(s, M, i, v):\n    s.bulk_update_mappings(M, [{'id': i, 'visibility_floor': v}])\n", "visibility_floor"),
+    ("def f(s, M, i, v):\n    s.bulk_update_mappings(M, ({'id': i, 'visibility': v},))\n", "visibility"),
+    ("def f(x, v):\n    x.field_visibility['a']['b'] = v\n", "field_visibility"),
+    ("def f(x, vs):\n    for x.visibility in vs:\n        pass\n", "visibility"),
+    ("async def f(x, vs):\n    async for x.visibility in vs:\n        pass\n", "visibility"),
+    ("def f(x, cm):\n    with cm as x.visibility_floor:\n        pass\n", "visibility_floor"),
+    ("async def f(x, cm):\n    async with cm as x.visibility:\n        pass\n", "visibility"),
+    ("def f(x, vs):\n    return [1 for x.visibility in vs]\n", "visibility"),
     # In a method too.
     ("class S:\n    def f(self, v):\n        self.row.visibility = v\n", "visibility"),
 ])
@@ -454,7 +470,10 @@ def test_visibility_reads_constructors_and_access_pass(tmp_path):
             "    t = text('SELECT id FROM journal_entries WHERE visibility = :v')\n"
             "    u = text('UPDATE journal_entries SET narrative = :n WHERE visibility = :v')\n"
             "    data = {'visibility': 'gm'}\n"
-            "    data.update({'visibility': 'gm'})\n"
+            "    data.update({'title': 'x'})\n"
+            "    r = db.execute(text('SELECT id FROM journal_entries WHERE visibility = :visibility'), {'visibility': 'gm'})\n"
+            "    for row in rows(x.visibility):\n"
+            "        pass\n"
             "    return getattr(x, 'visibility'), x.field_visibility.get('a'), e, q, t, u, data, shown\n"
         ),
         "db/models/thing.py": (

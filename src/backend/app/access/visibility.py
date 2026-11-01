@@ -170,6 +170,11 @@ def register_visibility_listener(fn: VisibilityListener) -> VisibilityListener:
     """Call `fn(campaign_id, refs, actor_ctx)` (sync or async) once per
     Campaign after a Visibility change commits (E0-Journal: the
     `visibility_changed` hook). Never called for a rolled-back change.
+
+    It runs after the commit, so it must not use the request's session
+    (that transaction is over): open its own, or enqueue a Job. `actor_ctx`
+    is the ctx of the first change made in that Campaign in the committed
+    transaction; `refs` are every distinct ref changed there, in order.
     Registering the same function twice is a no-op."""
     if fn not in _LISTENERS:
         _LISTENERS.append(fn)
@@ -296,6 +301,23 @@ async def set_visibility(db: AsyncSession, ctx: CampaignContext, ref: RecordRef 
     return (await project_all(db, [row], ctx))[0]
 
 
+def dedupe_targets(refs: Iterable[RecordRef | SourceRef]) -> list[RecordRef]:
+    """The refs, in order, with one per write target `(kind, id, path)`:
+    `field=None` and `field="visibility"` are the same column, and a
+    SourceRef and a RecordRef for one row are one item. Raises not_found()
+    or VisibilityError for a bad kind or field."""
+    distinct: list[RecordRef] = []
+    seen: set[tuple[str, uuid.UUID, str]] = set()
+    for ref in refs:
+        rec = _record_ref(ref, None)
+        _entry, _reg, path = _target(rec)
+        key = (rec.kind, rec.id, path)
+        if key not in seen:
+            seen.add(key)
+            distinct.append(rec)
+    return distinct
+
+
 async def set_visibility_many(db: AsyncSession, ctx: CampaignContext, refs: Iterable[RecordRef | SourceRef],
                               value: Visibility | str) -> int:
     """Set every ref (deduplicated) to `value`, all-or-nothing: the first
@@ -304,15 +326,7 @@ async def set_visibility_many(db: AsyncSession, ctx: CampaignContext, refs: Iter
     unchanged values included. Does not commit."""
     _check_writer(ctx)
     value = Visibility(value)
-    distinct: list[RecordRef] = []
-    seen: set[RecordRef] = set()
-    for ref in refs:
-        rec = _record_ref(ref, None)
-        if rec not in seen:
-            seen.add(rec)
-            distinct.append(rec)
-    for rec in distinct:  # refuse a bad kind or field before writing anything
-        _target(rec)
+    distinct = dedupe_targets(refs)  # refuses a bad kind or field before writing anything
     async with db.begin_nested():
         for rec in distinct:
             await _apply(db, ctx, rec, value)

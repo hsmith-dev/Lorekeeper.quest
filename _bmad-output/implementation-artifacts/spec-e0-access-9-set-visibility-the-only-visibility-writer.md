@@ -2,7 +2,7 @@
 title: 'E0-Access.9: set_visibility, the only Visibility writer'
 type: 'feature'
 created: '2026-11-01'
-status: 'in-review'
+status: 'done'
 baseline_revision: '0e71df48f047b03fa4f8ad48d76ec76a218ea8c0'
 review_loop_iteration: 0
 followup_review_recommended: false
@@ -10,7 +10,28 @@ context:
   - '{project-root}/_bmad-output/planning-artifacts/epics.md'
   - '{project-root}/_bmad-output/planning-artifacts/architecture/architecture-Lorekeeper.quest-2026-10-31/ARCHITECTURE-SPINE.md'
 warnings: ['oversized']
-deferred: []
+deferred:
+  - summary: >-
+      A reader that computed a Player result before a downgrade commits can write it to the cache after the post-commit SCAN/UNLINK.
+    evidence: |-
+      invalidate_campaign_cache deletes cache:{campaign_id}:* after commit. Nothing stops a slower concurrent reader from setting a key afterwards. No such cache exists today; E0-Access.10 owns the key scheme (audience + access_epoch) and should add a per-Campaign visibility generation, or bump the epoch on a Visibility change.
+    location: >-
+      src/backend/app/access/visibility.py invalidate_campaign_cache
+    severity: medium (unverified)
+  - summary: >-
+      The after-commit listener and cache dispatch has no timeout, so a hung listener or Valkey blocks db.commit().
+    evidence: |-
+      _after_commit runs await_only(dispatch(...)). No listener is registered yet, and Valkey calls fail fast on a down server. A hang needs a stuck listener (E0-Journal) or a half-open Valkey socket. Add asyncio.wait_for when the first real listener lands.
+    location: >-
+      src/backend/app/access/visibility.py _after_commit
+    severity: low
+  - summary: >-
+      The CI-8 merge allowance covers all of world_service.apply_change, not only op="merge" under a merge system ctx.
+    evidence: |-
+      The check is lexical (function scope plus column). The story names the function. Checking the op or ctx statically would need E0-WorldCore's code to exist. Revisit when E0-WorldCore.3/.9 land.
+    location: >-
+      scripts/check_scoped_queries.py VISIBILITY_WRITE_ALLOWED
+    severity: low
 ---
 
 <intent-contract>
@@ -98,3 +119,98 @@ deferred: []
 - `python scripts/check_scoped_queries.py` -- expected: ok
 - `python -m pytest -q scripts/test_check_scoped_queries.py` -- expected: all pass
 - `pytest -q` on the desktop (own Postgres+Valkey) -- expected: no regressions; EV-4 leaks=0
+
+## Spec Change Log
+
+## Review Triage Log
+
+### 2026-11-01 — Review pass
+- verdicts: 40 findings — high 0, medium 4, low 24, false 7, maybe-false 5
+- findings:
+  - Blind hunter:
+    - `[low]` `patch` The `writer` slot conflicts with the CI allowance for apply_change — added a comment by VISIBILITY_WRITE_ALLOWED: a writer writes `visibility`/`field_visibility` through its generic field update (variable-name setattr), and the allowlist stays as the story fixes it.
+    - `[low]` `patch` Stale markers run twice if a writer also marks staleness — the `Stored.writer` contract now says a writer must not call mark_dependents_stale.
+    - `[false]` `reject` visibility_floor is not protected against a looser visibility — the floor is applied at read time (`mention_audience` uses most_restrictive), so a looser row value cannot widen floored content.
+    - `[low]` `reject` Values are not checked per kind/field — `private` on a GM entry is defined behaviour (Owner(author), AD-12). A rule would add branches the story never asked for.
+    - `[low]` `reject` Unchanged values still mark stale and invalidate — spec choice; it is harmless (extra invalidation only).
+    - `[low]` `reject` 500 items cost about 1000 queries, with no rate limit — a GM-only op, bounded at 500; acceptable for v1.
+    - `[maybe-false]` `defer` A concurrent reader can re-cache after invalidation — no cache exists yet; deferred to E0-Access.10 (medium, unverified).
+    - `[low]` `patch` The listener contract is undocumented (no session use; first ctx per Campaign) — documented in the register_visibility_listener docstring.
+    - `[low]` `reject` A sync-session commit skips dispatch — the app has no sync sessions; the warning is logged.
+    - `[false]` `reject` The Campaign check assumes `campaign_id` — every registerable stored model uses `campaign_id`, and scoped_select already scopes by scope_column.
+    - `[medium]` `patch` The CI-8 visitor misses Query.update, `**values`, execute-with-dicts, nested subscripts and loop/with targets — all are now flagged, with planted tests. `execute` is narrowed to `update(...)` statements so read bind dicts pass (with a test).
+    - `[low]` `patch` insert().values is flagged but constructors pass — documented as deliberate in the module docstring.
+    - `[low]` `reject` The SET regex can be cut short by `from` inside a string literal — rare; a full SQL parser is out of proportion.
+    - `[false]` `reject` The allowlist is never checked against real code — apply_change doesn't exist yet by design (E0-WorldCore). A stale-entry check would fail today.
+    - `[low]` `patch` Dedupe on the raw ref double-counts `field=None` vs `field="visibility"` — `dedupe_targets` keys on (kind, id, path), with a test. The import-order and OpenAPI-enum parts: `[false]`, because the schema is imported only via the route, which imports app.access first.
+    - `[false]` `reject` Test gaps: the downgrade suite is gated on `authenticated` — the authenticated non-GM actors (player, cross_gm_player) are both Players of A. A malformed Mapping is an internal-API programming error, not a request path.
+  - Verification gap:
+    - `[medium]` `patch` A generic PUT `setattr(row, field, value)` loop would write visibility if an Update schema gained the field — added test_no_create_or_update_schema_declares_a_visibility_column.
+  - Edge-case hunter:
+    - `[medium]` `patch` ORM bulk update via execute/bulk_update_mappings is missed — flagged (grouped with the blind-hunter CI-8 row).
+    - `[medium]` `patch` Legacy Query.update dict is missed — flagged (same group).
+    - `[low]` `patch` `.values(**{})` / `dict()` are missed — flagged (same group).
+    - `[low]` `reject` A subquery FROM inside SET ends the capture — rare, and paren tracking is out of proportion.
+    - `[low]` `reject` SQL held in a variable — needs dataflow; unlikely in this codebase (raw SQL is rare and literal).
+    - `[low]` `patch` A nested field_visibility subscript is missed — flagged (same group).
+    - `[low]` `patch` for/with/comprehension targets are missed — flagged (same group).
+    - `[low]` `reject` A non-UTF-8 file crashes the checker — the existing checks in the same script read files the same way.
+    - `[maybe-false]` `reject` A writer that deletes the row gives a 500 on reload — no writer exists; E0-WorldCore's update_field never deletes.
+    - `[low]` `patch` A duplicate row via a different field spelling is counted twice — fixed by dedupe_targets.
+    - `[low]` `reject` A structural column used as a field_visibility key — no model has field_visibility yet; E0-WorldCore defines its keys.
+    - `[low]` `reject` Re-registering a kind with a different where is silently ignored — kinds are registered once at import.
+    - `[low]` `reject` A bad Mapping ref gives a pydantic error — the internal API; the route validates first.
+    - `[maybe-false]` `defer` A listener or Valkey hang blocks commit — deferred (low).
+    - `[maybe-false]` `defer` A reader re-caches after invalidation — same as the blind-hunter row; deferred to E0-Access.10.
+    - `[low]` `reject` Two actors in one transaction — one request has one actor; documented as "first change's ctx".
+    - `[low]` `reject` CancelledError in dispatch — cancellation mid-commit is an operator abort.
+    - `[medium]` `patch` Claim: the CI-8 rule does not catch every form — the same group as the CI-8 visitor patch.
+  - Intent alignment:
+    - `[false]` `reject` The staleness path is not exercised with a real marker — by design: E0-Jobs.8 registers the derived_sources marker. The seam and its order are tested with fakes.
+    - `[false]` `reject` The cache key scheme doesn't exist — E0-Access.10 owns it. The `cache:{campaign_id}:` prefix contract is documented and invalidation is tested against a fake Valkey.
+    - `[low]` `patch` A lexical CI rule misses dynamic setattr — covered by the schema guard test (verification-gap row).
+    - `[low]` `patch` The writer slot vs the frozen allowlist — same as the blind-hunter row (comment added).
+    - `[maybe-false]` `defer` The merge allowance doesn't check op or ctx — deferred (low).
+
+## Auto Run Result
+
+Status: done
+
+**Summary:**
+- `app/access/visibility.py` is the one Visibility writer:
+  - `set_visibility` / `set_visibility_many`: GM-only; uniform 404; 422 `always_gm`; a registry `writer` slot; field and floor paths.
+  - The `register_stale_marker`, `register_visibility_listener` and `mark_dependents_stale` seams. Markers run in the transaction. Listeners, then `cache:{campaign_id}:*` invalidation, run after commit, and are discarded on rollback, savepoint-aware.
+- The bulk route `POST /api/campaigns/{campaign_id}/visibility` returns `{updated: n}`: 1–500 items, all-or-nothing.
+- CI-8 rule in `scripts/check_scoped_queries.py`: no Visibility write outside `app/access/` except `world_service.apply_change` writing `visibility_floor`. It has a frozen allowlist, no baseline, and is separate from OWNER_INFRA.
+- EV-4: a route probe plus the downgrade suite. After a party→gm flip, the Player's next detail, list and count, search and chat prompt (`llm_provider.capture()`) all exclude the entry.
+
+**Files:**
+- `src/backend/app/access/visibility.py` — new: the writer, the seams and the after-commit dispatch.
+- `src/backend/app/access/registry.py` — `Stored.writer` and `stored(writer=)`.
+- `src/backend/app/access/__init__.py` — exports.
+- `src/backend/app/schemas/sources.py` — `RecordRef` (append-only).
+- `src/backend/app/schemas/visibility.py` — new: the bulk request and response.
+- `src/backend/app/api/routes/visibility.py` — new: the bulk route.
+- `src/backend/app/main.py` — router and the VisibilityError handler.
+- `scripts/check_scoped_queries.py`, `scripts/test_check_scoped_queries.py` — the CI-8 Visibility-write rule and its tests.
+- `src/backend/tests/access/test_set_visibility.py` — new: unit and API tests.
+- `src/backend/tests/ev4/probes/visibility.py` — new: the EV-4 probe and downgrade suite.
+
+**Review:**
+- 40 findings: 15 patched, 3 deferred (in frontmatter), 22 rejected, each with a reason in the triage log.
+- Patched by verdict: medium 4, low 11, high 0.
+- followup_review_recommended: false. No high was patched. The medium patches are all one CI-8 group plus the schema guard, and both are covered by tests that ran.
+
+**Verification:**
+- The desktop backend suite (own Postgres and Valkey): 1516 passed, 4 skipped (main: 1488 passed, 4 skipped); EV-4 probes=81, pending=46, leaks=0.
+- `python scripts/check_scoped_queries.py`: ok. `pytest scripts/test_check_scoped_queries.py`: 107 passed. `lint-imports`: 5 kept, 0 broken.
+- The GitHub CI on draft PR #56 is the gate.
+
+**Residual risks:**
+- No stale marker or listener is registered yet (E0-Jobs.8 and E0-Journal.1 add them).
+- No cache keys exist yet (E0-Access.10 must use the `cache:{campaign_id}:` prefix).
+- The CI-8 rule is lexical, so dynamic SQL in variables is not caught.
+
+**Needs desktop verification:** none. Everything ran against real Postgres and Valkey containers on the desktop.
+
+**Sprint sync:** skipped per the builder brief; the orchestrator updates sprint-status.yaml and epics.md.
