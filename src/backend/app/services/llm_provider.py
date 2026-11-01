@@ -7,6 +7,11 @@ between tasks. BYOK calls (any other provider, or kobold at the user's own
 URL) bypass the gate and keep their own model. Per-call `num_ctx`, `num_gpu`
 and `keep_alive` options are stripped for every provider: they would make
 Ollama reload the model.
+
+detect_backend(api_url) tells Ollama from KoboldCpp/other OpenAI-compatible
+servers with one cached `GET /api/version` probe, so callers can skip
+KoboldCpp-only endpoints (ai_service.generate_narrative's native attempt)
+that would only 404 on Ollama.
 """
 
 from collections.abc import AsyncIterator
@@ -30,6 +35,51 @@ def _client(timeout: float) -> httpx.AsyncClient:
     if _transport is not None:
         return httpx.AsyncClient(timeout=timeout, transport=_transport)
     return httpx.AsyncClient(timeout=timeout)
+
+
+BACKEND_OLLAMA = "ollama"
+BACKEND_OPENAI_COMPAT = "openai_compat"
+
+# Answered probes, keyed by base URL without a trailing "/". Lives for the
+# process; a probe that got no answer is never stored (see detect_backend).
+_backend_cache: dict[str, str] = {}
+
+DETECT_TIMEOUT_S = 3.0
+
+
+async def detect_backend(api_url: str | None) -> str:
+    """BACKEND_OLLAMA if `GET {api_url}/api/version` answers 2xx with a JSON
+    object holding a string "version" (Ollama's shape), else
+    BACKEND_OPENAI_COMPAT. Empty/None api_url = settings.kobold_url.
+
+    Any answered probe (404, HTML from KoboldCpp, ...) is cached for the
+    process. A transport error, a timeout or a 5xx answer (e.g. a proxy's 502
+    while Ollama is still starting) returns BACKEND_OPENAI_COMPAT without
+    caching it, so an Ollama that was still starting is detected on a later
+    call. Never touches the gate and never raises."""
+    base = (api_url or get_settings().kobold_url).rstrip("/")
+    cached = _backend_cache.get(base)
+    if cached is not None:
+        return cached
+    try:
+        async with _client(DETECT_TIMEOUT_S) as client:
+            r = await client.get(f"{base}/api/version")
+    except Exception:
+        # Down, timed out, or a broken handler: no answer, so don't cache.
+        return BACKEND_OPENAI_COMPAT
+    if r.status_code >= 500:
+        # Server-side trouble, not an answer about what the backend is.
+        return BACKEND_OPENAI_COMPAT
+    result = BACKEND_OPENAI_COMPAT
+    if r.is_success:
+        try:
+            body = r.json()
+        except Exception:
+            body = None
+        if isinstance(body, dict) and isinstance(body.get("version"), str):
+            result = BACKEND_OLLAMA
+    _backend_cache[base] = result
+    return result
 
 
 @dataclass

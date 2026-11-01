@@ -41,3 +41,8 @@ Stories were merged on green GitHub CI while the desktop was offline (owner deci
 - [ ] Embedding parity on the 9 demo narratives: sidecar `/v1/embed` vs in-process `embedding_service.embed`, cosine ≥ 0.9999; `ML_REAL_MODELS=1 pytest src/services/ml/tests` inside the image
 - [ ] NER parity: sidecar spaCy 3.8.0 `/v1/ner` → tags vs backend `nlp_service.extract_tags` (3.7.x) on the same narratives
 - [ ] Memory: per-gunicorn-worker RSS vs the `ml` container (`docker stats`, `/v1/status` `rss_bytes`)
+
+## E0-LLM.3 — Backend detection and prompt budgets (PR #28)
+- [ ] Budget estimate ≥ real usage: send `fit`-built prompts (prose, transcript, entity list) to `lorekeeper` via `POST /api/chat` (`stream:false`); `estimate_messages(messages)` must be ≥ `prompt_eval_count`. Confirm the real context window (`ollama ps` / `POST /api/show`) with `OLLAMA_CONTEXT_LENGTH=4096` on the server
+- [ ] Detection: `detect_backend('http://100.119.62.5:11434')` → `ollama`; an OpenAI-compatible BYOK endpoint (KoboldCpp / llama.cpp server) → `openai_compat`; note what KoboldCpp's Ollama emulation returns
+- [ ] Known gap: compose `ollama` doesn't set `OLLAMA_CONTEXT_LENGTH` yet (E0-Platform.7)

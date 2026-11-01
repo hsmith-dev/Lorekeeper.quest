@@ -73,6 +73,14 @@ class Settings(BaseSettings):
         ge=1,
         validation_alias=AliasChoices("LLM_GATE_CAPACITY", "OLLAMA_NUM_PARALLEL", "llm_gate_capacity"),
     )
+    # Tokens of context the local model is loaded with (Ollama's own
+    # OLLAMA_CONTEXT_LENGTH, 4096 on the Reference Box). Prompt builders fit
+    # their prompts under this minus the task's reserved output
+    # (app/services/prompt_budget.py), since per-call num_ctx is stripped and
+    # anything over it would be cut off by Ollama without telling us.
+    # Must exceed every TASK_POLICIES reserved_output (largest 1024), or a
+    # task's window would be zero or negative.
+    ollama_context_length: int = Field(4096, ge=2048)
     # Where the admin model installer stages the ~4.4GB fine-tune GGUF while
     # it downloads it from Hugging Face and hands it to Ollama (see
     # ollama_service.install_finetuned_events). Unset = the system temp dir.

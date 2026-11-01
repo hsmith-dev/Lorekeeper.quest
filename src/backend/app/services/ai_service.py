@@ -109,14 +109,21 @@ async def generate_narrative(
     # supports stop_sequence and rep_pen. Ollama — the default hosted backend
     # on GPU-less deployments (see docker-compose.prod.yml's `ollama`
     # service) — doesn't implement that KoboldCpp-native path at all (404),
-    # despite otherwise being OpenAI-compatible, so on failure fall through
-    # to the generic chat-completions path below instead of raising. Same
-    # reasoning as check_kobold_health's KoboldCpp-then-Ollama fallback.
+    # so llm_provider.detect_backend (one cached GET /api/version) tells us
+    # when to skip it and go straight to chat completions. If the probe
+    # can't tell (backend down, or not Ollama), the native attempt still runs
+    # and on failure falls through to chat completions instead of raising.
+    # Same reasoning as check_kobold_health's KoboldCpp-then-Ollama fallback.
     #
-    # Both attempts are one local-LLM use, so they share one gate slot
-    # (a no-op for BYOK; complete_messages' own acquire is reentrant).
+    # The probe runs before the slot is taken (it never needs the gate). Both
+    # attempts are one local-LLM use, so they share one gate slot (a no-op
+    # for BYOK; complete_messages' own acquire is reentrant).
+    try_native = config is None or config.provider == "kobold"
+    if try_native:
+        backend = await llm_provider.detect_backend(config.api_url if config else None)
+        try_native = backend != llm_provider.BACKEND_OLLAMA
     async with llm_provider.gated(config or llm_provider.get_default_config()):
-        if config is None or config.provider == "kobold":
+        if try_native:
             try:
                 return await _generate_kobold_native(notes, genre, config, canon_context, shorthand_glossary, paragraph_limit)
             except Exception:
