@@ -8,11 +8,11 @@
 # ethical-use (Hippocratic) and unknown licences fail unless an exception
 # below records why that specific package is fine.
 #
-# Planned additions to check on arrival: Kokoro TTS, faster-whisper,
-# WeasyPrint, Sigma.js, Leaflet. They are checked automatically when they land
-# in requirements.txt / package-lock.json. Not covered, so review them by hand:
-# model weights (Kokoro, Whisper, spaCy models) and system libraries installed
-# in the Dockerfile (e.g. WeasyPrint needs Pango, which is LGPL).
+# licenses/register.yaml is the inventory of everything shipped (packages,
+# images, apt libraries, models, voices, fonts). With --register the checker
+# also requires a register entry per scanned package and applies the edition
+# rules in [strict] below (LOREKEEPER_EDITION = agpl | commercial). This file
+# stays the rule file: allowlist, aliases, deny lists, exceptions.
 
 [allow]
 # SPDX ids (case-insensitive). Expressions are evaluated: "A OR B" passes if
@@ -32,6 +32,8 @@ licenses = [
   # MPL-2.0 is file-level copyleft: fine to depend on unmodified. If we ever
   # patch an MPL file, that file's changes must be published.
   "MPL-2.0",
+  "PostgreSQL",  # PostgreSQL / pgvector
+  "OFL-1.1",     # SIL Open Font License 1.1 (fonts)
 ]
 
 [aliases]
@@ -74,6 +76,53 @@ patterns = [
   "UNKNOWN", "UNLICENSED", "Custom",
 ]
 
+[deny.packages]
+# Denied outright in --register mode, whatever licence they report.
+# pyvips[binary] bundles a statically built libvips; use apt libvips instead.
+python = ["pyvips-binary"]
+
+[strict]
+# Edition rules for --register (scripts/check-licenses.py). Both editions fail
+# on non-commercial, ethical-use, proprietary or unknown licences. The
+# commercial edition (strict) also fails on GPL/AGPL/LGPL, except LGPL apt
+# system libraries on system_lib_allowlist (dynamically linked). The agpl
+# edition allows GPL-family entries only with editions = [agpl] and an
+# `images` list inside agpl_only_images.
+gpl_patterns = [
+  "\\bA?GPL", "\\bLGPL", "General Public License", "GNU Library",
+]
+# The LGPL subset of the above: each consumes only the LGPL phrase (plus an
+# optional version / "or later" / "(LGPL...)" suffix), so whatever GPL text is
+# left over (e.g. "... AND GNU General Public License v3") still classifies as GPL.
+lgpl_patterns = [
+  "GNU Library or Lesser General Public License( \\(LGPL\\))?",
+  "(GNU )?(Lesser|Library) General Public License( v?[\\d.]+\\+?)?( or later)?( \\(LGPL[^)]*\\))?",
+  "\\bLGPL[-\\w.+]*",
+]
+bad_patterns = [
+  "\\bNC\\b", "-NC-", "NonCommercial", "Non-Commercial",
+  "Hippocratic",
+  "\\bSSPL\\b", "RSAL", "Commons Clause", "BUSL", "Business Source",
+  "Proprietary", "NVIDIA", "CPML",
+  "UNKNOWN", "UNLICENSED", "Custom",
+]
+# apt package-name regexes: dynamically linked LGPL system libraries that the
+# commercial edition may ship (libvips from apt, Pango, HarfBuzz, GLib).
+system_lib_allowlist = [
+  "^libvips\\d*(-|$)", "^(lib)?pango", "^libharfbuzz", "^libglib2",
+]
+# Images that exist only in the AGPL build (the optional TTS container).
+agpl_only_images = ["tts"]
+
+[artifacts]
+# --check-artifacts: tracked files with these extensions under these roots
+# are baked artifacts and each needs a model/voice/font register entry.
+extensions = [
+  ".woff2", ".woff", ".ttf", ".otf",
+  ".gguf", ".onnx", ".safetensors", ".pt", ".pth", ".ckpt", ".bin", ".h5", ".tflite",
+]
+roots = ["site", "src", "nginx", "models", "assets"]
+
 [ignore]
 # Tools that may be present only to run this check (never shipped).
 python = ["pip-licenses", "prettytable", "wcwidth"]
@@ -107,3 +156,11 @@ ecosystem = "npm"
 package = "caniuse-lite"
 license = "CC-BY-4.0"
 reason = "Browser-support data used by browserslist/autoprefixer at build time only; CC-BY permits commercial use (attribution only). OWNER TO CONFIRM."
+
+# --- Register entries (licenses/register.yaml), ecosystem = entry kind -------
+
+[[exception]]
+ecosystem = "image"
+package = "redis"
+license = "LicenseRef-RSALv2 OR SSPL-1.0"
+reason = "redis:7-alpine resolves to Redis 7.4.x (RSALv2 / SSPLv1, source-available, not OSI). Run unmodified as a separate upstream container. OWNER TO CONFIRM; permissive options: pin redis:7.2-alpine (last BSD-3-Clause) or switch to valkey/valkey (BSD-3-Clause)."
