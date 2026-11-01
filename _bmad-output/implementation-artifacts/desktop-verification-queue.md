@@ -75,3 +75,8 @@ Stories were merged on green GitHub CI while the desktop was offline (owner deci
 
 ## E0-UX.9 — Shortcut registry, help overlay, touch targets (PR #38)
 - [ ] Optional UI pass: `cd src/frontend && npm run dev`; press `?` on a page and inside an open NPC panel; type `?` in the journal (must not open help); VoiceOver over the help list
+
+## E0-Access.1 — F1-core migration, Members → Player (PR #39)
+- [x] ~~Upgrade/downgrade/upgrade on snapshot + adversarial data~~ — done by an independent data-safety review on a local Postgres16+pgvector: no row loss, chat archive only sets `archived_at`, forced mid-revision failure rolls back fully
+- [ ] `pytest tests/migrations tests/test_enum_check_sync.py tests/test_share.py tests/ev4` on a lane DB
+- [ ] On a COPY of a real production DB: `alembic upgrade head`, then `SELECT role, count(*) FROM campaign_members GROUP BY role` → only `player`
