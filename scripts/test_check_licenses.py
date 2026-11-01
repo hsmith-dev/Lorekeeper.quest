@@ -308,14 +308,25 @@ def test_classify_mixed_lgpl_gpl(lic, expected):
 
 
 def test_image_exception(tmp_path):
-    redis = POLICY.exceptions[("image", "redis")]
-    reg = make_register(tmp_path, [entry("redis", kind="image", license=redis["license"])])
+    # The real policy has no image exception any more (redis was replaced by
+    # Valkey, BSD-3-Clause), so exercise the mechanism with a synthetic one.
+    pol = _policy_with(tmp_path, '[[exception]]\necosystem = "image"\npackage = "srcavail"\n'
+                                 'license = "LicenseRef-RSALv2 OR SSPL-1.0"\nreason = "test"\n')
+    reg = make_register(tmp_path, [entry("srcavail", kind="image", license="LicenseRef-RSALv2 OR SSPL-1.0")])
     for edition in cl.EDITIONS:
-        failures, excepted = entries_check(reg, edition)
-        assert failures == [] and [x[0] for x in excepted] == ["image:redis"]
-    reg = make_register(tmp_path, [entry("redis", kind="image", license="SSPL-1.0")])
-    failures, excepted = entries_check(reg, "commercial")
-    assert excepted == [] and len(failures) == 1 and failures[0][0] == "image:redis"
+        failures, excepted = cl.check_register_entries(pol, reg, edition, set())
+        assert failures == [] and [x[0] for x in excepted] == ["image:srcavail"]
+    reg = make_register(tmp_path, [entry("srcavail", kind="image", license="SSPL-1.0")])
+    failures, excepted = cl.check_register_entries(pol, reg, "commercial", set())
+    assert excepted == [] and len(failures) == 1 and failures[0][0] == "image:srcavail"
+
+
+def test_valkey_image_needs_no_exception():
+    assert ("image", "redis") not in POLICY.exceptions
+    reg = cl.Register(cl.REPO_ROOT / "licenses" / "register.yaml")
+    valkey = [e for e in reg.entries if e["kind"] == "image" and e["name"] == "valkey/valkey"]
+    assert len(valkey) == 1 and valkey[0]["license"] == "BSD-3-Clause"
+    assert not [e for e in reg.entries if e["kind"] == "image" and e["name"] == "redis"]
 
 
 # ---- register vs artifacts --------------------------------------------------

@@ -1,4 +1,4 @@
-# Dev-only compose: runs postgres + redis locally so you can run backend/frontend directly.
+# Dev-only compose: runs postgres + valkey locally so you can run backend/frontend directly.
 # Usage: docker compose -f docker-compose.dev.yml up -d
 # Ports bind to 127.0.0.1 by default. Set BIND_IP in .env (e.g. a Tailscale IP)
 # to expose them on one specific interface instead. Never use 0.0.0.0 — Docker
@@ -21,18 +21,25 @@ services:
       timeout: 5s
       retries: 5
 
-  redis:
-    image: redis:7-alpine
+  # Valkey (BSD-3-Clause, Linux Foundation): a drop-in, Redis-compatible
+  # server. Replaces redis:7-alpine, which resolves to Redis 7.4+ (RSALv2 /
+  # SSPL, not shippable in the commercial edition). The app reaches it at
+  # VALKEY_URL (redis:// scheme, redis-py client: that's the wire protocol).
+  # Fresh `valkey_dev_data` volume: a Redis 7.4 dump (RDB format 12) can't be read
+  # by Valkey 8, and everything stored here is short-lived. See "Upgrading
+  # from Redis to Valkey" in README.md.
+  valkey:
+    image: valkey/valkey:8.1.11-alpine
     ports:
       - "${BIND_IP:-127.0.0.1}:6379:6379"
     volumes:
-      - redis_dev_data:/data
+      - valkey_dev_data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "valkey-cli", "ping"]
       interval: 5s
       timeout: 3s
       retries: 5
 
 volumes:
   postgres_dev_data:
-  redis_dev_data:
+  valkey_dev_data:

@@ -4,7 +4,7 @@
 #
 # Usage:
 #   ./scripts/stop.sh          — stop KoboldCpp, backend, frontend
-#   ./scripts/stop.sh --all    — also stop PostgreSQL + Redis containers
+#   ./scripts/stop.sh --all    — also stop PostgreSQL + Valkey containers
 # =============================================================================
 set -euo pipefail
 
@@ -71,12 +71,12 @@ stop_service kobold-finetuned 5002
 
 # ── Optionally stop Docker services ──────────────────────────────────────────
 if $STOP_ALL; then
-  step "PostgreSQL + Redis  (Docker)"
+  step "PostgreSQL + Valkey  (Docker)"
   sudo docker compose -f "$PROJECT_ROOT/docker-compose.dev.yml" down
   ok "Containers stopped"
 else
   echo ""
-  echo -e "${Y}  Note:${NC} PostgreSQL and Redis are still running."
+  echo -e "${Y}  Note:${NC} PostgreSQL and Valkey are still running."
   echo "  To stop them too: ./scripts/stop.sh --all"
 fi
 

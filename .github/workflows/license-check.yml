@@ -124,7 +124,7 @@ jobs:
   # build, not the runner's CI install above) and its OS packages (dpkg plus
   # /usr/share/doc/*/copyright on Debian, the apk database on Alpine). The
   # checker, register and policy are mounted read-only, never installed into
-  # the image. Upstream images we only reference in compose (postgres, redis,
+  # the image. Upstream images we only reference in compose (postgres, valkey,
   # ollama) are not built here; they are image entries in the register.
   image-licenses:
     name: image-licenses (${{ matrix.image }})

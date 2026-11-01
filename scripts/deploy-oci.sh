@@ -90,7 +90,7 @@ fi
 # ── 4. Bring up the stack ───────────────────────────────────────────────────
 step "Docker Compose stack"
 docker compose -f docker-compose.prod.yml up -d --build
-ok "Stack starting — postgres, redis, ollama, backend, nginx"
+ok "Stack starting — postgres, valkey, ollama, backend, nginx"
 
 # ── 5. Wait for Ollama, then import the fine-tuned model ───────────────────
 step "Ollama model import"

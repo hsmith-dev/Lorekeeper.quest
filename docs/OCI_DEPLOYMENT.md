@@ -13,7 +13,7 @@ OCI's Always Free tier includes up to **4 OCPUs / 24 GB RAM** of Ampere
 (ARM64) compute, split across up to 4 `VM.Standard.A1.Flex` instances, at
 **$0/month for as long as the account exists** (not a 12-month trial like
 most "free tier" cloud offers — this specific shape is permanently free).
-That's enough to run Postgres + Redis + the backend + Ollama serving the
+That's enough to run Postgres + Valkey + the backend + Ollama serving the
 fine-tuned 7B model (quantized to Q4, ~4-5 GB) + nginx all on one box. The
 tradeoff is ARM64 — every image in `docker-compose.prod.yml` was verified to
 have a real `linux/arm64` build (not just an x86_64 image running under
@@ -161,7 +161,7 @@ Full usage in the script's own `--help` / header docstring.
 
 **Default posture: one A1.Flex instance, $0/month, handles a meaningful
 amount of traffic on its own** — 4 OCPU/24GB is genuinely a lot for a
-FastAPI + Postgres + Redis + Ollama-serving-a-7B-model stack at low-to-moderate
+FastAPI + Postgres + Valkey + Ollama-serving-a-7B-model stack at low-to-moderate
 concurrent usage. Don't provision more until you actually see it struggling
 (`docker stats` on the instance, or response times climbing in nginx's
 access log). When you do, here's the path, roughly in the order you'd reach
@@ -206,8 +206,8 @@ history) — horizontal-scale that tier:
    free — beyond that, paid A1.Flex is billed per OCPU/GB-hour, which is
    still cheap relative to most cloud compute).
 3. Each instance runs `backend` + `nginx` (from `docker-compose.prod.yml`,
-   minus the `postgres`/`redis`/`ollama` services — those become shared,
-   see Step 3) pointing at the shared Postgres/Redis/Ollama instances via
+   minus the `postgres`/`valkey`/`ollama` services — those become shared,
+   see Step 3) pointing at the shared Postgres/Valkey/Ollama instances via
    private IP.
 4. Point the Load Balancer at all the instances' nginx (port 80), health
    check `/api/health`.
@@ -216,15 +216,15 @@ history) — horizontal-scale that tier:
 
 ### Step 3 — Externalize stateful services
 
-Once there's more than one app instance, Postgres and Redis can't live
+Once there's more than one app instance, Postgres and Valkey can't live
 inside any single app instance's Docker Compose anymore — every app
 instance needs to see the *same* database and cache.
 
 - **Simplest**: dedicate one more A1.Flex instance to just `postgres` +
-  `redis` (from `docker-compose.prod.yml`), open the VCN's internal
+  `valkey` (from `docker-compose.prod.yml`), open the VCN's internal
   security rules (not the internet-facing one) for 5432/6379 from the app
   instances' private IPs, point every app instance's `DATABASE_URL`/
-  `REDIS_URL` at it.
+  `VALKEY_URL` at it (a `redis://` URL: Valkey speaks the Redis protocol).
 - **Managed alternative**: OCI's Base Database Service / Autonomous
   Database can host Postgres-compatible storage with backups/HA handled for
   you — meaningfully more reliable than a single hand-managed instance, but
@@ -239,7 +239,7 @@ instance needs to see the *same* database and cache.
 Every step above keeps the **default single-instance deployment as the
 common case** — nothing in the codebase assumes multi-node (no
 in-memory session state that would break behind a load balancer; JWT auth is
-already stateless; Redis is used for caching, not session affinity). Scaling
+already stateless; Valkey is used for caching, not session affinity). Scaling
 out is an infrastructure change, not an application rewrite, which is the
-point of routing everything through `DATABASE_URL`/`REDIS_URL`/`KOBOLD_URL`
+point of routing everything through `DATABASE_URL`/`VALKEY_URL`/`KOBOLD_URL`
 env vars in the first place rather than hardcoding `localhost`.

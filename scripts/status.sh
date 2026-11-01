@@ -60,9 +60,9 @@ else
 fi
 
 if (echo -e '*1\r\n$4\r\nPING\r\n' > /dev/tcp/localhost/6379) 2>/dev/null; then
-  printf "  ${G}●${NC}  %-22s ${G}running${NC}  port=6379\n" "Redis"
+  printf "  ${G}●${NC}  %-22s ${G}running${NC}  port=6379\n" "Valkey"
 else
-  printf "  ${R}○${NC}  %-22s ${R}stopped${NC}\n" "Redis"
+  printf "  ${R}○${NC}  %-22s ${R}stopped${NC}\n" "Valkey"
 fi
 
 echo ""

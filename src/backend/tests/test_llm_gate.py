@@ -1,9 +1,9 @@
 """E0-LLM.2: the Redis priority gate (app/core/llm_gate.py).
 
 Every gate test runs twice: against fakeredis (in process, Lua via lupa) and
-against a real Redis-compatible server when REDIS_TEST_URL is set (Valkey in
-CI). Each test gets its own key prefix and deletes its keys afterwards. Waits
-are short (poll 10 ms) so no test takes more than a couple of seconds.
+against a real Valkey server when VALKEY_TEST_URL is set (as in CI). Each
+test gets its own key prefix and deletes its keys afterwards. Waits are short
+(poll 10 ms) so no test takes more than a couple of seconds.
 """
 
 import asyncio
@@ -22,7 +22,8 @@ from app.core import llm_gate
 from app.core.errors import LLMBusy
 from app.core.llm_gate import GateClass, LLMGate, class_for_queue
 
-REDIS_TEST_URL = os.environ.get("REDIS_TEST_URL")
+# VALKEY_TEST_URL; REDIS_TEST_URL is the deprecated name. Empty counts as unset.
+VALKEY_TEST_URL = os.environ.get("VALKEY_TEST_URL") or os.environ.get("REDIS_TEST_URL")
 
 
 @pytest_asyncio.fixture(params=["fake", "real"])
@@ -30,9 +31,9 @@ async def redis(request):
     if request.param == "fake":
         client = fakeredis.FakeAsyncRedis(server=fakeredis.FakeServer(), decode_responses=True)
     else:
-        if not REDIS_TEST_URL:
-            pytest.skip("REDIS_TEST_URL not set")
-        client = aioredis.from_url(REDIS_TEST_URL, decode_responses=True)
+        if not VALKEY_TEST_URL:
+            pytest.skip("VALKEY_TEST_URL not set")
+        client = aioredis.from_url(VALKEY_TEST_URL, decode_responses=True)
     yield client
     await client.aclose()
 
@@ -379,9 +380,9 @@ def test_priority_order_of_classes():
 
 async def test_fail_open_when_redis_uninitialised(monkeypatch, caplog):
     def boom():
-        raise RuntimeError("Redis not initialized")
+        raise RuntimeError("Valkey not initialized")
 
-    monkeypatch.setattr(llm_gate, "get_redis", boom)
+    monkeypatch.setattr(llm_gate, "get_valkey", boom)
     monkeypatch.setattr(llm_gate, "_gate", None)
     with caplog.at_level(logging.WARNING, logger="app.core.llm_gate"):
         async with llm_gate.llm_slot(GateClass.live_recap) as slot:
@@ -406,7 +407,7 @@ def test_get_gate_rebuilt_when_client_changes(monkeypatch):
     r1 = fakeredis.FakeAsyncRedis(server=fakeredis.FakeServer(), decode_responses=True)
     r2 = fakeredis.FakeAsyncRedis(server=fakeredis.FakeServer(), decode_responses=True)
     current = [r1]
-    monkeypatch.setattr(llm_gate, "get_redis", lambda: current[0])
+    monkeypatch.setattr(llm_gate, "get_valkey", lambda: current[0])
     monkeypatch.setattr(llm_gate, "_gate", None)
     g1 = llm_gate.get_gate()
     assert llm_gate.get_gate() is g1 and g1.redis is r1

@@ -5,7 +5,7 @@
 # Usage: ./scripts/start.sh
 #
 # Starts (in order):
-#   1. PostgreSQL + Redis  (Docker via docker-compose.dev.yml — requires sudo)
+#   1. PostgreSQL + Valkey (Docker via docker-compose.dev.yml — requires sudo)
 #   2. Alembic migrations  (runs automatically, safe to re-run)
 #   3. KoboldCpp           (Mistral 7B on port 5001)
 #   4. FastAPI backend     (uvicorn --reload on port 8000)
@@ -36,8 +36,8 @@ is_running() {
   [ -f "$pid_file" ] && kill -0 "$(cat "$pid_file")" 2>/dev/null
 }
 
-# ── 1. PostgreSQL + Redis ─────────────────────────────────────────────────────
-step "PostgreSQL + Redis"
+# ── 1. PostgreSQL + Valkey ────────────────────────────────────────────────────
+step "PostgreSQL + Valkey"
 if pg_isready -h localhost -p 5432 -q 2>/dev/null; then
   ok "PostgreSQL already accepting connections"
 else

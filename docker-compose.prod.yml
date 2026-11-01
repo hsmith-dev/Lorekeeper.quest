@@ -57,17 +57,30 @@ services:
           cpus: "1.0"
           memory: 3g
 
-  redis:
-    image: redis:7-alpine
+  # Valkey (BSD-3-Clause, Linux Foundation): a drop-in, Redis-compatible
+  # server. Replaces redis:7-alpine, which resolves to Redis 7.4+ (RSALv2 /
+  # SSPL, not shippable in the commercial edition). The app reaches it at
+  # VALKEY_URL (redis:// scheme, redis-py client: that's the wire protocol).
+  # Fresh `valkey_data` volume: a Redis 7.4 dump (RDB format 12) can't be read
+  # by Valkey 8, and everything stored here is short-lived. See "Upgrading
+  # from Redis to Valkey" in README.md.
+  valkey:
+    image: valkey/valkey:8.1.11-alpine
     restart: unless-stopped
-    command: redis-server --save 60 1 --loglevel warning
+    command: valkey-server --save 60 1 --loglevel warning
     volumes:
-      - redis_data:/data
+      - valkey_data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "valkey-cli", "ping"]
       interval: 10s
       timeout: 3s
       retries: 5
+    # Transitional: the old `redis` hostname still resolves, so an existing
+    # .env with REDIS_URL=redis://redis:6379/0 keeps working. Remove once
+    # REDIS_URL is gone.
+    networks:
+      default:
+        aliases: [redis]
     deploy:
       resources:
         limits:
@@ -142,7 +155,7 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      redis:
+      valkey:
         condition: service_healthy
     # Run migrations on startup before serving. Deliberately a single line —
     # a folded (`>`) multi-line YAML scalar only folds line breaks to spaces
@@ -192,7 +205,7 @@ services:
         limits:
           cpus: "2.0"
           memory: 14g
-    # `default` for postgres/redis/ollama/nginx, `models` to reach the ml
+    # `default` for postgres/valkey/ollama/nginx, `models` to reach the ml
     # sidecar.
     networks:
       - default
@@ -267,7 +280,7 @@ networks:
 
 volumes:
   postgres_data:
-  redis_data:
+  valkey_data:
   nginx_logs:
   ollama_data:
   backend_logs:

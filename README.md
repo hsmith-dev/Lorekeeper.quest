@@ -37,7 +37,7 @@ Open `.env` in any editor. Only **two values** need changing (the file walks you
 docker compose -f docker-compose.prod.yml up -d --build
 ```
 
-The first build takes a few minutes (downloads base images, builds the frontend, installs Python deps). When it finishes, `docker compose -f docker-compose.prod.yml ps` should show every service `Up`, with postgres/redis/ollama/backend `(healthy)`.
+The first build takes a few minutes (downloads base images, builds the frontend, installs Python deps). When it finishes, `docker compose -f docker-compose.prod.yml ps` should show every service `Up`, with postgres/valkey/ollama/backend `(healthy)`.
 
 ### 3 · Create your admin account
 
@@ -87,7 +87,27 @@ Prefer a different model entirely? Any instruct GGUF works — `ollama cp` any p
 
 - **Admin → System** shows whether the model server is reachable and which models are installed, has a live view of recent backend logs, and a **Download support bundle** button — a zip of recent logs plus a sanitized snapshot of the deployment's state (no secrets). Send that zip to **hello@harrisonsmith.ai** or attach it when [opening an issue](../../issues).
 - "AI model unavailable" or chat errors while Test Connection looks fine usually means no model is installed under the expected name — the Model Library shows this at a glance, and Test Connection will now tell you exactly that.
-- Raw container logs: `docker compose -f docker-compose.prod.yml logs backend --tail 200` (also `nginx`, `ollama`, `postgres`).
+- Raw container logs: `docker compose -f docker-compose.prod.yml logs backend --tail 200` (also `nginx`, `ollama`, `postgres`, `valkey`).
+
+### Upgrading from Redis to Valkey
+
+Since November 2026 the stack runs **Valkey** (`valkey/valkey:8.1.11-alpine`, BSD-3-Clause) instead of `redis:7-alpine`, which now resolves to Redis 7.4 under the RSALv2/SSPL licences. Valkey is a Redis-compatible drop-in: the app uses the same `redis://` URLs and client library. The compose service is now `valkey`, its volume `valkey_data` (`valkey_dev_data` in `docker-compose.dev.yml`), and the setting `VALKEY_URL`.
+
+What an existing install needs to do:
+
+1. **`.env`:** rename `REDIS_URL` to `VALKEY_URL` (value `redis://valkey:6379/0`). Until you do, the backend still reads `REDIS_URL` and logs a deprecation warning, and the `valkey` service also answers to the old `redis` hostname, so `redis://redis:6379/0` keeps working.
+2. **Data:** nothing to migrate. Valkey only holds short-lived data (5-minute caches, 24-hour duplicate-upload hashes, the LLM queue), so the new `valkey_data` volume simply starts empty. Your campaigns, journals and accounts live in Postgres and are untouched.
+3. **Old volume:** once the new stack is up, remove the old one if you like: `docker volume ls | grep redis_data`, then `docker volume rm <project>_redis_data`.
+
+Do **not** point Valkey 8 at the old `redis_data` volume. Redis 7.4 writes its dump in RDB format 12, which Valkey 8 refuses to load (`Can't handle RDB format version 12`; tested with Valkey 8.1.11, and `--rdb-version-check relaxed` does not help), so the container would crash-loop. A volume last written by Redis 7.2 or older (`redis:7.2-alpine`, RDB format 11) does load. If you really want to carry such a volume over, copy it into the new one with the stack stopped:
+
+```bash
+docker compose -f docker-compose.prod.yml down
+docker volume create <project>_valkey_data
+docker run --rm -v <project>_redis_data:/from:ro -v <project>_valkey_data:/to alpine cp -a /from/. /to/
+```
+
+(`<project>` is the Compose project name, by default the checkout's directory name; `docker volume ls` shows it.)
 
 ### TLS
 
@@ -117,11 +137,11 @@ then start with both files: `docker compose -f docker-compose.prod.yml -f docker
 Dev-only: this applies to `docker-compose.yml` and `docker-compose.dev.yml`, which publish their ports on `127.0.0.1` by default, and does not affect `docker-compose.prod.yml`. To reach them from another machine (e.g. a laptop working against a desktop):
 
 - Start Tailscale first, then set `BIND_IP` in `.env` to the desktop's Tailscale IPv4 address (`tailscale ip -4`; an unbracketed IPv6 address breaks the port spec). If Tailscale wasn't up, `up -d` fails with "cannot assign requested address": start it and re-run `up -d`.
-- Run `docker compose -f docker-compose.dev.yml up -d` (Postgres + Redis), or `docker compose up -d` for the full dev stack (adds backend 8000 and Vite 5173). Check with `docker compose -f docker-compose.dev.yml ps`: it should show `127.0.0.1:5432->5432` (or your `BIND_IP`).
-- On the laptop: `DATABASE_URL=postgresql+asyncpg://lorekeeper:changeme@100.x.y.z:5432/lorekeeper` and `REDIS_URL=redis://100.x.y.z:6379/0`.
+- Run `docker compose -f docker-compose.dev.yml up -d` (Postgres + Valkey), or `docker compose up -d` for the full dev stack (adds backend 8000 and Vite 5173). Check with `docker compose -f docker-compose.dev.yml ps`: it should show `127.0.0.1:5432->5432` (or your `BIND_IP`).
+- On the laptop: `DATABASE_URL=postgresql+asyncpg://lorekeeper:changeme@100.x.y.z:5432/lorekeeper` and `VALKEY_URL=redis://100.x.y.z:6379/0`.
 - `BIND_IP` replaces loopback rather than adding to it, so clients on the desktop itself (psql, a natively run backend, `scripts/start.sh`'s `pg_isready -h localhost`) must also use the `BIND_IP` address.
 - Every device on your tailnet can then reach these services: restrict them with Tailscale ACLs and use a non-default Postgres password.
-- Never set `BIND_IP=0.0.0.0`: Docker-published ports bypass host firewalls such as ufw/firewalld on Linux, so Postgres, Redis, the backend API and Vite would be exposed to your whole LAN.
+- Never set `BIND_IP=0.0.0.0`: Docker-published ports bypass host firewalls such as ufw/firewalld on Linux, so Postgres, Valkey, the backend API and Vite would be exposed to your whole LAN.
 
 ## Access modes
 
@@ -133,7 +153,7 @@ Running Lorekeeper as a **paid service** (Stripe subscriptions — the integrati
 
 ## Architecture
 
-FastAPI backend · React frontend · PostgreSQL + pgvector (embeddings & retrieval) · Redis (caching) · Ollama (LLM serving) · nginx — one Docker Compose stack. See `docs/` for deployment, backups, and email setup, and [docs/RELEASE_NOTES.md](./docs/RELEASE_NOTES.md) for what changed in each release.
+FastAPI backend · React frontend · PostgreSQL + pgvector (embeddings & retrieval) · Valkey (Redis-compatible cache and LLM queue) · Ollama (LLM serving) · nginx — one Docker Compose stack. See `docs/` for deployment, backups, and email setup, and [docs/RELEASE_NOTES.md](./docs/RELEASE_NOTES.md) for what changed in each release.
 
 ## Running tests
 
@@ -159,6 +179,8 @@ URL=postgresql+asyncpg://lorekeeper:changeme@my-desktop.tailnet.ts.net:5432/lore
 TEST_DATABASE_URL=$URL DATABASE_URL=$URL POSTGRES_PASSWORD=changeme SECRET_KEY=test-only \
   python -m pytest
 ```
+
+The LLM-gate tests also run against a real Valkey when `VALKEY_TEST_URL` is set (CI uses `redis://localhost:6379/15`); otherwise only their in-process fakeredis half runs. `REDIS_TEST_URL` is still accepted as the old name.
 
 The suite drops and recreates every table, so it refuses to start unless the database name ends in `_test` or `_test_<lane>` (lane = letters and digits). `lorekeeper` or `lorekeeper_testing` aborts the run before anything connects. The guard checks only the database name, not the host or credentials. When several worktrees share one Postgres, give each its own database, e.g. `lorekeeper_test_e0qa4`. Create it once as the `lorekeeper` role, for example with `psql` on the pgvector server: `CREATE DATABASE lorekeeper_test_e0qa4;`. The suite runs `CREATE EXTENSION IF NOT EXISTS vector` itself, so the `vector` extension must be available on that server (the `pgvector/pgvector` image has it).
 
