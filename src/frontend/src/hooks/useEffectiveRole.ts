@@ -1,66 +1,47 @@
 import { usePreview } from "@/contexts/PreviewContext";
 import type { CampaignRole } from "@/components/ui/role-badge";
 import { useCurrentCampaign } from "./useCurrentCampaign";
+import { campaignRoleState, isGmRole, useCampaignRole, type CampaignRoleState } from "./useCampaignRole";
 import type { Campaign } from "../types";
 
-// The user's Role in a campaign, for the shell (E0-UX.7).
+// The user's Role in a campaign, for the shell (E0-UX.7, E0-Access.2).
 //
 // Roles here are cosmetic: they decide which controls to show, never what data
 // a user may read or change. The server enforces membership and role on every
 // request (AD-13), so a wrong value here can only make the UI look wrong.
 //
-// Until E0-Access.2 ships `useCampaignRole` (backed by
-// GET /api/campaigns/{id}/me), the role is stubbed from `is_owner`: owners are
-// GM, everyone else Player. `useRoleFor` is the single seam: E0-Access.2
-// replaces its body with `useCampaignRole(campaign.id)` mapped through
-// `roleFromMe`. No speculative /me call is made today: the endpoint would 404,
-// and 404 also means "not a member", so a probe could not tell them apart.
+// `useRoleFor` is the single seam. It reads `useCampaignRole(campaign.id)`
+// (GET /api/campaigns/{id}/me, key ["campaignRole", id]); while that loads, or
+// when it fails, the role is stubbed from the campaign list's `is_owner`:
+// owners are GM, everyone else Player.
 
-export interface CampaignRoleState {
-  role: CampaignRole;
-  isOwner: boolean;
-  /** GM or Co-GM. */
-  isGm: boolean;
-  isLoading: boolean;
-}
+export { campaignRoleState, isGmRole, roleFromMe } from "./useCampaignRole";
+export type { CampaignRoleState } from "./useCampaignRole";
 
 export interface EffectiveRoleState extends CampaignRoleState {
   /** "Preview as Player" is on, so `role` is forced to player. */
   previewing: boolean;
 }
 
-/** Stub role until E0-Access.2: owner = GM, anyone else (or unknown) = Player. */
+/** Stub role (no /me answer): owner = GM, anyone else (or unknown) = Player. */
 export function stubRole(campaign: Pick<Campaign, "is_owner"> | null | undefined): CampaignRole {
   return campaign?.is_owner === true ? "gm" : "player";
 }
 
-/**
- * Map a `GET /api/campaigns/{id}/me` body to a CampaignRole.
- * `{role:"gm", display_role:"Co-GM"}` → co_gm, `{role:"gm"}` → gm, anything
- * else → player. Unknown values degrade to the least-privileged role (D-1b).
- */
-export function roleFromMe(me: unknown): CampaignRole {
-  if (!me || typeof me !== "object") return "player";
-  const { role, display_role } = me as { role?: unknown; display_role?: unknown };
-  if (role !== "gm") return "player";
-  if (typeof display_role === "string" && display_role.trim().toLowerCase() === "co-gm") return "co_gm";
-  return "gm";
-}
-
-export function isGmRole(role: CampaignRole): boolean {
-  return role === "gm" || role === "co_gm";
-}
-
-/** Role state for one campaign, shaped like E0-Access.2's useCampaignRole. */
+/** Stub role state for one campaign, shaped like useCampaignRole's. */
 export function roleStateFor(campaign: Campaign | null | undefined): CampaignRoleState {
   const role = stubRole(campaign);
   return { role, isOwner: campaign?.is_owner === true, isGm: isGmRole(role), isLoading: false };
 }
 
-/** The real (not preview-adjusted) role in `campaign`. */
+/**
+ * The real (not preview-adjusted) role in `campaign`: the /me answer when
+ * there is one, else the stub (loading, failed, or no campaign).
+ */
 export function useRoleFor(campaign: Campaign | null | undefined): CampaignRoleState {
-  // E0-Access.2: return useCampaignRole(campaign?.id) mapped through roleFromMe.
-  return roleStateFor(campaign);
+  const fromMe = useCampaignRole(campaign?.id);
+  if (fromMe.me !== undefined) return campaignRoleState(fromMe.me, false);
+  return { ...roleStateFor(campaign), isLoading: fromMe.isLoading };
 }
 
 /** Force the Player view while previewing. */

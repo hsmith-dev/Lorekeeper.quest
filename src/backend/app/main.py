@@ -21,7 +21,7 @@ from app.services.chat_service import check_kobold_health
 from app.db.session import get_db
 from app.api.routes import (
     auth, campaigns, journals, tags, chat, ingest, npcs, quests, sources, share, billing, session_plans, feedback,
-    admin, shorthand, character_sheets,
+    admin, shorthand, character_sheets, members,
 )
 from app.api.routes import settings as settings_routes
 from app.api.deps import require_active_account, require_admin
@@ -70,7 +70,8 @@ def create_app() -> FastAPI:
         allow_origins=settings.cors_origins,
         allow_credentials=True,
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-        allow_headers=["Authorization", "Content-Type"],
+        # X-Lorekeeper-Preview: "Preview as Player" (E0-UX.6), honoured from E0-Access.3.
+        allow_headers=["Authorization", "Content-Type", "X-Lorekeeper-Preview"],
     )
 
     # ── Request timing ────────────────────────────────────────────────────────
@@ -126,6 +127,8 @@ def create_app() -> FastAPI:
     app.include_router(auth.router,      prefix="/api/auth",      tags=["auth"])
     app.include_router(billing.router,   prefix="/api/billing",   tags=["billing"])
     app.include_router(campaigns.router, prefix="/api/campaigns", tags=["campaigns"], dependencies=gate)
+    # E0-Access members routes (GET /{campaign_id}/me today), same prefix.
+    app.include_router(members.router,   prefix="/api/campaigns", tags=["members"],   dependencies=gate)
     app.include_router(journals.router,  prefix="/api/journals",  tags=["journals"],  dependencies=gate)
     app.include_router(tags.router,      prefix="/api/tags",      tags=["tags"],      dependencies=gate)
     app.include_router(chat.router,      prefix="/api/chat",      tags=["chat"],      dependencies=gate)

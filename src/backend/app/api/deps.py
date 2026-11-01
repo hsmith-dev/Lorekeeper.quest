@@ -1,47 +1,15 @@
 import uuid
-from datetime import datetime, timezone
-from fastapi import Depends, HTTPException, status
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi import Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
 
 from app.db.session import get_db
 from app.db.models.user import User
-from app.core.security import decode_token_payload
-
-bearer_scheme = HTTPBearer()
-
-
-async def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
-    db: AsyncSession = Depends(get_db),
-) -> User:
-    payload = decode_token_payload(credentials.credentials)
-    user_id = payload["sub"]
-    result = await db.execute(select(User).where(User.id == uuid.UUID(user_id)))
-    user = result.scalar_one_or_none()
-    if user is None:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
-    if user.password_changed_at is not None and payload.get("iat") is not None:
-        token_issued_at = datetime.fromtimestamp(payload["iat"], tz=timezone.utc)
-        if token_issued_at < user.password_changed_at:
-            # Token predates the account's last password reset — reject it
-            # even though it's not expired yet. See User.password_changed_at.
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Your session is no longer valid — please log in again.",
-            )
-    if user.is_suspended:
-        # Checked here, not just in require_active_account, so a suspension
-        # blocks *everything* — billing status, settings, avatar upload, not
-        # just feature routes — and can't be bypassed by an already-active
-        # subscription (access_granted is billing-derived and gets
-        # recomputed by the Stripe webhook independent of this).
-        detail = "Your account has been suspended."
-        if user.suspended_reason:
-            detail += f" Reason: {user.suspended_reason}"
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
-    return user
+# Moved to app.access.identity (E0-Access.2) so app.access can depend on the
+# user without importing app.api. Re-exported as the same objects:
+# `app.dependency_overrides[get_current_user]` works with either import.
+from app.access.identity import bearer_scheme, get_current_user  # noqa: F401
+from app.access.context import ctx_for, role_map
+from app.access.policy import not_found
 
 
 async def require_active_account(user: User = Depends(get_current_user)) -> User:
@@ -106,47 +74,31 @@ async def get_campaign_with_access(
     user: User,
     require_owner: bool = False,
 ):
-    """The single place campaign access is checked, so every route agrees on what
-    'this user can touch this campaign' means. Owners always pass. Non-owners pass
-    only if require_owner=False AND they're a CampaignMember (joined via a
-    'collaborate' share link) — used for read/write on journals/NPCs/quests.
-    require_owner=True is for campaign management itself (delete, manage share
-    links) where membership isn't enough. 404 (not 403) either way, so a
-    non-member can't tell a campaign exists vs. doesn't."""
+    """DEPRECATED (E0-Access.2): use `Depends(require_campaign(min_role))` or
+    `app.access.ctx_for`. A thin wrapper over `ctx_for`, kept until
+    E0-Access.5 moves its callers.
+
+    Returns the Campaign when the user is its Owner or (unless
+    require_owner=True) any Member, whatever the Member's Role. Every denial
+    is the one `404 {"detail":"Not found"}` (app.access.not_found)."""
     from app.db.models.campaign import Campaign
-    from app.db.models.campaign_member import CampaignMember
 
-    result = await db.execute(select(Campaign).where(Campaign.id == campaign_id))
-    campaign = result.scalar_one_or_none()
-    if not campaign:
-        raise HTTPException(status_code=404, detail="Campaign not found")
-
-    if campaign.user_id == user.id:
-        return campaign
-
-    if not require_owner:
-        member = await db.execute(
-            select(CampaignMember).where(
-                CampaignMember.campaign_id == campaign_id, CampaignMember.user_id == user.id
-            )
-        )
-        if member.scalar_one_or_none():
-            return campaign
-
-    raise HTTPException(status_code=404, detail="Campaign not found")
+    ctx = await ctx_for(db, user.id, campaign_id)
+    if require_owner and not ctx.is_owner:
+        not_found()
+    campaign = await db.get(Campaign, ctx.campaign_id)
+    if campaign is None:  # deleted between the two reads
+        not_found()
+    return campaign
 
 
 async def accessible_campaign_ids(db: AsyncSession, user: User) -> list[uuid.UUID]:
-    """All campaign IDs this user can see: ones they own plus ones they've joined
-    as a collaborator. Used to scope list queries (journals/NPCs/quests) so a
-    campaign's shared resources are visible to every member, not just whoever
-    happens to be asking — the read counterpart to get_campaign_with_access."""
-    from app.db.models.campaign import Campaign
-    from app.db.models.campaign_member import CampaignMember
+    """DEPRECATED (E0-Access.2): use `app.access.role_map` and
+    `scoped_select_multi`. A thin wrapper over `role_map`, kept until
+    E0-Access.5 moves its callers.
 
-    owned = await db.execute(select(Campaign.id).where(Campaign.user_id == user.id))
-    joined = await db.execute(select(CampaignMember.campaign_id).where(CampaignMember.user_id == user.id))
-    return list({*owned.scalars().all(), *joined.scalars().all()})
+    Every Campaign id the user owns or is a Member of, whatever the Role."""
+    return list(await role_map(db, user))
 
 
 async def get_user_llm_config(

@@ -49,11 +49,13 @@ FROZEN_IGNORES = {
 REQUIRED_CONTRACTS = {"layers": "layers", "domain": "forbidden", "clients": "forbidden",
                       "clients_callers": "forbidden", "models": "forbidden"}
 
-REQUIRED_LAYERS = ["app.api", "app.services", "app.schemas", "app.db", "app.core", "(app.domain)"]
+# app.access (AD-13) sits between services and schemas (E0-Access.2).
+REQUIRED_LAYERS = ["app.api", "app.services", "app.access", "app.schemas", "app.db", "app.core", "(app.domain)"]
 # The models contract, frozen whole: dropping a source module or a forbidden
 # package is a weakening and must show up here in review.
 FROZEN_MODEL_SOURCES = frozenset({
-    "app.api", "app.clients", "app.services", "app.schemas", "app.db", "app.core", "app.domain", "app.main",
+    "app.api", "app.clients", "app.services", "app.access", "app.schemas", "app.db", "app.core", "app.domain",
+    "app.main",
 })
 FROZEN_MODEL_PACKAGES = frozenset({
     "torch", "torchaudio", "torchvision", "transformers", "sentence_transformers", "spacy", "whisper",
@@ -146,16 +148,17 @@ def test_contract_shapes():
     cp = contracts()
     assert values(cp, "importlinter:contract:layers", "layers") == REQUIRED_LAYERS
     assert values(cp, "importlinter:contract:domain", "source_modules") == ["app.domain"]
-    assert {"app.api", "app.services", "app.schemas", "app.db", "app.core", "app.clients", "app.main"} <= set(
-        values(cp, "importlinter:contract:domain", "forbidden_modules"))
+    assert {"app.api", "app.services", "app.access", "app.schemas", "app.db", "app.core", "app.clients",
+            "app.main"} <= set(values(cp, "importlinter:contract:domain", "forbidden_modules"))
     assert values(cp, "importlinter:contract:clients", "source_modules") == ["app.clients"]
-    assert {"app.api", "app.services", "app.schemas", "app.db", "app.main"} <= set(
+    assert {"app.api", "app.services", "app.access", "app.schemas", "app.db", "app.main"} <= set(
         values(cp, "importlinter:contract:clients", "forbidden_modules"))
     models = "importlinter:contract:models"
     assert set(values(cp, models, "source_modules")) == FROZEN_MODEL_SOURCES
     assert set(values(cp, models, "forbidden_modules")) == FROZEN_MODEL_PACKAGES
     callers = "importlinter:contract:clients_callers"
-    assert set(values(cp, callers, "source_modules")) == {"app.schemas", "app.db", "app.core", "app.domain"}
+    assert set(values(cp, callers, "source_modules")) == {
+        "app.access", "app.schemas", "app.db", "app.core", "app.domain"}
     assert values(cp, callers, "forbidden_modules") == ["app.clients"]
     assert cp.get(models, "unmatched_ignore_imports_alerting", fallback="error") == "error"
 
@@ -183,7 +186,10 @@ TODAY = {
     "services/embedding_service.py": "from sentence_transformers import SentenceTransformer\n",
     "services/transcription_service.py": "import whisper\n",
     "services/vision_service.py": "import easyocr\n",
-    "services/journal_service.py": "from app.db import base\nfrom app.schemas import journal\nfrom app.clients import ml\n",
+    "services/journal_service.py": ("from app.access import context\nfrom app.db import base\n"
+                                    "from app.schemas import journal\nfrom app.clients import ml\n"),
+    "access/context.py": ("from app.schemas import journal\nfrom app.db import base\nfrom app.core import config\n"
+                          "from app.domain import embedding\n"),
     "api/routes.py": "from app.services import journal_service\n",
     "schemas/journal.py": "from app.domain import embedding\n",
     "db/base.py": "from app.core import config\n",
@@ -198,7 +204,7 @@ def lint(tmp_path: Path, extra: dict[str, str | None] | None = None) -> subproce
     files = dict(TODAY)
     files.update(extra or {})
     pkg = tmp_path / "app"
-    for sub in ("", "api", "services", "schemas", "db", "core", "domain", "clients"):
+    for sub in ("", "api", "services", "access", "schemas", "db", "core", "domain", "clients"):
         (pkg / sub).mkdir(parents=True, exist_ok=True)
         (pkg / sub / "__init__.py").write_text("")
     for rel, body in files.items():
@@ -228,6 +234,14 @@ def test_layout_like_today_passes(tmp_path):
     ({"api/bad.py": "import torch\n"}, "AD-1 no model packages", "app.api.bad -> torch"),
     ({"clients/stt.py": "import faster_whisper\n"}, "AD-1 no model packages", "app.clients.stt -> faster_whisper"),
     ({"services/new_tts.py": "from kokoro_onnx import Kokoro\n"}, "AD-1 no model packages", "app.services.new_tts -> kokoro_onnx"),
+    # app.access (E0-Access.2): below services and api, above schemas; never clients.
+    ({"access/bad.py": "from app.services import journal_service\n"}, "AD-1 layers", "app.access.bad -> app.services"),
+    ({"access/bad.py": "import app.api.routes\n"}, "AD-1 layers", "app.access.bad -> app.api"),
+    ({"schemas/bad.py": "from app.access import context\n"}, "AD-1 layers", "app.schemas.bad -> app.access"),
+    ({"access/bad.py": "from app.clients import ml\n"}, "AD-1 only services and above import app.clients", "app.access.bad -> app.clients"),
+    ({"domain/bad.py": "from app.access import context\n"}, "AD-1 app.domain imports no other app package", "app.domain.bad -> app.access"),
+    ({"clients/bad.py": "from app.access import context\n"}, "AD-1 app.clients imports only", "app.clients.bad -> app.access"),
+    ({"access/bad.py": "import torch\n"}, "AD-1 no model packages", "app.access.bad -> torch"),
 ])
 def test_planted_violation_fails(tmp_path, plant, contract, offender):
     r = lint(tmp_path, plant)

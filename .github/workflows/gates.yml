@@ -36,7 +36,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r <(grep -iE '^(pyyaml|pytest|import-linter|grimp)==' src/backend/requirements-dev.txt)
 
-      # CI-2 (AD-1): api > services > schemas > db > core > domain; domain
+      # CI-2 (AD-1): api > services > access > schemas > db > core > domain; domain
       # imports no app package; clients only core/domain, and only services
       # and above import clients; no model package imported anywhere in app
       # (clients included). Contracts: src/backend/.importlinter.
@@ -75,19 +75,23 @@ jobs:
       - name: "CI-14 AD-7 memory budget"
         run: python scripts/check_memory_budget.py
 
+      # CI-8 (AD-13): access scoping. E0-Access.2: `as_system(` (the GM-level
+      # system ctx, RC-6) is referenced only in
+      # journal_service.delete_journal_entry and world_service.merge_entities.
+      # E0-Access.5 adds the scoped-query ratchet against
+      # scripts/scoped_queries_baseline.txt to the same script.
+      - name: "CI-8 AD-13 scoped queries"
+        run: python scripts/check_scoped_queries.py
+
       - name: Gate unit tests
         run: |
           python -m pytest -q \
             scripts/test_check_model_packages.py \
             scripts/test_check_table_owners.py \
-            scripts/test_check_memory_budget.py
+            scripts/test_check_memory_budget.py \
+            scripts/test_check_scoped_queries.py
 
       # ---- reserved slots (owning story uncomments its step) ----------------
-      #
-      # CI-8 (AD-13), E0-Access.5: scoped-query ratchet against
-      # scripts/scoped_queries_baseline.txt.
-      # - name: "CI-8 AD-13 scoped queries"
-      #   run: python scripts/check_scoped_queries.py
       #
       # CI-15 (UX-DR3), E0-UX.2: frontend tsc strict build plus the colour-token
       # grep (scripts/check-ui-tokens.mjs). Needs setup-node; may become its

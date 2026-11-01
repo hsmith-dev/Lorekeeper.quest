@@ -2,7 +2,8 @@
 // Checks the E0-UX.7 global current Campaign and CampaignSwitcher against the
 // story's I/O matrix: resolveCurrentCampaign (first load, stored, pick, lost
 // access, just created, none left, loading/error), per-user storage keys with a
-// memory fallback, the role stub and the /me adapter, the preview override,
+// memory fallback, the role stub, the /me adapter and useCampaignRole
+// (E0-Access.2: useRoleFor reads ["campaignRole", id]), the preview override,
 // the switcher's menu layout and its server-rendered trigger, the nav's 44px
 // targets and the CampaignSelector defaults.
 // Pure functions plus renderToStaticMarkup; keyboard, focus, reload and the
@@ -18,6 +19,7 @@ import { dirname, join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import axios from "axios";
 import { build } from "esbuild";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createElement as h } from "react";
@@ -63,6 +65,7 @@ await build({
   entryPoints: {
     "current-campaign": join(srcDir, "hooks/useCurrentCampaign.ts"),
     "effective-role": join(srcDir, "hooks/useEffectiveRole.ts"),
+    "campaign-role": join(srcDir, "hooks/useCampaignRole.ts"),
     switcher: join(srcDir, "components/shell/CampaignSwitcher.tsx"),
     selector: join(srcDir, "components/CampaignSelector.tsx"),
     navbar: join(srcDir, "components/NavBar.tsx"),
@@ -82,9 +85,19 @@ await build({
   logLevel: "error",
 });
 
+// services/api.ts's axios instance copies axios.defaults when it is created
+// (on the first load below), so this adapter records any request the hooks
+// make. A server render must make none (useCampaignRole's /me included).
+const requests = [];
+axios.defaults.adapter = async (config) => {
+  requests.push(`${config.method?.toUpperCase()} ${config.url}`);
+  throw new Error("check-campaign-switcher: no network");
+};
+
 const load = (name) => import(pathToFileURL(join(outDir, `${name}.mjs`)).href);
 const cc = await load("current-campaign");
 const role = await load("effective-role");
+const campaignRole = await load("campaign-role");
 const { CampaignSwitcher, switcherMenu, CREATE_CAMPAIGN_HREF } = await load("switcher");
 const { CampaignSelector } = await load("selector");
 const { NavBar } = await load("navbar");
@@ -345,6 +358,37 @@ describe("roles", () => {
     }
   });
 
+  test("roleFromMe lives in useCampaignRole and is re-exported", () => {
+    assert.equal(role.roleFromMe, campaignRole.roleFromMe);
+    assert.equal(role.campaignRoleState, campaignRole.campaignRoleState);
+    assert.deepEqual(campaignRole.campaignRoleKey("a"), ["campaignRole", "a"]);
+  });
+
+  test("campaignRoleState: /me body -> {role, isOwner, isGm, isLoading}", () => {
+    const s = campaignRole.campaignRoleState;
+    assert.deepEqual(s({ campaign_id: "a", role: "gm", is_owner: true, display_role: "Owner" }), {
+      role: "gm",
+      isOwner: true,
+      isGm: true,
+      isLoading: false,
+    });
+    assert.deepEqual(s({ campaign_id: "a", role: "gm", is_owner: false, display_role: "Co-GM" }), {
+      role: "co_gm",
+      isOwner: false,
+      isGm: true,
+      isLoading: false,
+    });
+    assert.deepEqual(s({ campaign_id: "a", role: "player", is_owner: false, display_role: "Player" }), {
+      role: "player",
+      isOwner: false,
+      isGm: false,
+      isLoading: false,
+    });
+    // A player body claiming ownership is not an owner; no body yet is a loading player.
+    assert.equal(s({ role: "player", is_owner: true }).isOwner, false);
+    assert.deepEqual(s(undefined, true), { role: "player", isOwner: false, isGm: false, isLoading: true });
+  });
+
   test("preview forces player", () => {
     const gm = role.roleStateFor(A);
     assert.deepEqual(role.effectiveRoleState(gm, false), { ...gm, previewing: false });
@@ -379,7 +423,8 @@ describe("switcher menu layout", () => {
 });
 
 // Server render inside the real provider, with the campaigns query seeded.
-function renderShell(child, { campaigns = [A, B], userId = "u1", stored, loggedIn = true } = {}) {
+// `me` seeds ["campaignRole", id] (GET /api/campaigns/{id}/me) per campaign id.
+function renderShell(child, { campaigns = [A, B], userId = "u1", stored, loggedIn = true, me = {} } = {}) {
   if (loggedIn) {
     local.setItem("lk_token", "t");
     local.setItem("lk_user", JSON.stringify({ id: userId, display_name: "U" }));
@@ -387,6 +432,7 @@ function renderShell(child, { campaigns = [A, B], userId = "u1", stored, loggedI
   if (stored !== undefined) local.setItem(cc.currentCampaignKey(userId), stored);
   const client = new QueryClient();
   if (campaigns) client.setQueryData(["campaigns"], campaigns);
+  for (const [id, body] of Object.entries(me)) client.setQueryData(["campaignRole", id], body);
   client.setQueryData(["me"], { display_name: "U", email: "u@example.com", is_admin: false });
   return renderToStaticMarkup(
     h(
@@ -476,6 +522,38 @@ describe("usePageCampaign / useEffectiveRole", () => {
     } finally {
       store.setPreviewCampaignId(null);
     }
+  });
+
+  test("useRoleFor reads seeded /me data; the stub covers no answer yet", () => {
+    let seen;
+    const Probe = ({ c }) => {
+      seen = role.useRoleFor(c);
+      return null;
+    };
+    const coGm = { campaign_id: "b", role: "gm", is_owner: false, display_role: "Co-GM" };
+    renderShell(h(Probe, { c: B }), { me: { b: coGm } });
+    assert.deepEqual(seen, { role: "co_gm", isOwner: false, isGm: true, isLoading: false });
+    // A Player in a campaign the list says they own (stale list): /me wins.
+    renderShell(h(Probe, { c: A }), { me: { a: { campaign_id: "a", role: "player", is_owner: false, display_role: "Player" } } });
+    assert.equal(seen.role, "player");
+    assert.equal(seen.isGm, false);
+    // Nothing cached: the is_owner stub (no fetch during a server render).
+    renderShell(h(Probe, { c: A }));
+    assert.equal(seen.role, "gm");
+    assert.equal(seen.isOwner, true);
+    renderShell(h(Probe, { c: B }));
+    assert.equal(seen.role, "player");
+    renderShell(h(Probe, { c: null }));
+    assert.deepEqual(seen, { role: "player", isOwner: false, isGm: false, isLoading: false });
+    assert.deepEqual(requests, [], "no request during a server render");
+  });
+
+  test("switcher badge shows the /me role (Co-GM)", () => {
+    const coGm = { campaign_id: "b", role: "gm", is_owner: false, display_role: "Co-GM" };
+    assert.equal(
+      text(renderShell(h(CampaignSwitcher), { stored: "b", me: { b: coGm } })),
+      "Current campaign: Brinewood , role Co-GM",
+    );
   });
 
   test("useCurrentCampaign outside the provider throws", () => {
