@@ -2,7 +2,8 @@
 
 CPU-only torch from the PyTorch CPU index before requirements.txt, the CPU
 extra index on the requirements install, the CUDA/NVIDIA guard after the last
-pip install, offline env set, and the torch pin equal to requirements.txt's.
+pip install, offline env set, and the torch / torchvision pins equal to
+requirements.txt's (both CPU wheels, in the same layer).
 Runs without Docker.
 """
 
@@ -11,6 +12,8 @@ from __future__ import annotations
 import re
 import shlex
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 DOCKERFILE = ROOT / "Dockerfile"
@@ -73,10 +76,23 @@ def test_guard_after_every_pip_install():
         assert any(_is_guard(t) for t in runs[i + 1:]), f"no CUDA/NVIDIA guard after RUN #{i}"
 
 
-def test_torch_pin_matches_requirements_lock():
-    pin = next(x for t in _runs() for x in t if x.startswith("torch=="))
+@pytest.mark.parametrize("pkg", ["torch", "torchvision"])
+def test_torch_pins_match_requirements_lock(pkg):
+    pin = next(x for t in _runs() for x in t if x.startswith(f"{pkg}=="))
     lock = (ROOT / "requirements.txt").read_text()
     assert re.search(rf"^{re.escape(pin)}$", lock, re.M), f"{pin} not in requirements.txt"
+
+
+def test_torchvision_from_cpu_index_with_torch():
+    runs = _runs()
+    torch_run = next(t for t in runs if any(x.startswith("torch==") for x in t))
+    pin = next((x for x in torch_run if x.startswith("torchvision==")), None)
+    assert pin and pin.endswith("+cpu"), "torchvision must be installed with torch from the CPU index"
+
+
+def test_lazy_model_paths_in_env():
+    env = " ".join(" ".join(t) for op, t in _instructions() if op == "ENV")
+    assert "ML_NLI_MODEL_PATH=" in env and "ML_OCR_MODEL_DIR=" in env
 
 
 def test_offline_env_after_bake():

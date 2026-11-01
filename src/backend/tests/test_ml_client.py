@@ -11,8 +11,15 @@ import httpx
 import pytest
 
 from app.clients.errors import ModelServiceError, ModelServiceUnavailable, is_retryable
-from app.clients.fakes import FakeMLClient, fake_entities, fake_vector
-from app.clients.ml import MAX_EMBED_TEXTS, MLClient, NamedEntity, get_ml_client
+from app.clients.fakes import FakeMLClient, fake_entities, fake_nli_scores, fake_vector
+from app.clients.ml import (
+    MAX_EMBED_TEXTS,
+    MAX_NLI_PAIRS,
+    MLClient,
+    NamedEntity,
+    NliScores,
+    get_ml_client,
+)
 from app.core.config import Settings
 from app.domain.embedding import EMBEDDING_DIM, EMBEDDING_MODEL
 
@@ -92,6 +99,127 @@ async def test_status_parses():
 
     st = await _client(handler).status()
     assert st.rss_bytes == 123 and st.models[0].state == "loaded"
+
+
+def _nli_body(n: int, offset: int = 0) -> dict:
+    return {"scores": [{"entailment": (offset + i) / 1000, "neutral": 0.5,
+                        "contradiction": 0.5 - (offset + i) / 1000} for i in range(n)]}
+
+
+async def test_nli_posts_pairs_and_parses_scores():
+    import json
+
+    seen = {}
+
+    def handler(req: httpx.Request):
+        seen["path"] = req.url.path
+        seen["body"] = json.loads(req.content)
+        return httpx.Response(200, json={"scores": [
+            {"entailment": 0.001, "neutral": 0.001, "contradiction": 0.998}]})
+
+    scores = await _client(handler).nli([("Mira died in the fire.", "Mira greeted the party.")])
+    assert scores == [NliScores(entailment=0.001, neutral=0.001, contradiction=0.998)]
+    assert seen["path"] == "/v1/nli"
+    assert seen["body"] == {"pairs": [{"premise": "Mira died in the fire.",
+                                       "hypothesis": "Mira greeted the party."}]}
+
+
+async def test_nli_splits_at_the_sidecar_limit_and_keeps_order():
+    import json
+
+    sizes = []
+
+    def handler(req: httpx.Request):
+        pairs = json.loads(req.content)["pairs"]
+        sizes.append(len(pairs))
+        return httpx.Response(200, json=_nli_body(len(pairs), offset=int(pairs[0]["premise"])))
+
+    pairs = [(str(i), "h") for i in range(MAX_NLI_PAIRS + 10)]
+    scores = await _client(handler).nli(pairs)
+    assert sizes == [MAX_NLI_PAIRS, 10]
+    assert [round(s.entailment * 1000) for s in scores] == list(range(len(pairs)))
+
+
+async def test_nli_empty_skips_the_network():
+    def handler(req):
+        raise AssertionError("no request expected")
+
+    assert await _client(handler).nli([]) == []
+
+
+@pytest.mark.parametrize("body", [
+    {"scores": []},                                                          # count != pairs
+    {"scores": [{"entailment": 1, "neutral": 0, "contradiction": 0}] * 2},
+    {"scores": [{"entailment": 1.0, "neutral": 0.0}]},                       # missing key
+    {"scores": [{"entailment": 1.0, "neutral": 0.0, "contradiction": 0.0, "x": 0.0}]},
+    {"scores": [{"entailment": "1", "neutral": 0.0, "contradiction": 0.0}]},  # not a number
+    {"scores": [{"entailment": True, "neutral": 0.0, "contradiction": 0.0}]},
+    {"scores": [[1.0, 0.0, 0.0]]},
+    {"scores": None},
+    {},
+    ["not", "an", "object"],
+])
+async def test_nli_contract_breaks(body):
+    with pytest.raises(ModelServiceError) as info:
+        await _client(lambda req: httpx.Response(200, json=body)).nli([("p", "h")])
+    _assert_terminal(info)
+
+
+async def test_ocr_posts_multipart_file():
+    seen = {}
+
+    def handler(req: httpx.Request):
+        seen["path"] = req.url.path
+        seen["type"] = req.headers["content-type"]
+        seen["body"] = req.content
+        return httpx.Response(200, json={"text": "Mira died\nat the Silver Stag"})
+
+    png = b"\x89PNG\r\n\x1a\nbody"
+    assert await _client(handler).ocr(png, filename="page.png") == "Mira died\nat the Silver Stag"
+    assert seen["path"] == "/v1/ocr"
+    assert seen["type"].startswith("multipart/form-data; boundary=")
+    assert b'name="file"; filename="page.png"' in seen["body"]
+    assert png in seen["body"]
+
+
+@pytest.mark.parametrize("body", [{"text": 3}, {"text": None}, {}, ["text"], {"text": ["a"]}])
+async def test_ocr_contract_breaks(body):
+    with pytest.raises(ModelServiceError) as info:
+        await _client(lambda req: httpx.Response(200, json=body)).ocr(b"x")
+    _assert_terminal(info)
+
+
+@pytest.mark.parametrize("status", [413, 422])
+async def test_ocr_rejections_are_contract_errors(status):
+    body = {"detail": "not a decodable image", "code": "invalid_image"}
+    with pytest.raises(ModelServiceError) as info:
+        await _client(lambda req: httpx.Response(status, json=body)).ocr(b"x")
+    _assert_terminal(info)
+    assert info.value.status_code == status
+
+
+async def test_budget_503_is_unavailable_and_names_the_code():
+    body = {"detail": "ml budget exceeded", "code": "ml_budget"}
+    with pytest.raises(ModelServiceUnavailable) as info:
+        await _client(lambda req: httpx.Response(503, json=body)).nli([("p", "h")])
+    assert is_retryable(info.value)
+    assert info.value.status_code == 503
+    assert "ml_budget" in info.value.detail and "ml budget exceeded" in info.value.detail
+
+
+async def test_status_parses_lazy_fields():
+    def handler(req):
+        return httpx.Response(200, json={
+            "models": [{"name": EMBEDDING_MODEL, "kind": "embedding", "state": "loaded",
+                        "lazy": False, "cost_mb": None},
+                       {"name": "nli-deberta-v3-xsmall", "kind": "nli", "state": "not_loaded",
+                        "lazy": True, "cost_mb": 600}],
+            "resident_budget_mb": 2000, "lazy_resident_mb": 0, "rss_bytes": 5})
+
+    st = await _client(handler).status()
+    assert st.resident_budget_mb == 2000 and st.lazy_resident_mb == 0
+    assert st.models[1].lazy and st.models[1].cost_mb == 600 and st.models[1].state == "not_loaded"
+    assert not st.models[0].lazy and st.models[0].cost_mb is None
 
 
 # ── sidecar down / timeout / 5xx -> ModelServiceUnavailable ────────────────
@@ -226,7 +354,32 @@ async def test_fake_ner_shape_and_order():
 
 async def test_fake_status():
     st = await FakeMLClient().status()
-    assert {m.state for m in st.models} == {"loaded"}
+    assert {m.kind: m.state for m in st.models} == {
+        "embedding": "loaded", "ner": "loaded", "nli": "not_loaded", "ocr": "not_loaded"}
+    assert {m.kind for m in st.models if m.lazy} == {"nli", "ocr"}
+
+
+async def test_fake_nli_is_stable_softmax_in_order():
+    fake = FakeMLClient()
+    pairs = [("Mira died.", "Mira lives."), ("a", "b"), ("Mira died.", "Mira lives.")]
+    s1, s2, s3 = await fake.nli(pairs)
+    assert s1 == s3 and s1 != s2
+    assert s1 == fake_nli_scores(*pairs[0])
+    for s in (s1, s2):
+        assert math.isclose(s.entailment + s.neutral + s.contradiction, 1.0, rel_tol=1e-9)
+    assert await fake.nli([]) == []
+    with pytest.raises(ModelServiceError) as info:
+        await fake.nli([("x" * 4001, "y")])
+    assert info.value.status_code == 422
+
+
+async def test_fake_ocr():
+    fake = FakeMLClient()
+    assert await fake.ocr(b"  Mira died  \n\n at the Silver Stag ") == "Mira died\nat the Silver Stag"
+    assert await fake.ocr(b"\x89PNG\r\n\x1a\n\xff\xfe") == ""
+    with pytest.raises(ModelServiceError) as info:
+        await fake.ocr(b"")
+    assert info.value.status_code == 422
 
 
 # ── single embedding contract ─────────────────────────────────────────────
@@ -276,6 +429,16 @@ def test_sidecar_agrees_with_contract():
     assert values["EMBED_MODEL_NAME"] == EMBEDDING_MODEL
     assert values["EMBED_DIM"] == EMBEDDING_DIM
     assert values["MAX_EMBED_TEXTS"] == MAX_EMBED_TEXTS
+    assert values["MAX_NLI_PAIRS"] == MAX_NLI_PAIRS
+
+
+@pytest.mark.skipif(not SIDECAR_CONFIG.exists(), reason="src/services/ml not in this checkout")
+def test_fake_limits_match_the_sidecar():
+    from app.clients import fakes, ml
+
+    assert _literal(SIDECAR_CONFIG, "MAX_NLI_CHARS") == fakes._MAX_NLI_CHARS
+    assert _literal(SIDECAR_CONFIG, "MAX_OCR_BYTES") == fakes._MAX_OCR_BYTES
+    assert ml.NLI_LABELS == _literal(SIDECAR_MODELS, "NLI_LABELS")
 
 
 def _literal(path: Path, name: str):

@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 10-31-2026 23:30
-last_updated: 11-01-2026 01:33
+last_updated: 11-01-2026 01:37
 project: Lorekeeper.quest
 project_key: NOKEY
 tracking_system: file-system
@@ -85,7 +85,7 @@ development_status:
   3-1-dev-compose-ports-bind-to-localhost-by-default: done
   3-2-cpu-only-torch-in-the-backend-image-closes-the-nvidia-wheel: done
   3-3-ml-sidecar-for-embeddings-and-ner-with-its-client: done
-  3-4-ml-lazy-nli-and-ocr-under-a-resident-memory-budget: backlog
+  3-4-ml-lazy-nli-and-ocr-under-a-resident-memory-budget: done
   3-5-stt-sidecar-with-faster-whisper-and-voice-upload-switched-to: backlog
   3-6-web-and-worker-image-without-models-async-client-wrappers-an: backlog
   3-7-one-16-gb-profile-with-container-limits-gpu-override-and-sum: backlog
