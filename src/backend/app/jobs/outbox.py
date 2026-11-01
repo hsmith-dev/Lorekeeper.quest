@@ -78,7 +78,8 @@ def get_connection() -> Any:
     if _connection is None:
         from redis import Redis
 
-        _connection = Redis.from_url(get_settings().valkey_url)
+        # Bounded: a hung Valkey must not hold every committing request.
+        _connection = Redis.from_url(get_settings().valkey_url, socket_timeout=5, socket_connect_timeout=2)
     return _connection
 
 

@@ -2,8 +2,10 @@
 
 `run_job` is the single wrapper both dispatch paths use: the RQ worker (via
 `perform`, the function every RQ message names) and the JOBS_EAGER in-process
-run (app/jobs/outbox.py). It claims the `queued` row, rebuilds the starter's
-ctx, runs the kind's handler and writes the outcome:
+run (app/jobs/outbox.py). It claims the `queued` row, looks up the starter's
+current ctx with `ctx_for` (the stored ctx_kind, ctx_audience and
+access_epoch are not compared with it: that check is E0-Jobs.3's), runs the
+kind's handler and writes the outcome:
 
 * the handler returns -> `done` (its writes and the status in one commit);
 * it raises an LLMError -> `failed` with that error's code and message;

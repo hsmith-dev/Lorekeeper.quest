@@ -32,7 +32,15 @@ from app.jobs.registry import get_kind
 
 # Words that mark a payload key as a secret (raw API keys are never queued,
 # AD-3). Matched per word, so `max_tokens` (word "tokens") is allowed.
-_SECRET_WORDS = frozenset({"token", "password", "passwd", "secret", "apikey"})
+_SECRET_WORDS = frozenset({
+    "token", "password", "passwords", "passwd", "secret", "secrets", "credential", "credentials",
+    "authorization", "bearer", "apikey", "apikeys",
+})
+# Two-word secrets: <first> followed by <second> (`private_key`, `refresh_tokens`).
+_SECRET_PAIRS = (
+    (frozenset({"api", "private", "access", "secret"}), frozenset({"key", "keys"})),
+    (frozenset({"access", "refresh", "auth", "id", "bearer", "session"}), frozenset({"token", "tokens"})),
+)
 _CAMEL_1 = re.compile(r"([A-Z]+)([A-Z][a-z])")   # "APIKey"      -> "API_Key"
 _CAMEL_2 = re.compile(r"([a-z0-9])([A-Z])")      # "accessToken" -> "access_Token"
 _WORD_SPLIT = re.compile(r"[^a-z0-9]+")
@@ -47,12 +55,16 @@ def _key_words(key: str) -> list[str]:
 
 
 def is_secret_key(key: str) -> bool:
-    """True for a key named like a secret: a word token / password / passwd /
-    secret, or api_key / apikey (any case, snake, kebab or camelCase)."""
+    """True for a key named like a secret (any case, snake, kebab or
+    camelCase): a word in _SECRET_WORDS (token, password(s), passwd,
+    secret(s), credential(s), authorization, bearer, apikey(s)), or a pair in
+    _SECRET_PAIRS (api/private/access/secret + key(s); access/refresh/auth/
+    id/bearer/session + token(s)). `max_tokens`, `cache_key` stay allowed."""
     words = _key_words(key)
     if any(w in _SECRET_WORDS for w in words):
         return True
-    return any(a == "api" and b == "key" for a, b in zip(words, words[1:]))
+    return any(a in firsts and b in seconds
+               for a, b in zip(words, words[1:]) for firsts, seconds in _SECRET_PAIRS)
 
 
 def _check_payload(value: Any, path: str = "payload") -> None:
@@ -87,21 +99,23 @@ def _parse_job_id(value: Any) -> uuid.UUID:
         raise ValueError("enqueue: unknown dependency") from None
 
 
-async def _active_with_key(db: AsyncSession, key: str) -> tuple[uuid.UUID, uuid.UUID] | None:
+async def _active_with_key(db: AsyncSession, key: str) -> tuple[uuid.UUID, uuid.UUID, str] | None:
     row = (await db.execute(
-        sa.select(Job.id, Job.campaign_id).where(
+        sa.select(Job.id, Job.campaign_id, Job.kind).where(
             Job.idempotency_key == key, Job.status.in_([s.value for s in ACTIVE_STATUSES]))
     )).first()
-    return (row.id, row.campaign_id) if row is not None else None
+    return (row.id, row.campaign_id, row.kind) if row is not None else None
 
 
-def _existing_or_raise(found: tuple[uuid.UUID, uuid.UUID], ctx: CampaignContext) -> uuid.UUID:
-    job_id, campaign_id = found
+def _existing_or_raise(found: tuple[uuid.UUID, uuid.UUID, str], ctx: CampaignContext, kind: str) -> uuid.UUID:
+    job_id, campaign_id, found_kind = found
     if campaign_id != ctx.campaign_id:
         # The active-key index is global: never return or reveal another
         # Campaign's Job. Content-derived keys include ids, so this is a bug
         # in the caller's key, not a race to recover from.
         raise ValueError("enqueue: idempotency_key is in use by an active Job in another Campaign")
+    if found_kind != kind:
+        raise ValueError(f"enqueue: idempotency_key is in use by an active Job of another kind ({found_kind!r})")
     return job_id
 
 
@@ -145,7 +159,7 @@ async def enqueue(
     for _ in range(_INSERT_ATTEMPTS):
         found = await _active_with_key(db, idempotency_key)
         if found is not None:
-            return _existing_or_raise(found, ctx)
+            return _existing_or_raise(found, ctx, job_kind.name)
         job = Job(
             id=uuid.uuid4(), campaign_id=ctx.campaign_id, kind=job_kind.name, queue=job_kind.queue,
             status=JobStatus.QUEUED, payload=payload, idempotency_key=idempotency_key,

@@ -2,14 +2,42 @@
 title: 'E0-Jobs.2: enqueue with outbox push and the kind registry'
 type: 'feature'
 created: '2026-11-01'
-status: 'in-review'
+status: 'done'
 baseline_revision: '480244501bf4413ba673efaef41b9eb3c5335f26'
 review_loop_iteration: 0
-followup_review_recommended: false
+followup_review_recommended: true
 context:
   - '{project-root}/_bmad-output/implementation-artifacts/epic-5-context.md'
 warnings: ['oversized']
-deferred: []
+deferred:
+  - summary: >-
+      Held dependents are released only when a terminal status is written through the ORM; a Core UPDATE or a deleted dependency leaves them queued.
+    evidence: |-
+      outbox._note_finished_jobs reads ORM attribute history in after_flush. A cancel or reaper written as sa.update(Job), or a dependency row deleted (FK SET NULL), releases nothing. E0-Jobs.4's reaper must also push queued dependents whose dependency is terminal or gone, and E0-Jobs.7's cancel should write through the ORM.
+    location: >-
+      src/backend/app/jobs/outbox.py (_note_finished_jobs)
+    severity: medium
+  - summary: >-
+      The RQ worker process imports only app.jobs.registry, so feature kinds registered in feature modules would fail there as unknown kinds.
+    evidence: |-
+      run_job calls get_kind(job.kind). Only system.noop is registered at import of app.jobs. E0-Jobs.3 (LorekeeperWorker and the worker service) must import every kind-registering module at worker start. No feature kind exists yet.
+    location: >-
+      src/backend/app/jobs/worker.py (run_job)
+    severity: medium
+  - summary: >-
+      No rq worker runs in any deployment yet, and nothing re-pushes a Job whose push failed, so a production enqueue before E0-Jobs.3 and E0-Jobs.4 stays queued.
+    evidence: |-
+      jobs_eager defaults to False, and no compose service runs rq. A failed push is logged and left for the E0-Jobs.4 reaper. No production route calls enqueue in this story. E0-Jobs.3 adds the worker service and E0-Jobs.4 the reaper.
+    location: >-
+      src/backend/app/jobs/outbox.py
+    severity: medium
+  - summary: >-
+      A handler cancelled with a BaseException (CancelledError, the RQ kill) leaves its row running.
+    evidence: |-
+      run_job catches Exception only. Heartbeats and timeouts come in E0-Jobs.3, and stale-row recovery in E0-Jobs.4.
+    location: >-
+      src/backend/app/jobs/worker.py (run_job)
+    severity: low
 ---
 
 <intent-contract>
@@ -87,6 +115,59 @@ deferred: []
 
 ## Review Triage Log
 
+### 2026-11-01 — Review pass
+- verdicts: 49 findings — high 0, medium 9, low 24, false 7, maybe-false 0 (9 intent-alignment divergence rows triaged alongside)
+- findings:
+  - (blind) `[medium]` `[defer]` worker imports no feature kinds — no feature kind exists yet; E0-Jobs.3's worker start must import them (deferred).
+  - (blind) `[low]` `[reject]` rq_timeout falls back silently for an unknown kind — the pushing process validated the kind at enqueue; the case is the same root as the deferred worker-import item.
+  - (blind) `[medium]` `[defer]` dependents released only on ORM status writes — Core cancel and reaper paths don't exist yet; deferred to Jobs.4 reaper and Jobs.7 cancel.
+  - (blind) `[medium]` `[patch]` dedupe returns an active Job of another kind — `_active_with_key` selects kind; mismatch is ValueError; test `test_same_key_of_another_kind_is_refused`.
+  - (blind) `[false]` `[reject]` idempotency_key should be a required kw-only str — the story's AC requires a missing key to raise ValueError, which a required parameter (TypeError) would not.
+  - (blind) `[medium]` `[patch]` secret-key filter misses plurals and pairs (private_key, access_key, credentials, authorization, access_tokens…) — word list and (api|private|access|secret)+key, (access|refresh|auth|id|bearer|session)+token pairs added; tests both ways. Value scanning rejected: the AC is about key names.
+  - (blind) `[low]` `[reject]` no guard against JOBS_EAGER in a deployment — documented in config; the guard adds a validator for a misconfiguration nobody has hit.
+  - (blind) `[medium]` `[patch]` no socket timeouts on the RQ connection — `socket_timeout=5, socket_connect_timeout=2`.
+  - (blind) `[low]` `[patch]` worker docstring overstates the ctx rebuild — reworded: current ctx via ctx_for; the stored-ctx comparison is E0-Jobs.3's. The behaviour itself (role/epoch checks) is E0-Jobs.3's AC, rejected here.
+  - (blind) `[low]` `[patch]` a handler that commits breaks the done-atomicity contract — registry docstring states handlers must not commit; enforcement rejected (adds surface).
+  - (blind) `[low]` `[defer]` BaseException leaves a row running — deferred to Jobs.3/.4.
+  - (blind) `[medium]` `[defer]` no rq worker in any deployment — worker service is E0-Jobs.3's; no production route enqueues yet (deferred).
+  - (blind) `[false]` `[reject]` croniter needs pytz — croniter 6.2.4's metadata requires only python-dateutil (checked with `importlib.metadata.requires`).
+  - (blind) `[low]` `[patch]` untested paths (perform, permission_changed, unknown kind, …) — same root as the verification-gap rows; tests added there. Chain A→B→C, insert exhaustion and the no-greenlet branch rejected as low.
+  - (blind) `[low]` `[reject]` timing-sensitive tests / real fixture empties queue names — the < 1 s bound is the AC (a noop runs in ms); VALKEY_TEST_URL is a dedicated DB (15) in CI.
+  - (blind) `[low]` `[reject]` job_accepted has no response schema — the Job routes and their schemas are E0-Jobs.7's.
+  - (blind) `[low]` `[reject]` perform discards run_job's result / failure_ttl interplay — the row is the authority (AD-2); RQ results are deliberately discarded.
+  - (edge) `[medium]` `[defer]` Core update or deletion never releases held dependents — same root as the deferred ORM-only release.
+  - (edge) `[low]` `[defer]` deleted dependency (SET NULL) strands the dependent — same deferred item (reaper pushes it).
+  - (edge) `[false]` `[reject]` a cancel during a run is overwritten — no cancel exists; E0-Jobs.7's cancel is for queued Jobs only.
+  - (edge) `[low]` `[reject]` run_job reports DONE when the row vanished mid-run — the Campaign cascade deleted it; nothing reads the return value in production.
+  - (edge) `[low]` `[reject]` ctx_for raising a non-NotFound exception leaves a row running — ctx_for only constructs ctxs that pass their own shape checks; unreachable.
+  - (edge) `[low]` `[defer]` BaseException leaves a row running — same deferred item.
+  - (edge) `[low]` `[reject]` a sync handler is not rejected at registration — it fails loudly as `internal` at first run; the guard adds code for a developer error.
+  - (edge) `[low]` `[patch]` handler calling db.commit() — same root as the blind row; docstring rule.
+  - (edge) `[medium]` `[patch]` same key, different kind — same root as the blind row; patched.
+  - (edge) `[low]` `[reject]` dedupe against a Job from a savepoint that later rolls back — needs one caller to enqueue the same key twice across a savepoint it rolls back; not a real pattern.
+  - (edge) `[low]` `[reject]` an over-long key raises DBAPIError, not ValueError — keys are short `<kind>:<id>:<hash>` strings; the guard adds a branch.
+  - (edge) `[medium]` `[patch]` plural/provider secret keys — same root as the blind row; patched.
+  - (edge) `[medium]` `[patch]` hung Valkey blocks commit — same root as the blind row; patched.
+  - (edge) `[low]` `[reject]` nested eager chains may exhaust the pool — eager is tests-only and chains are one level deep.
+  - (edge) `[low]` `[reject]` Connection-bound sessions inside an outer test transaction — no such caller; the db fixture binds to an engine.
+  - (edge) `[low]` `[reject]` resources passed as str gives a misleading message — it still raises ValueError at registration; cosmetic.
+  - (edge) `[false]` `[reject]` the global index blocks another Campaign's enqueue — the index is E0-Jobs.1's by story; keys embed Campaign-owned ids, so a collision is a caller bug and raising is the fail-closed reading of the carry-over note.
+  - (edge) `[medium]` `[defer]` claim: dependents release only on ORM writes — same deferred item.
+  - (verification-gap) `[medium]` `[patch]` perform never runs and the pushed function isn't resolved — `rq_job.func is worker.perform` asserted; `test_perform_runs_the_job_on_its_own_engine` added.
+  - (verification-gap) `[low]` `[patch]` held-dependent guard in _claim unexercised — `test_run_job_skips_a_dependent_whose_dependency_is_active` added.
+  - (verification-gap) `[low]` `[patch]` permission_changed / unknown-kind branches untested — `test_run_job_fails_when_the_starter_has_no_access` (outsider, None) and `test_run_job_fails_an_unregistered_kind` added.
+  - (verification-gap) `[low]` `[patch]` handler writes vs done/failed atomicity untested — `test_handler_writes_commit_with_done_and_roll_back_with_failed` added.
+  - (verification-gap other) `[low]` `[reject]` wall-clock 1 s assertion — the AC's own bound; the noop run is milliseconds.
+  - (intent) `[false]` `[reject]` "never lost to a Redis flush" needs the reaper — that is E0-Jobs.4's AC; this story keeps the row queued so the reaper can recover it (deferred item records the gap).
+  - (intent) `[low]` `[reject]` the 202 route is test-local — no production Job-starting route is in scope (E0-Jobs.7 owns the routes); `job_accepted` is the shared helper.
+  - (intent) `[low]` `[patch]` pushes are never consumed by a worker in tests — same root as the perform gap; patched. Also verified by a real `rq worker --burst` run on the desktop.
+  - (intent) `[low]` `[reject]` the minimal wrapper has permission_changed and LLM-code mapping — a handler needs a ctx, so a lost membership has to end somewhere; E0-Jobs.3 extends this wrapper.
+  - (intent) `[medium]` `[defer]` ORM-only dependent release — same deferred item.
+  - (intent) `[false]` `[reject]` an already-terminal dependency's dependent is pushed "at enqueue" — record_pending only queues it; the push still happens after commit.
+  - (intent) `[low]` `[reject]` a race retry can raise after the caller's own changes were flushed — those are the caller's changes in the caller's transaction, rolled back with it.
+  - (intent) `[low]` `[reject]` enqueue flushes the caller's pending changes — no Job row is written before validation, which is what "writes nothing" means.
+  - (intent) `[false]` `[reject]` JobKind adds name/handler and invents result_audience values — a kind needs a name and a handler to run; {gm, derived} matches every result_audience later stories name (gm, or a record's derived Audience).
+
 ## Design Notes
 
 Dispatch runs inside `after_commit`, which SQLAlchemy calls inside the AsyncSession's greenlet, so `sqlalchemy.util.await_only(coro)` can await the eager `run_job` (or `asyncio.to_thread(push)`) before `commit()` returns. Eager and dependents queries use a fresh `AsyncSession` on `AsyncEngine(session.get_bind())` (same pool, new connection: the committed transaction is over). Terminal status changes are captured in `after_flush` from attribute history, so any ORM write (worker, future cancel/reaper) releases dependents.
@@ -97,3 +178,32 @@ Dispatch runs inside `after_commit`, which SQLAlchemy calls inside the AsyncSess
 - `cd src/backend && lint-imports` -- all contracts kept (CI gates.yml)
 - GitHub CI `backend-tests.yml` -- full suite green incl. the new tests against Postgres and Valkey
 - `license-check.yml` -- register covers rq, croniter, python-dateutil
+
+## Auto Run Result
+
+Status: done (draft PR #51; CI is the gate)
+
+**Summary:** `enqueue` with Campaign-scoped idempotency over the global active-key index, the kind registry with `system.noop`, the after-commit outbox (RQ push of `job_id` only, JOBS_EAGER inline run, release of dependents) and a minimal `run_job`/`perform` wrapper.
+
+**Files changed:**
+- `src/backend/app/jobs/registry.py` -- JobKind, register/get_kind, system.noop.
+- `src/backend/app/jobs/builtin.py` -- noop handler.
+- `src/backend/app/jobs/enqueue.py` -- enqueue, secret-key check, job_accepted.
+- `src/backend/app/jobs/outbox.py` -- session listeners, dispatch, RQ push (timeout = kind timeout_s + 60).
+- `src/backend/app/jobs/worker.py` -- run_job, perform.
+- `src/backend/app/jobs/__init__.py` -- exports; installs the listeners.
+- `src/backend/app/db/models/job.py` -- non-mapped `dependency_status`.
+- `src/backend/app/core/config.py` -- `jobs_eager`.
+- `src/backend/requirements.txt`, `licenses/register.yaml` -- rq 2.12.0, croniter 6.2.4, python-dateutil 4.0.0.
+- `src/backend/tests/jobs/test_enqueue.py` -- I/O matrix, worker paths, 202 route.
+
+**Review:** 49 findings. Patched 7 entries (medium: kind mismatch on dedupe, secret-key coverage, Valkey socket timeouts, perform/func verification; low: docstrings, held-dependent / permission / unknown-kind / handler-atomicity tests). Deferred 4 (ORM-only dependent release, worker kind imports, no worker/reaper yet, BaseException leaves rows running). Rejected the rest with reasons in the triage log.
+
+**Follow-up review recommended:** true -- four medium entries were patched; the broadened secret-key matcher is a heuristic, and only the parametrised cases pin it.
+
+**Verification:**
+- Desktop (`harrison@100.119.62.5`, throwaway pgvector + Valkey 8.1.11 containers, since removed): full backend suite 1029 passed, 4 skipped (before the review patches); `lint-imports` 5 contracts kept.
+- A real `rq worker --burst` ran a `system.noop` Job and its dependent to `done`, the dependent pushed by the worker's after-commit release.
+- First commit's CI on PR #51: backend tests, gates, licences and frontend all green. The patch commit is verified by CI on the PR.
+
+**Residual risks:** see `deferred`. Needs desktop verification: none beyond what was already run (no compose or worker service changes in this story).

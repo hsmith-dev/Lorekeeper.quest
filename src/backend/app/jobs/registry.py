@@ -9,6 +9,9 @@ time:
 
 `handler` is "module:attr", resolved when the Job runs (so registering a kind
 never imports the feature's code): `async def handle(job, ctx, db)`.
+A handler must not call `db.commit()`: the wrapper (app/jobs/worker.py)
+commits the handler's writes together with `done`, and rolls them back when
+the handler raises.
 
 E0-Jobs.3 adds `gate_class`; it is not here yet.
 """

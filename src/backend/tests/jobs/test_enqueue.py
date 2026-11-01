@@ -39,6 +39,7 @@ from app.domain.enums import JobErrorCode, JobQueue, JobStatus
 from app.jobs import enqueue, job_accepted, outbox
 from app.jobs.enqueue import is_secret_key
 from app.jobs.registry import KINDS, SYSTEM_NOOP, JobKind, get_kind, register
+from app.jobs import worker
 from app.jobs.worker import run_job
 from app.services import llm_provider
 
@@ -62,10 +63,27 @@ async def llm_config_handler(job, ctx, db):
     raise LLMConfigError("No AI model is configured for your account")
 
 
+def _written_email(job_id: uuid.UUID) -> str:
+    return f"jobwrite-{job_id}@example.com"
+
+
+async def write_handler(job, ctx, db):
+    db.add(User(email=_written_email(job.id), hashed_password="x", display_name="w"))
+    await db.flush()
+
+
+async def write_then_fail_handler(job, ctx, db):
+    await write_handler(job, ctx, db)
+    raise RuntimeError("after the write")
+
+
 register(JobKind(name="test.record", queue=JobQueue.ONSAVE, timeout_s=5, handler=f"{__name__}:record_handler"))
 register(JobKind(name="test.fail", queue=JobQueue.INTERACTIVE, timeout_s=5, handler=f"{__name__}:failing_handler"))
 register(JobKind(name="test.llm_config", queue=JobQueue.INTERACTIVE, timeout_s=5,
                  handler=f"{__name__}:llm_config_handler"))
+register(JobKind(name="test.write", queue=JobQueue.INTERACTIVE, timeout_s=5, handler=f"{__name__}:write_handler"))
+register(JobKind(name="test.write_fail", queue=JobQueue.INTERACTIVE, timeout_s=5,
+                 handler=f"{__name__}:write_then_fail_handler"))
 
 
 # ── Fixtures ───────────────────────────────────────────────────────────────
@@ -188,12 +206,19 @@ def test_register_conflict_and_unknown_kind():
 @pytest.mark.parametrize("key", [
     "api_key", "apikey", "apiKey", "APIKey", "X-Api-Key", "openai_api_key", "token", "accessToken",
     "ACCESS_TOKEN", "refresh-token", "password", "Password", "db_passwd", "secret", "clientSecret",
+    "passwords", "secrets", "credential", "credentials", "authorization", "Authorization", "bearer",
+    "private_key", "privateKey", "access_key", "AWS_ACCESS_KEY", "secret_key", "api_keys", "apiKeys",
+    "access_tokens", "refresh_tokens", "refreshTokens", "auth_token", "id_token", "bearer_token",
+    "session_token", "sessionToken",
 ])
 def test_secret_keys(key):
     assert is_secret_key(key)
 
 
-@pytest.mark.parametrize("key", ["max_tokens", "maxTokens", "tokens", "key", "api", "journal_id", "tokenizer"])
+@pytest.mark.parametrize("key", [
+    "max_tokens", "maxTokens", "tokens", "key", "api", "journal_id", "tokenizer", "cache_key",
+    "idempotency_key", "keys", "tokens_used", "access", "session_id",
+])
 def test_non_secret_keys(key):
     assert not is_secret_key(key)
 
@@ -242,6 +267,7 @@ async def test_happy_path_pushes_only_the_job_id(db, ctx, rq_conn):
     assert queued(rq_conn) == [str(job_id)]
     rq_job = RQJob.fetch(str(job_id), connection=rq_conn)
     assert rq_job.func_name == PERFORM
+    assert rq_job.func is worker.perform  # resolves to the real entrypoint
     assert rq_job.args == (str(job_id),) and rq_job.kwargs == {}
     assert rq_job.result_ttl == 0
     assert rq_job.retries_left is None
@@ -328,7 +354,79 @@ async def test_worker_wrapper_runs_a_pushed_job(db, ctx, rq_conn):
     assert await run_job(job_id, factory, "test-worker") is None
 
 
+async def test_perform_runs_the_job_on_its_own_engine(db, ctx, rq_conn, monkeypatch):
+    monkeypatch.setattr(get_settings(), "database_url", db.bind.url.render_as_string(hide_password=False))
+    job_id = await enqueue(db, ctx, "system.noop", {}, idempotency_key=_key())
+    await db.commit()
+    await worker._perform(str(job_id))
+    assert (await _row(db, job_id)).status == JobStatus.DONE
+
+
+async def test_run_job_skips_a_dependent_whose_dependency_is_active(db, ctx, rq_conn):
+    a = await enqueue(db, ctx, "system.noop", {}, idempotency_key=_key())
+    await db.commit()
+    b = await enqueue(db, ctx, "test.record", {}, idempotency_key=_key(), depends_on_job_id=a)
+    await db.commit()
+    factory = async_sessionmaker(db.bind, expire_on_commit=False)
+    assert await run_job(b, factory, "test-worker") is None
+    row = await _row(db, b)
+    assert row.status == JobStatus.QUEUED and row.attempts == 0
+    assert b not in SEEN
+
+
+@pytest.mark.parametrize("starter", ["outsider", "none"])
+async def test_run_job_fails_when_the_starter_has_no_access(db, campaign, starter):
+    if starter == "outsider":
+        outsider = _user("outsider")
+        db.add(outsider)
+        await db.flush()
+        user_id = outsider.id
+    else:
+        user_id = None
+    row = Job(campaign_id=campaign.id, kind="test.record", queue=JobQueue.ONSAVE, idempotency_key=_key(),
+              ctx_kind="gm", ctx_user_id=user_id, created_by=user_id)
+    db.add(row)
+    await db.commit()  # written directly: nothing dispatched
+    factory = async_sessionmaker(db.bind, expire_on_commit=False)
+    assert await run_job(row.id, factory, "test-worker") == JobStatus.FAILED
+    row = await _row(db, row.id)
+    assert row.status == JobStatus.FAILED and row.error_code == JobErrorCode.PERMISSION_CHANGED
+    assert row.id not in SEEN
+
+
+async def test_run_job_fails_an_unregistered_kind(db, campaign):
+    row = Job(campaign_id=campaign.id, kind="test.gone", queue=JobQueue.INTERACTIVE, idempotency_key=_key(),
+              ctx_kind="gm", ctx_user_id=campaign.user_id, created_by=campaign.user_id)
+    db.add(row)
+    await db.commit()
+    factory = async_sessionmaker(db.bind, expire_on_commit=False)
+    assert await run_job(row.id, factory, "test-worker") == JobStatus.FAILED
+    row = await _row(db, row.id)
+    assert row.status == JobStatus.FAILED and row.error_code == JobErrorCode.INTERNAL
+
+
+@pytest.mark.parametrize("kind, final, kept", [
+    ("test.write", JobStatus.DONE, True),
+    ("test.write_fail", JobStatus.FAILED, False),
+])
+async def test_handler_writes_commit_with_done_and_roll_back_with_failed(db, ctx, kind, final, kept):
+    job_id = await enqueue(db, ctx, kind, {}, idempotency_key=_key())
+    await db.commit()
+    assert (await _row(db, job_id)).status == final
+    written = await db.scalar(sa.select(sa.func.count()).select_from(User).where(
+        User.email == _written_email(job_id)))
+    assert written == (1 if kept else 0)
+
+
 # ── Idempotency ────────────────────────────────────────────────────────────
+
+async def test_same_key_of_another_kind_is_refused(db, ctx, rq_conn):
+    key = _key()
+    await enqueue(db, ctx, "system.noop", {}, idempotency_key=key)
+    with pytest.raises(ValueError):
+        await enqueue(db, ctx, "test.record", {}, idempotency_key=key)
+    assert await _count(db, key) == 1
+
 
 async def test_dedupe_returns_the_active_job(db, ctx, rq_conn):
     key = _key()
