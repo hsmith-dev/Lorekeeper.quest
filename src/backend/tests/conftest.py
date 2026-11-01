@@ -72,7 +72,10 @@ async def promo_code(db: AsyncSession) -> str:
     accounts are gated by default since account-gating shipped)."""
     from app.db.models.promo_code import PromoCode
 
-    code = PromoCode(code="TESTCODE", active=True)
-    db.add(code)
-    await db.commit()
+    # Committed (registration reads it from a separate request session), so it
+    # persists across tests — reuse it instead of re-inserting into the unique index.
+    existing = await db.scalar(sa.select(PromoCode).where(PromoCode.code == "TESTCODE"))
+    if existing is None:
+        db.add(PromoCode(code="TESTCODE", active=True))
+        await db.commit()
     return "TESTCODE"
