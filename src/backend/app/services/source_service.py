@@ -5,7 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.source import SourceChunk, SourceDocument
-from app.services.embedding_service import embed
+from app.services import embedding_service
 
 _CHUNK_WORDS = 350
 _CHUNK_OVERLAP_WORDS = 50
@@ -53,7 +53,7 @@ async def retrieve_canon_context(
     do with the question, polluting the prompt with (and crediting sources
     for) unrelated canon."""
     try:
-        query_embedding = embed(query_text)
+        query_embedding = embedding_service.embed(query_text)
     except Exception:
         return None, []
 

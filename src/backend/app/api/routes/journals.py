@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
+from sqlalchemy import and_, case, false, or_, select, func
 from sqlalchemy.orm import selectinload
 import uuid
 
@@ -17,6 +17,7 @@ from app.schemas.journal import (
     GenerateDraftResponse,
     JournalResponse,
     JournalListResponse,
+    JournalListPartyResponse,
     AutocompleteRequest,
     AutocompleteResponse,
     RecapRequest,
@@ -25,11 +26,13 @@ from app.schemas.journal import (
     SessionSummaryResponse,
 )
 from app.schemas.tag import TagAttachRequest, TagResponse, TagCategoryRef
+from app.access import GM, NotFound, ctx_for, not_found, role_map, visible_clause
 from app.api.deps import get_current_user, get_user_llm_config, get_campaign_with_access, accessible_campaign_ids
 from app.services.journal_service import create_journal_entry, generate_draft_narrative
 from app.services.dedup_service import check_hash
 from app.services.chat_service import autocomplete_notes, generate_session_recap, summarize_session_transcript
-from app.services.embedding_service import embed
+from app.services import embedding_service
+from app.services.retrieval_service import index_party_fields
 from app.services.llm_provider import LLMConfig
 from app.services import llm_config_service
 
@@ -66,7 +69,7 @@ async def generate_journal(
     db: AsyncSession = Depends(get_db),
 ) -> JournalResponse:
     await get_campaign_with_access(db, body.campaign_id, user)
-    if await check_hash(body.entry_hash):
+    if await check_hash(body.campaign_id, user.id, body.entry_hash):
         raise HTTPException(status_code=409, detail="Duplicate entry detected")
 
     # Only resolve an LLM config (and only meter it) when a narrative still
@@ -93,7 +96,7 @@ async def generate_journal(
     return entry
 
 
-@router.get("/", response_model=JournalListResponse)
+@router.get("/", response_model=JournalListResponse | JournalListPartyResponse)
 async def list_journals(
     campaign_id: uuid.UUID | None = None,
     search: str | None = None,
@@ -102,15 +105,41 @@ async def list_journals(
     limit: int = Query(20, ge=1, le=100),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
-) -> JournalListResponse:
+) -> JournalListResponse | JournalListPartyResponse:
+    """Entries of one Campaign, or (no `campaign_id`) of every Campaign the
+    user owns or belongs to. In a Campaign where the caller is GM every entry
+    is listed and `search` matches and ranks on `narrative_tsv` (Shorthand +
+    Narrative). In a Campaign where they are not, only entries visible to
+    them are listed and `search` uses `party_tsv` (Narrative only), so a
+    Shorthand-only word never changes what they find or its order
+    (E0-Access.7). A list that covers any non-GM Campaign returns Party
+    items (no Shorthand)."""
     if campaign_id:
-        await get_campaign_with_access(db, campaign_id, user)
-        scope = JournalEntry.campaign_id == campaign_id
+        ctxs = [await ctx_for(db, user.id, campaign_id)]
     else:
         # No specific campaign: everything across every campaign this user can
         # see (owned or joined), not just entries they personally authored —
         # a collaborator's entries are as much "yours to read" as your own.
-        scope = JournalEntry.campaign_id.in_(await accessible_campaign_ids(db, user))
+        roles = await role_map(db, user)
+        ctxs = []
+        for cid in roles:
+            try:
+                ctxs.append(await ctx_for(db, user.id, cid))
+            except NotFound:
+                continue  # membership revoked mid-request: that Campaign drops out
+    gm_ids = [c.campaign_id for c in ctxs if c.role == GM]
+    party_ctxs = [c for c in ctxs if c.role != GM]
+
+    tsq = func.plainto_tsquery("english", search) if search else None
+    in_gm = JournalEntry.campaign_id.in_(gm_ids) if gm_ids else false()
+    gm_branch = and_(in_gm, JournalEntry.narrative_tsv.op("@@")(tsq)) if search else in_gm
+    party_branches = []
+    for c in party_ctxs:
+        branch = and_(JournalEntry.campaign_id == c.campaign_id, visible_clause(JournalEntry, c))
+        if search:
+            branch = and_(branch, JournalEntry.party_tsv.op("@@")(tsq))
+        party_branches.append(branch)
+    scope = or_(gm_branch, *party_branches) if party_branches else gm_branch
 
     query = (
         select(JournalEntry)
@@ -118,11 +147,18 @@ async def list_journals(
         .options(selectinload(JournalEntry.tags).selectinload(Tag.custom_category))
     )
     if search:
-        query = query.where(
-            JournalEntry.narrative_tsv.op("@@")(func.plainto_tsquery("english", search))
-        ).order_by(
-            func.ts_rank(JournalEntry.narrative_tsv, func.plainto_tsquery("english", search)).desc()
-        )
+        if party_ctxs:
+            rank = case(
+                (in_gm, func.ts_rank(JournalEntry.narrative_tsv, tsq)),
+                else_=func.ts_rank(JournalEntry.party_tsv, tsq),
+            )
+        else:
+            rank = func.ts_rank(JournalEntry.narrative_tsv, tsq)
+        # Ties break by row, so a hidden row can never shuffle equal-ranked
+        # visible ones.
+        query = query.order_by(rank.desc(), JournalEntry.created_at.desc(), JournalEntry.id)
+    else:
+        query = query.order_by(JournalEntry.created_at.desc(), JournalEntry.id)
     if tag_id:
         from app.db.models.tag import JournalTag
         query = query.join(JournalTag).where(JournalTag.tag_id == tag_id)
@@ -134,6 +170,8 @@ async def list_journals(
     result = await db.execute(query)
     items = result.scalars().all()
 
+    if party_ctxs:
+        return JournalListPartyResponse(items=items, total=total, page=page, limit=limit)
     return JournalListResponse(items=items, total=total, page=page, limit=limit)
 
 
@@ -309,15 +347,19 @@ async def reindex_journal_embeddings(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """Regenerate vector embeddings for all journal entries in a campaign."""
-    await get_campaign_with_access(db, campaign_id, user)
+    """Regenerate vector embeddings for all journal entries in a campaign.
+    GM only: the count covers every row, hidden ones included."""
+    ctx = await ctx_for(db, user.id, campaign_id)
+    if ctx.role != GM:
+        not_found()
     entries_result = await db.execute(
         select(JournalEntry).where(JournalEntry.campaign_id == campaign_id)
     )
     entries = list(entries_result.scalars().all())
     for entry in entries:
         text = f"{entry.shorthand} {entry.narrative}"
-        entry.embedding = embed(text)
+        entry.embedding = embedding_service.embed(text)
+        await index_party_fields(db, entry)
     await db.commit()
     return {"reindexed": len(entries)}
 

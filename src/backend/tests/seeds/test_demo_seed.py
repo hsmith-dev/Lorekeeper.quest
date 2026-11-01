@@ -280,3 +280,35 @@ async def test_embeddings_filled_once_a_model_is_available(db):
         JournalEntry.entry_hash == seed_demo.entry_hash(first.campaign_id, "e01-old-mill")))
     expected = fake_embedder(seed_demo.entry_text(e01.shorthand, e01.narrative))
     assert list(e01.embedding) == pytest.approx(expected, abs=1e-6)
+
+
+async def test_party_fields_cover_the_narrative_only(db):
+    """E0-Access.7: party_tsv = to_tsvector(narrative), party_embedding = embed(narrative)."""
+    email = _email()
+    first = await _seed_in_new_session(owner_email=email, embedder=None)
+    rows = (await db.execute(sa.select(
+        JournalEntry.id, JournalEntry.party_tsv == sa.func.to_tsvector("english", JournalEntry.narrative),
+        JournalEntry.party_embedding,
+    ).where(JournalEntry.campaign_id == first.campaign_id))).all()
+    assert len(rows) == 12 and all(ok for _, ok, _ in rows) and all(v is None for _, _, v in rows)
+
+    # "party" is only in e01's Shorthand: narrative_tsv matches it, party_tsv does not.
+    e01_id = first.entry_ids["e01-old-mill"]
+    party_hit = await db.scalar(sa.select(
+        JournalEntry.party_tsv.op("@@")(sa.func.plainto_tsquery("english", "party"))
+    ).where(JournalEntry.id == e01_id))
+    assert party_hit is False
+
+    # A later run with a model fills party_embedding (counted once per entry).
+    second = await _seed_in_new_session(owner_email=email, embedder=fake_embedder)
+    assert second.embedded == 12
+    entries = (await db.scalars(sa.select(JournalEntry).where(JournalEntry.campaign_id == first.campaign_id)
+                                .execution_options(populate_existing=True))).all()
+    for e in entries:
+        assert list(e.party_embedding) == pytest.approx(fake_embedder(e.narrative), abs=1e-6)
+
+    # Seeded fresh with a model: both vectors in one go, counted once.
+    fresh = await _seed_in_new_session(owner_email=_email(), embedder=fake_embedder)
+    assert fresh.embedded == 12
+    third = await _seed_in_new_session(owner_email=email, embedder=fake_embedder)
+    assert third.embedded == 0

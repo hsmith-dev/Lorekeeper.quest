@@ -10,7 +10,8 @@ from app.db.models.tag import Tag, JournalTag, TagType
 from app.services.ai_service import generate_narrative
 from app.services.nlp_service import extract_tags, ExtractedTag
 from app.services.dedup_service import store_hash
-from app.services.embedding_service import embed
+from app.services import embedding_service
+from app.services.retrieval_service import index_party_fields
 from app.services.source_service import retrieve_canon_context
 from app.services.shorthand_service import get_glossary
 from app.services.llm_provider import LLMConfig
@@ -117,12 +118,16 @@ async def create_journal_entry(
 
     # Generate and store embedding for RAG retrieval
     try:
-        entry.embedding = embed(f"{notes} {narrative}")
+        entry.embedding = embedding_service.embed(f"{notes} {narrative}")
     except Exception:
         pass  # embedding failure must not block journal creation
 
+    # Party search fields (Narrative only, never the Shorthand), same
+    # transaction; an embedding failure leaves party_embedding NULL.
+    await index_party_fields(db, entry)
+
     await db.commit()
-    await store_hash(entry_hash)
+    await store_hash(campaign_id, user_id, entry_hash)
 
     await db.refresh(entry)
     result = await db.execute(

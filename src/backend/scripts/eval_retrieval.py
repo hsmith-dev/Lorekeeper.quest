@@ -51,6 +51,8 @@ from scripts.eval_common import Failure, ReportError, SeedError  # noqa: E402
 
 from sqlalchemy import select  # noqa: E402
 
+from app.access import ctx_for  # noqa: E402
+from app.db.models.campaign import Campaign  # noqa: E402
 from app.db.models.journal import JournalEntry  # noqa: E402
 from app.services import embedding_service  # noqa: E402
 from app.services.retrieval_service import RAG_RELEVANCE_MAX_DISTANCE, hybrid_search_journal  # noqa: E402
@@ -114,9 +116,13 @@ async def vector_only(db, query, campaign_id, threshold):
 
 
 async def hybrid(db, query, campaign_id, threshold):
-    results = await hybrid_search_journal(
-        db, query, campaign_id=campaign_id, user_id=uuid.uuid4(), max_distance=threshold
-    )
+    """Production retrieval as the Campaign's Owner (a GM ctx: Shorthand +
+    Narrative columns, the measured gate)."""
+    campaign = await db.get(Campaign, campaign_id)
+    if campaign is None:
+        raise SeedError(f"no campaign with id {campaign_id}")
+    ctx = await ctx_for(db, campaign.user_id, campaign_id)
+    results = await hybrid_search_journal(db, query, ctx=ctx, max_distance=threshold)
     return [r.entry for r in results if r.used]
 
 

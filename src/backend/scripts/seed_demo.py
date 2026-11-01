@@ -3,8 +3,9 @@
 
 Writes one owner (if missing), the Campaign, its 12 journal entries, NPCs,
 factions and quests through the ORM. Idempotent: a second run creates
-nothing and prints the same Campaign id. The only update it ever makes is
-filling an entry's NULL embedding once the embedding model is available.
+nothing and prints the same Campaign id. The only updates it ever makes are
+filling an entry's NULL embedding / party_embedding once the embedding model
+is available, and setting a NULL or stale party_tsv (E0-Access.7).
 
 Offline (NFR-1): it talks to nothing but --database-url. No Redis, no spaCy,
 no LLM. The embedding model is loaded from the local Hugging Face cache only
@@ -345,6 +346,7 @@ async def seed_campaign(
             )
             if embedder is not None:
                 entry.embedding = _checked(embedder(doc))
+                entry.party_embedding = _checked(embedder(e["narrative"]))
                 result.embedded += 1
             session.add(entry)
             await session.flush()
@@ -353,9 +355,22 @@ async def seed_campaign(
                 {"doc": doc, "id": str(entry.id)},
             )
             result.created["entries"] += 1
-        elif entry.embedding is None and embedder is not None:
-            entry.embedding = _checked(embedder(doc))
-            result.embedded += 1
+        else:
+            # `embedded` counts entries that got any vector this run, once each.
+            filled = False
+            if entry.embedding is None and embedder is not None:
+                entry.embedding = _checked(embedder(doc))
+                filled = True
+            if entry.party_embedding is None and embedder is not None:
+                entry.party_embedding = _checked(embedder(entry.narrative))
+                filled = True
+            result.embedded += int(filled)
+        # Party search fields (E0-Access.7): the Narrative alone, never the Shorthand.
+        await session.execute(
+            text("UPDATE journal_entries SET party_tsv = to_tsvector('english', narrative) "
+                 "WHERE id = :id AND party_tsv IS DISTINCT FROM to_tsvector('english', narrative)"),
+            {"id": str(entry.id)},
+        )
         result.entry_ids[e["seed_id"]] = entry.id
 
     for n in seed["npcs"]:
