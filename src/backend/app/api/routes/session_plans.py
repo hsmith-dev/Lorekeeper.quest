@@ -1,8 +1,9 @@
 import uuid
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
+from app.core.limiter import limiter, user_or_ip
 from app.db.session import get_db
 from app.db.models.user import User
 from app.db.models.journal import JournalEntry
@@ -33,7 +34,9 @@ async def _get_accessible_plan(db: AsyncSession, plan_id: uuid.UUID, user: User)
 
 
 @router.post("/generate", response_model=SessionPlanGenerateResponse)
+@limiter.limit("20/minute", key_func=user_or_ip)
 async def generate_plan_draft(
+    request: Request,
     body: SessionPlanGenerateRequest,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),

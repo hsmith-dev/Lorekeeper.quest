@@ -1,8 +1,9 @@
 import uuid
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
+from app.core.limiter import limiter, user_or_ip
 from app.db.session import get_db
 from app.db.models.user import User
 from app.db.models.user_settings import UserSettings
@@ -149,7 +150,9 @@ async def model_status(
 
 
 @router.post("/test", response_model=TestConnectionResponse)
+@limiter.limit("20/minute", key_func=user_or_ip)
 async def test_connection(
+    request: Request,
     body: TestConnectionRequest,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -209,7 +212,9 @@ async def test_connection(
 
 
 @router.post("/evaluate", response_model=EvaluationResponse, status_code=201)
+@limiter.limit("5/minute", key_func=user_or_ip)
 async def evaluate_model(
+    request: Request,
     body: EvaluationRequest,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),

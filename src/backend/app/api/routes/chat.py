@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, cast, Text
 from sqlalchemy.orm.attributes import flag_modified
-from app.core.limiter import limiter
+from app.core.limiter import limiter, user_or_ip
 
 from app.db.session import get_db
 from app.db.models.user import User
@@ -328,7 +328,7 @@ async def _persist_chat_turn(
 
 
 @router.post("/", response_model=ChatResponse)
-@limiter.limit("20/minute")
+@limiter.limit("20/minute", key_func=user_or_ip)
 async def chat(
     request: Request,
     body: ChatRequest,
@@ -353,7 +353,7 @@ async def chat(
 
 
 @router.post("/stream")
-@limiter.limit("20/minute")
+@limiter.limit("20/minute", key_func=user_or_ip)
 async def chat_stream(
     request: Request,
     body: ChatRequest,
