@@ -97,7 +97,7 @@ def _is_object(node: dict) -> bool:
 def _walk(node: Any, path: str, problems: list[str]) -> None:
     if not isinstance(node, dict):
         return
-    for key in ("$ref", "$defs", *_COMBINATORS):
+    for key in ("$ref", "$defs", *_COMBINATORS, "prefixItems"):
         if key in node:
             problems.append(f"{path}: has {key}")
     if _is_object(node):
@@ -130,7 +130,7 @@ def _walk(node: Any, path: str, problems: list[str]) -> None:
 
 def flatness_problems(json_schema: dict) -> list[str]:
     """Why json_schema isn't flat, one line per problem; [] if it is. Reports
-    $ref, $defs, anyOf, oneOf, allOf, an object without
+    $ref, $defs, anyOf, oneOf, allOf, prefixItems (tuples), an object without
     `additionalProperties: false`, and a property missing from `required`."""
     problems: list[str] = []
     _walk(json_schema, "$", problems)

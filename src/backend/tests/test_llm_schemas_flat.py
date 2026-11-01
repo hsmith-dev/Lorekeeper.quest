@@ -127,6 +127,10 @@ class WithDict(FlatModel):
     tags: dict[str, str]
 
 
+class WithTuple(FlatModel):
+    pair: tuple[str, int]
+
+
 class AllowExtra(FlatModel):
     model_config = ConfigDict(extra="allow")
     name: str
@@ -141,9 +145,10 @@ class AllowExtra(FlatModel):
         (Node, ["$ref"]),
         (WithUnion, ["anyOf"]),
         (WithDict, ["$.tags: object without additionalProperties"]),
+        (WithTuple, ["$.pair: has prefixItems"]),
         (AllowExtra, ["$: object without additionalProperties"]),
     ],
-    ids=["optional", "default", "nested-loose", "recursive", "union", "dict", "extra-allow"],
+    ids=["optional", "default", "nested-loose", "recursive", "union", "dict", "tuple", "extra-allow"],
 )
 def test_non_flat_schemas_are_reported(model, expected):
     problems = flatness_problems(model.model_json_schema())

@@ -38,7 +38,7 @@ from app.core.config import get_settings
 from app.core.errors import LLMConfigError, LLMUnavailable, PromptBudgetError, StructuredOutputError
 from app.core.llm_gate import GateClass, Slot
 from app.schemas.llm import flat_json_schema, flatness_problems
-from app.services.prompt_budget import TASK_POLICIES, estimate_messages, estimate_tokens, window_tokens
+from app.services.prompt_budget import TASK_POLICIES, estimate_messages, estimate_tokens
 
 # Tests swap in an httpx.MockTransport here; None = real network.
 _transport: httpx.AsyncBaseTransport | None = None
@@ -224,6 +224,7 @@ logger = logging.getLogger(__name__)
 
 STRUCTURED_MAX_ATTEMPTS = 3  # the first call + at most 2 repair turns
 REPAIR_ERRORS_MAX_CHARS = 1000
+LOG_ERRORS_MAX = 10  # validation errors (loc, type) per structured_attempt line
 STRUCTURED_BUDGET_TASK = "structured"  # budget for a task not in TASK_POLICIES
 
 # Enforcement modes; also the `backend` field of the structured_attempt log.
@@ -365,7 +366,9 @@ async def _prompted_sender(coro) -> str:
         if exc.status_code == 400:
             raise LLMConfigError(str(exc.detail)) from exc
         raise LLMUnavailable(str(exc.detail)) from exc
-    except httpx.HTTPError as exc:
+    except (httpx.HTTPError, AttributeError, TypeError) as exc:
+        # AttributeError/TypeError: a reply shape the sender didn't expect
+        # (e.g. `content: null`, which _openai_compat calls .strip() on).
         raise LLMUnavailable(f"AI model unavailable: {exc}") from exc
 
 
@@ -504,26 +507,31 @@ async def complete_structured(
 
     task: names the call in logs, stats and the json_schema, picks the model
     (model_for) and the prompt budget (its TASK_POLICIES entry, else
-    "structured"). max_tokens defaults to that budget's reserved output.
+    "structured"). max_tokens defaults to that budget's reserved output; a
+    larger one shrinks the prompt window to match.
 
     Raises PromptBudgetError (platform prompt over the window; no request),
     LLMBusy (no gate slot), LLMUnavailable (backend down, timeout, 5xx,
-    empty reply), LLMConfigError (missing BYOK key). None of those is an
-    attempt or triggers a repair."""
+    empty reply, or a key-less openai call's 401), LLMConfigError (missing
+    anthropic/gemini key). None of those is an attempt or triggers a repair.
+    A repair prompt that can't fit the window ends the call early with
+    StructuredOutputError (attempts = attempts made)."""
     cfg = config or get_default_config()
     json_schema = _checked_schema(schema)
     base = _with_schema(messages, schema_prompt(schema))
 
     budget_task = task if task in TASK_POLICIES else STRUCTURED_BUDGET_TASK
+    reserved = TASK_POLICIES[budget_task].reserved_output
+    mt = max_tokens if max_tokens is not None else reserved
     window: int | None = None
     if uses_platform_llm(cfg):
-        window = window_tokens(budget_task)
+        # A max_tokens above the task's reserve shrinks the prompt window to match.
+        window = get_settings().ollama_context_length - max(mt, reserved)
         needed = estimate_messages(base)
         if needed > window:
             raise PromptBudgetError(
                 f"Structured prompt for {task!r} needs ~{needed} tokens but the window is {window}."
             )
-    mt = max_tokens if max_tokens is not None else TASK_POLICIES[budget_task].reserved_output
 
     st = _Structured(cfg, task, json_schema, await _structured_mode(cfg), mt, timeout)
     errors: list[dict] = []
@@ -533,19 +541,32 @@ async def complete_structured(
             started = time.monotonic()
             raw = await _send_structured(st, prompt)
             result, errors = _validate(raw, schema)
-            logger.info(json.dumps({
+            line = {
                 "event": "structured_attempt",
                 "task": task,
                 "attempt": attempt,
                 "valid": result is not None,
                 "backend": st.mode,
                 "ms": round((time.monotonic() - started) * 1000),
-            }))
+            }
+            if result is None:
+                # Where and how it failed only: no msg, no input text.
+                line["errors"] = [{"loc": e["loc"], "type": e["type"]} for e in errors[:LOG_ERRORS_MAX]]
+            logger.info(json.dumps(line))
             if result is not None:
                 _bump_stat(task, "first_try_valid" if attempt == 1 else "valid_after_repair")
                 return result
             if attempt < STRUCTURED_MAX_ATTEMPTS:
-                prompt = _repair_messages(base, raw, errors, window)
+                try:
+                    prompt = _repair_messages(base, raw, errors, window)
+                except PromptBudgetError as exc:
+                    # Requests were already sent: the output is unusable, not the prompt.
+                    _bump_stat(task, "failed")
+                    raise StructuredOutputError(
+                        "The AI's output was unusable, and a repair prompt would not fit. Please try again.",
+                        attempts=attempt,
+                        errors=errors,
+                    ) from exc
     _bump_stat(task, "failed")
     raise StructuredOutputError(
         "The AI's output was unusable, even after asking it to fix it. Please try again.",

@@ -9,7 +9,21 @@ followup_review_recommended: false
 context:
   - '{project-root}/_bmad-output/implementation-artifacts/epic-6-context.md'
 warnings: [oversized]
-deferred: []
+deferred:
+  - summary: >-
+      A reply cut off at max_tokens (done_reason/finish_reason "length") is repaired under the same limit, so both repairs are likely wasted.
+    evidence: |-
+      complete_structured treats truncated JSON as ordinary invalid output; the repair turn keeps the same num_predict/max_tokens. A distinct outcome needs a policy (raise the limit, or fail fast), and E0-LLM.6 sizes per-task reserves from SPIKE-6.
+    location: >-
+      src/backend/app/services/llm_provider.py (complete_structured loop, _send_ollama/_send_openai_schema)
+    severity: medium
+  - summary: >-
+      No measured FR-3 validity rates or docs/BENCHMARKS.md row yet.
+    evidence: |-
+      Needs the desktop Ollama (no-desktop mode); tests/integration/test_llm_structured_ollama.py is ready to run.
+    location: >-
+      docs/BENCHMARKS.md
+    severity: low
 ---
 
 <intent-contract>
@@ -84,6 +98,44 @@ deferred: []
 ## Spec Change Log
 
 ## Review Triage Log
+
+### 2026-11-01 — Review pass
+- verdicts: 34 findings — high 0, medium 5, low 25, false 4, maybe-false 0
+- findings:
+  - `[medium]` `[patch]` (verification-gap) Repair-turn PromptBudgetError path untested — added `test_repair_over_window_is_unusable` (grouped with the edge row on the same path).
+  - `[low]` `[patch]` (verification-gap) Strict-path null/"" content untested — `kobold-null`/`kobold-empty` cases added to `test_backend_down_is_unavailable`.
+  - `[low]` `[patch]` (verification-gap) json_schema `name` sanitisation untested — added `test_json_schema_name_sanitised` (space/dot and 72-char task).
+  - `[low]` `[reject]` (verification-gap other) Every 4xx triggers the prompted retry, including 401/429 — the story AC says "on a 4xx response it retries once as prompted JSON". Narrowing it would depart from the story, and the cost is one extra request on a call that is failing anyway.
+  - `[low]` `[patch]` (verification-gap other) The docstring claims LLMConfigError for a missing BYOK key, but a key-less openai call gets LLMUnavailable — docstring reworded (anthropic/gemini only).
+  - `[low]` `[reject]` (blind) 4xx fallback too broad — same as the row above.
+  - `[low]` `[reject]` (blind) The format rejection isn't cached per URL — adds process state for one cheap 4xx per call on servers without json_schema. No such deployment shown.
+  - `[low]` `[reject]` (blind) Ollama path has no prompted fallback — the desktop runs Ollama 0.40.3 (schema `format` supported since 0.5), and the runtime flatness check stops the schemas Ollama could reject. A 4xx there means a real config problem (for example a missing model), so LLMUnavailable is right.
+  - `[low]` `[reject]` (blind) A bad BYOK key surfaces as LLMUnavailable, which is retryable — this is the existing senders' mapping (`_anthropic`/`_gemini`/`_openai_compat` raise 503), shared with complete_messages. Changing it means editing the senders or errors.py, which is out of this story.
+  - `[medium]` `[patch]` (blind) An explicit max_tokens isn't reflected in the budget window — the window is now `ollama_context_length - max(mt, reserved_output)`; added `test_large_max_tokens_shrinks_window`.
+  - `[medium]` `[defer]` (blind) Truncated replies (finish/done_reason "length") are repaired under the same limit and likely fail again — real, but a distinct outcome needs a new error branch and policy (raise max_tokens? fail fast?). E0-LLM.6 sizes reserves from SPIKE-6.
+  - `[low]` `[patch]` (blind) Validation errors are never logged — invalid attempts' log lines now carry `errors: [{loc,type}]` (max 10, no msg or input); the log test is updated and `test_attempt_log_caps_errors` added.
+  - `[low]` `[reject]` (blind) Backend failures mid-loop leave no attempt line or stat — stats measure output validity (FR-3), and LLMUnavailable propagates to the caller's error handling. A fourth counter isn't in the story.
+  - `[false]` `[reject]` (blind) structured_stats is unreachable and unbounded — the story defines it as an in-process counter that eval scripts read (EV-1 runs in-process). Keys are the code-defined task names.
+  - `[low]` `[patch]` (blind) The flatness lint doesn't report prefixItems — reported now; a tuple negative case was added. Constraint keywords (pattern/minLength) are rejected: Ollama ignores them and pydantic still validates, so nothing is silently accepted.
+  - `[low]` `[reject]` (blind) The 50-call integration run has 15 distinct prompts — this is an opt-in desktop run, and `OLLAMA_TEST_PARAGRAPHS` takes the ~20 demo paragraphs once E0-QA.12 lands (listed under desktop verification).
+  - `[false]` `[reject]` (blind) The no-write test can't fail — it would fail if complete_structured returned an instance (partial or default) on unusable output, because the handler would then write. That is exactly the regression it guards.
+  - `[low]` `[patch]` (blind) test_budget_uses_task_policy depends on "extraction" being absent — it now uses `zz_unknown_task`.
+  - `[low]` `[reject]` (blind) Missing tests for timeout, BYOK 4xx, recursive schema at runtime and multimodal content — TimeoutException is an httpx.HTTPError, which the tested branches already catch. The recursive schema goes through the same `_checked_schema` the lint tests exercise, and no caller sends list content.
+  - `[false]` `[reject]` (blind) The spec isn't in the diff — the spec was deliberately kept out of the review diff (the edge layer gets it separately).
+  - `[low]` `[reject]` (blind) The schema is recomputed per call — microseconds against a multi-second LLM call; caching adds state.
+  - `[low]` `[reject]` (edge) 401/403/429 trigger the prompted retry — same as the verification-gap row.
+  - `[low]` `[reject]` (edge) No Ollama 4xx fallback — same as the blind row.
+  - `[low]` `[patch]` (edge) Prompted null content raises a raw AttributeError — `_prompted_sender` maps AttributeError/TypeError to LLMUnavailable; added `test_prompted_null_content_is_unavailable`.
+  - `[low]` `[reject]` (edge) A validator raising TypeError crashes instead of repairing — a schema-author bug that fails loudly. Pydantic's own contract is ValueError/AssertionError.
+  - `[medium]` `[patch]` (edge) A repair prompt that doesn't fit raised PromptBudgetError after requests had gone out, with no stat — it now counts `failed` and raises StructuredOutputError(attempts=attempts made). Test added (grouped with the first row).
+  - `[medium]` `[patch]` (edge) A max_tokens above the reserve overflows the context — same fix as the blind row.
+  - `[low]` `[reject]` (edge) One slot can be held for up to ~4× timeout — `timeout` is per request by design (an attempt on the CPU box can take tens of seconds), and holder renewal keeps the slot valid. Holding one slot is the orchestrator's choice. Job deadlines belong to E0-Jobs (current_deadline).
+  - `[low]` `[reject]` (edge) A `{` in prose before the object breaks extraction — only on the prompted path, and it costs one repair. A raw_decode scan adds branching for a pattern not seen with temperature-0 JSON prompts.
+  - `[low]` `[patch]` (edge, claim) The integration test could report a model it doesn't send — it now prints `model_for(task, cfg)` and skips with a reason when that differs from OLLAMA_TEST_MODEL.
+  - `[low]` `[reject]` (intent) An empty or whitespace reply is LLMUnavailable, not a repairable attempt — the spec settles this (empty Ollama body → LLMUnavailable). "Semantically empty" means schema-valid content, which is covered by validators and the no-defaults rule.
+  - `[low]` `[defer]` (intent) No BENCHMARKS.md FR-3 row and no measured rates — this needs the desktop Ollama; listed under Needs desktop verification.
+  - `[low]` `[reject]` (intent) The lint is vacuous until feature schemas exist — it imports whatever lands in app/schemas/llm/, so E1's first schema module is checked automatically, and the checker itself is tested on positive and negative fixtures.
+  - `[false]` `[reject]` (intent) A per-attempt gate (story) vs one slot (diff) — the invocation intent explicitly says to hold ONE slot. This is recorded in Design Notes as a deliberate override of the story's text.
 
 ## Design Notes
 

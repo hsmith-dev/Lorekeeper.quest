@@ -7,6 +7,7 @@ test opens a socket to KOBOLD_URL or needs a Redis server.
 
 import json
 import logging
+import re
 import uuid
 from types import SimpleNamespace
 
@@ -361,6 +362,27 @@ async def test_repair_prompt_drops_echo_when_nothing_fits(serve, gate):
     assert "(not shown)" in repair[-1]["content"]
 
 
+async def test_repair_over_window_is_unusable(serve, gate):
+    window = prompt_budget.window_tokens("structured")
+    # The first prompt just fits; base + any errors turn can't.
+    content = MESSAGES[1]["content"]
+    while True:
+        msgs = [MESSAGES[0], {"role": "user", "content": content}]
+        first_tokens = prompt_budget.estimate_messages(llm_provider._with_schema(msgs, schema_prompt(Extraction)))
+        if first_tokens >= window - 3:
+            break
+        content += "w" if window - first_tokens < 20 else " word" * 10
+    assert first_tokens <= window
+    server = serve(['{"entities": [', VALID])
+    with pytest.raises(StructuredOutputError) as exc_info:
+        await complete_structured(msgs, Extraction, platform_cfg())
+    assert exc_info.value.attempts == 1
+    assert exc_info.value.errors
+    assert len(server.chats) == 1
+    assert await gate.holder_count() == 0
+    assert llm_provider.structured_stats["structured"]["failed"] == 1
+
+
 def test_repair_messages_unbounded_for_byok():
     base = [{"role": "user", "content": "x" * 50000}]
     out = llm_provider._repair_messages(base, "y" * 50000, [{"loc": "a", "msg": "b", "type": "c"}], None)
@@ -382,7 +404,7 @@ async def test_budget_uses_task_policy(serve, gate):
     s_window = prompt_budget.window_tokens("structured")
     msgs = [{"role": "user", "content": _filler_for(s_window + 100)}]
     with pytest.raises(PromptBudgetError):
-        await complete_structured(msgs, Extraction, platform_cfg(), task="extraction")
+        await complete_structured(msgs, Extraction, platform_cfg(), task="zz_unknown_task")
     server = serve([VALID])
     await complete_structured(msgs, Extraction, platform_cfg(), task="live_recap")
     assert server.payloads[0]["options"]["num_predict"] == prompt_budget.TASK_POLICIES["live_recap"].reserved_output
@@ -393,6 +415,17 @@ async def test_byok_skips_budget(serve, no_gate):
     window = prompt_budget.window_tokens("structured")
     msgs = [{"role": "user", "content": _filler_for(window + 100)}]
     await complete_structured(msgs, Extraction, LLMConfig(provider="openai", api_key="sk-test"))
+    assert len(server.chats) == 1
+
+
+async def test_large_max_tokens_shrinks_window(serve, gate):
+    server = serve([VALID])
+    window = prompt_budget.window_tokens("structured")
+    msgs = [{"role": "user", "content": _filler_for(window - 500)}]  # fits the default reserve
+    with pytest.raises(PromptBudgetError):
+        await complete_structured(msgs, Extraction, platform_cfg(), max_tokens=2048)
+    assert server.chats == [] and server.version_calls == 0
+    await complete_structured(msgs, Extraction, platform_cfg())
     assert len(server.chats) == 1
 
 
@@ -515,8 +548,13 @@ def _refuse(request):
         (True, lambda r: httpx.Response(200, text="")),
         (False, _status(503)),
         (False, _refuse),
+        (False, lambda r: httpx.Response(200, json={"choices": [{"message": {"content": None}}]})),
+        (False, lambda r: httpx.Response(200, json={"choices": [{"message": {"content": ""}}]})),
     ],
-    ids=["ollama-5xx", "ollama-4xx", "ollama-refused", "ollama-empty", "ollama-no-body", "kobold-5xx", "kobold-refused"],
+    ids=[
+        "ollama-5xx", "ollama-4xx", "ollama-refused", "ollama-empty", "ollama-no-body",
+        "kobold-5xx", "kobold-refused", "kobold-null", "kobold-empty",
+    ],
 )
 async def test_backend_down_is_unavailable(serve, gate, ollama, fail):
     server = serve([], ollama=ollama)
@@ -534,6 +572,32 @@ async def test_4xx_on_prompted_path_is_unavailable(serve, gate):
     with pytest.raises(LLMUnavailable):
         await complete_structured(MESSAGES, Extraction, platform_cfg())
     assert ["response_format" in p for p in server.payloads] == [True, False]
+
+
+@pytest.mark.parametrize("provider", ["custom", "other"])
+async def test_prompted_null_content_is_unavailable(serve, no_gate, provider):
+    """custom: strict 400, then a prompted null; other: prompted from the start."""
+    server = serve([])
+
+    def null_when_prompted(request):
+        if "response_format" in json.loads(request.content):
+            return httpx.Response(400, json={"error": "no response_format"})
+        return httpx.Response(200, json={"choices": [{"message": {"content": None}}]})
+
+    server.fail = null_when_prompted
+    with pytest.raises(LLMUnavailable):
+        await complete_structured(MESSAGES, Extraction, LLMConfig(provider=provider, api_url="http://custom.test:8000"))
+    assert "response_format" not in server.payloads[-1]
+    assert len(server.chats) == (2 if provider == "custom" else 1)
+    assert llm_provider.structured_stats == {}
+
+
+@pytest.mark.parametrize("task", ["live recap.v2", "t" * 70 + "!x"], ids=["punctuation", "long"])
+async def test_json_schema_name_sanitised(serve, gate, task):
+    server = serve([VALID], ollama=False)
+    await complete_structured(MESSAGES, Extraction, platform_cfg(), task=task)
+    name = server.payloads[0]["response_format"]["json_schema"]["name"]
+    assert re.fullmatch(r"[A-Za-z0-9_-]{1,64}", name)
 
 
 @pytest.mark.parametrize("fail", [_status(401), _refuse], ids=["401", "refused"])
@@ -659,15 +723,28 @@ async def test_attempt_log_lines(serve, gate, caplog):
             lines.append(body)
     assert [ln["attempt"] for ln in lines] == [1, 2]
     assert [ln["valid"] for ln in lines] == [False, True]
+    assert lines[0]["errors"] == [{"loc": "entities.0.type", "type": "missing"}]
+    assert "errors" not in lines[1]
     for ln in lines:
-        assert set(ln) == {"event", "task", "attempt", "valid", "backend", "ms"}
+        assert set(ln) - {"errors"} == {"event", "task", "attempt", "valid", "backend", "ms"}
         assert ln["task"] == "extraction"
         assert ln["backend"] == "ollama"
         assert isinstance(ln["ms"], int)
     assert "Mira" not in caplog.text  # never message or output text
+    assert "Field required" not in caplog.text  # nor validation msgs
     assert llm_provider.structured_stats == {
         "extraction": {"first_try_valid": 0, "valid_after_repair": 1, "failed": 0},
     }
+
+
+async def test_attempt_log_caps_errors(serve, gate, caplog):
+    caplog.set_level(logging.INFO, logger="app.services.llm_provider")
+    serve([json.dumps({"entities": [{"name": f"n{i}"} for i in range(30)]}), VALID])
+    await complete_structured(MESSAGES, Extraction, platform_cfg())
+    first = next(
+        json.loads(r.getMessage()) for r in caplog.records if '"structured_attempt"' in r.getMessage()
+    )
+    assert len(first["errors"]) == llm_provider.LOG_ERRORS_MAX
 
 
 async def test_stats_accumulate_per_task(serve, gate):

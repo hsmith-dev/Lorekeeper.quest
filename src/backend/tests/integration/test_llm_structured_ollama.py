@@ -135,11 +135,17 @@ def _prompt(i: int, paragraph: str) -> tuple[list[dict], type[FlatModel]]:
 async def test_structured_output_validity_on_real_ollama(monkeypatch):
     monkeypatch.setattr(llm_provider, "structured_stats", {})
     monkeypatch.setattr(llm_provider, "_transport", None)
-    cfg = LLMConfig(
-        provider="kobold",
-        api_url=OLLAMA_URL,
-        model=os.environ.get("OLLAMA_TEST_MODEL", "lorekeeper"),
-    )
+    wanted = os.environ.get("OLLAMA_TEST_MODEL", "lorekeeper")
+    cfg = LLMConfig(provider="kobold", api_url=OLLAMA_URL, model=wanted)
+    # At KOBOLD_URL, model_for ignores cfg.model and names local_llm_model.
+    sent = {llm_provider.model_for(f"ollama_it_{s.__name__}", cfg)
+            for s in (EntityExtraction, RecapUpdate, Verdict)}
+    if sent != {wanted}:
+        pytest.skip(
+            f"OLLAMA_TEST_URL is the platform KOBOLD_URL, so calls would name {sorted(sent)} "
+            f"instead of OLLAMA_TEST_MODEL={wanted!r}; set LOCAL_LLM_MODEL={wanted} or use another URL"
+        )
+    model = sent.pop()
     assert await llm_provider.detect_backend(OLLAMA_URL) == llm_provider.BACKEND_OLLAMA
 
     paragraphs = _paragraphs()
@@ -163,7 +169,7 @@ async def test_structured_output_validity_on_real_ollama(monkeypatch):
     assert sum(totals.values()) == CALLS
     valid = totals["first_try_valid"] + totals["valid_after_repair"]
     print(
-        f"\ncomplete_structured on {cfg.model} @ {OLLAMA_URL}, {CALLS} calls:\n"
+        f"\ncomplete_structured on {model} (model sent) @ {OLLAMA_URL}, {CALLS} calls:\n"
         f"  first try valid    {totals['first_try_valid'] / CALLS:.0%}\n"
         f"  valid after repair {totals['valid_after_repair'] / CALLS:.0%}\n"
         f"  failed             {totals['failed'] / CALLS:.0%}\n"
