@@ -40,7 +40,7 @@ def entry(name: str, kind: str = "python", license: str = "MIT", editions=("agpl
 
 
 def scan(reg, deps, edition="commercial", artifact="backend", eco="python"):
-    failures, excepted, matched, missing, _ = cl.check_register_scan(POLICY, reg, eco, deps, edition, artifact)
+    failures, excepted, matched, missing, _, _ = cl.check_register_scan(POLICY, reg, eco, deps, edition, artifact)
     return failures, excepted, matched, missing
 
 
