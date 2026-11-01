@@ -108,12 +108,17 @@ services:
     # Measured live: two Q4 7B models loaded simultaneously (OLLAMA_MAX_LOADED_
     # MODELS=2 above) run ~9GB combined; 14GB leaves real headroom for context/
     # KV-cache growth during generation without letting a leak or a third
-    # model somehow loading eat the whole box. Most of the instance's CPU
-    # budget goes here on purpose — this is the actual compute-heavy service.
+    # model somehow loading eat the whole box.
+    #
+    # CPU: no cap by default (cpus 0 = unlimited) — llama.cpp generation speed
+    # scales with cores, and the old fixed cpus "3.0" held a 24-core host to
+    # ~1 tok/s, long enough for chat answers to hit KOBOLD_TIMEOUT_SECONDS.
+    # Set OLLAMA_CPUS in .env (e.g. OLLAMA_CPUS=6) to reserve cores for other
+    # work on a shared host.
     deploy:
       resources:
         limits:
-          cpus: "3.0"
+          cpus: "${OLLAMA_CPUS:-0}"
           memory: 14g
 
   backend:

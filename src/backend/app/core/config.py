@@ -36,7 +36,8 @@ class Settings(BaseSettings):
 
     # KoboldCpp
     kobold_url: str = "http://localhost:5001"
-    kobold_timeout_seconds: int = 120
+    # CPU-served 7B generations can take many minutes; see .env.example.
+    kobold_timeout_seconds: int = 1200
     kobold_max_length: int = 800
     kobold_temperature: float = 0.72
     kobold_top_p: float = 0.95
