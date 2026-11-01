@@ -14,6 +14,7 @@ import { DashboardPage } from "./pages/DashboardPage";
 import { HistoryPage } from "./pages/HistoryPage";
 import { NavBar } from "./components/NavBar";
 import { ChatWidget } from "./components/ChatWidget";
+import { Toaster } from "./components/ui/toast";
 import { Footer } from "./components/Footer";
 
 // Lazy-loaded: everything past the core "log in → journal → history" loop.
@@ -114,6 +115,7 @@ export default function App() {
           <Footer />
           </div>
           <ChatWidget />
+          <Toaster />
           <TourOverlay />
           <TutorialWelcomePrompt />
         </TourProvider>
