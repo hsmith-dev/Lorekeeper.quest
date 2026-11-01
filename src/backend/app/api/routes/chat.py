@@ -368,29 +368,43 @@ async def chat_stream(
     falls back to the blocking endpoint if this one fails."""
     import json as _json
     from fastapi.responses import StreamingResponse
-    from app.services.llm_provider import stream_messages
+    from starlette.background import BackgroundTask
+    from app.services import llm_provider
 
     prep = await _prepare_chat(body, user, db, config)
+    # Reserve the local-LLM slot before the stream starts, so a busy gate is
+    # a normal 503 {"code": "llm_busy"} (LLMBusy handler) rather than a
+    # stream that opens and then fails. A no-op slot for BYOK.
+    slot = await llm_provider.reserve_slot(config)
 
     async def event_stream():
-        meta = {
-            "session_id": str(prep.session.id),
-            "sources": [s.model_dump() for s in prep.sources],
-            "canon_sources": prep.canon_sources,
-            "grounded": prep.grounded(),
-            "retrieval": prep.retrieval_debug().model_dump(),
-        }
-        yield f"event: meta\ndata: {_json.dumps(meta)}\n\n"
+        error: HTTPException | None = None
         parts: list[str] = []
         try:
-            async for delta in stream_messages(
-                prep.chat_messages, config, max_tokens=600,
-                timeout=chat_settings.kobold_timeout_seconds,
-            ):
-                parts.append(delta)
-                yield f"event: delta\ndata: {_json.dumps({'text': delta})}\n\n"
-        except HTTPException as exc:
-            yield f"event: error\ndata: {_json.dumps({'detail': exc.detail})}\n\n"
+            meta = {
+                "session_id": str(prep.session.id),
+                "sources": [s.model_dump() for s in prep.sources],
+                "canon_sources": prep.canon_sources,
+                "grounded": prep.grounded(),
+                "retrieval": prep.retrieval_debug().model_dump(),
+            }
+            yield f"event: meta\ndata: {_json.dumps(meta)}\n\n"
+            # held(): stream_messages' own gate acquire becomes a no-op.
+            with slot.held():
+                try:
+                    async for delta in llm_provider.stream_messages(
+                        prep.chat_messages, config, max_tokens=600,
+                        timeout=chat_settings.kobold_timeout_seconds,
+                    ):
+                        parts.append(delta)
+                        yield f"event: delta\ndata: {_json.dumps({'text': delta})}\n\n"
+                except HTTPException as exc:
+                    error = exc
+        finally:
+            # Also on client disconnect (generator closed mid-stream).
+            await slot.release()
+        if error is not None:
+            yield f"event: error\ndata: {_json.dumps({'detail': error.detail})}\n\n"
             return
         reply = "".join(parts).strip()
         if reply:
@@ -401,4 +415,7 @@ async def chat_stream(
         event_stream(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        # If the client is gone before the generator ever starts, its finally
+        # never runs; this frees the slot then (release is idempotent).
+        background=BackgroundTask(slot.release),
     )

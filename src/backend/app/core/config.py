@@ -1,4 +1,5 @@
 from pathlib import Path
+from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings
 from functools import lru_cache
 
@@ -56,6 +57,22 @@ class Settings(BaseSettings):
     # the capstone proposal's stretch goal, which previously only had the
     # fine-tuned model reachable anywhere in production.
     kobold_base_model: str = "lorekeeper-base"
+    # The one model every platform-LLM task uses (llm_provider.model_for), so
+    # Ollama keeps a single model resident and never reloads between tasks on
+    # the 16 GB box. Only `narrative` may differ (it honours the user's
+    # Fine-Tuned/Base pick). Empty = kobold_model (filled in below).
+    local_llm_model: str = ""
+    # How long a request waits for a local-LLM slot (app/core/llm_gate.py)
+    # before giving up with LLMBusy (503 llm_busy) instead of hanging.
+    llm_gate_wait_s: float = 60.0
+    # Concurrent local-LLM calls the gate admits. Matches Ollama's own
+    # OLLAMA_NUM_PARALLEL (1 on the Reference Box), so the gate decides the
+    # order and Ollama never queues behind our back.
+    llm_gate_capacity: int = Field(
+        1,
+        ge=1,
+        validation_alias=AliasChoices("LLM_GATE_CAPACITY", "OLLAMA_NUM_PARALLEL", "llm_gate_capacity"),
+    )
     # Where the admin model installer stages the ~4.4GB fine-tune GGUF while
     # it downloads it from Hugging Face and hands it to Ollama (see
     # ollama_service.install_finetuned_events). Unset = the system temp dir.
@@ -121,6 +138,13 @@ class Settings(BaseSettings):
     # this instance. Unset by default so admin routes 403 for everyone until
     # deliberately configured; case-insensitive since email addresses are.
     admin_email: str | None = None
+
+    @model_validator(mode="after")
+    def _default_local_llm_model(self) -> "Settings":
+        # Always a real model name, so callers never need their own fallback.
+        if not self.local_llm_model:
+            self.local_llm_model = self.kobold_model
+        return self
 
     class Config:
         env_file = str(_ROOT_ENV)

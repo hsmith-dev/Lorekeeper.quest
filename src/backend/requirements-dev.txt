@@ -3,3 +3,7 @@ pytest-asyncio==0.24.0
 httpx==0.27.2
 factory-boy==3.3.1
 pyyaml==6.0.3  # scripts/check-licenses.py --register (dev/CI only)
+# tests/test_llm_gate.py: in-process Redis for the gate tests (real Valkey in
+# CI covers the rest). lupa gives fakeredis EVAL, which the gate's Lua needs.
+fakeredis[lua]==2.26.2
+lupa==2.8

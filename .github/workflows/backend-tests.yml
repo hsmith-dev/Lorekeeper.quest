@@ -41,6 +41,18 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+      redis:
+        # For the `real` parametrisation of tests/test_llm_gate.py (Lua,
+        # ZSETs against a real server). Valkey, not Redis: Valkey is BSD,
+        # while Redis 7.4+ is RSALv2/SSPL (owner still deciding which ships).
+        image: valkey/valkey:8-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
 
     steps:
       - uses: actions/checkout@v4
@@ -72,4 +84,6 @@ jobs:
           TEST_DATABASE_URL: postgresql+asyncpg://lorekeeper:changeme@localhost:5432/lorekeeper_test
           POSTGRES_PASSWORD: changeme
           SECRET_KEY: ci-test-secret-key-not-used-anywhere-real
+          # DB 15 so the gate tests never share a keyspace with anything else.
+          REDIS_TEST_URL: redis://localhost:6379/15
         run: python -m pytest -v
