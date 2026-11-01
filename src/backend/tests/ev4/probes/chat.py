@@ -125,14 +125,10 @@ async def probe_chat_session_delete(ev4, actor):
     if not authenticated(actor):
         return
     live, archived = await _own_sessions(ev4, actor)
-    if is_gm_of_a(ev4, actor):
-        r = await actor.delete(f"{SESSIONS}/{archived}")
-        assert_no_canary(actor, r)
-        assert r.status_code == 204, r.text
-    else:
-        await assert_hidden_equals_missing(actor, f"{SESSIONS}/{archived}", MISSING_URL, method="DELETE")
-        if await row_count(ev4, ChatSession, ChatSession.id == archived) != 1:
-            record_leak(f"EV-4 leak: {actor.name} (not a GM of A) deleted an archived session", [str(archived)])
+    # Archived sessions are read-only, even to a GM ctx: DELETE answers like a missing one.
+    await assert_hidden_equals_missing(actor, f"{SESSIONS}/{archived}", MISSING_URL, method="DELETE")
+    if await row_count(ev4, ChatSession, ChatSession.id == archived) != 1:
+        record_leak(f"EV-4 leak: {actor.name} deleted an archived session", [str(archived)])
     r = await actor.delete(f"{SESSIONS}/{live}")
     assert_no_canary(actor, r)
     assert r.status_code == 204, r.text  # the actor's own live session
