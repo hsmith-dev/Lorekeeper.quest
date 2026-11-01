@@ -89,7 +89,7 @@ development_status:
   3-5-stt-sidecar-with-faster-whisper-and-voice-upload-switched-to: backlog
   3-6-web-and-worker-image-without-models-async-client-wrappers-an: backlog
   3-7-one-16-gb-profile-with-container-limits-gpu-override-and-sum: backlog
-  3-8-per-user-rate-limit-keying-in-slowapi-and-nginx: backlog
+  3-8-per-user-rate-limit-keying-in-slowapi-and-nginx: done
   3-9-multi-arch-images-upgrade-safe-boot-and-oci-deploy: backlog
   3-10-spike-5-and-spike-6-re-run-on-the-remote-x86-desktop-limits: backlog
   epic-3-retrospective: optional
