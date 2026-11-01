@@ -5,4 +5,5 @@
 # Format:
 #   - route: "GET /api/health"
 #     reason: "Static liveness payload; reads no Campaign data."
-[]
+- route: "GET /api/chat/health"
+  reason: "Reports only whether the local LLM backend answers ({ai_online: bool}); reads no Campaign, session or user data."

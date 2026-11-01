@@ -1,7 +1,9 @@
 """EV-4 probes for Party-only search and retrieval (E0-Access.7).
 
 Journal search, NPC/Quest entry lists, the Chronicler (blocking and
-streaming) and reindex. Every probe first indexes the seeded entries the way
+streaming: sources, candidates, citations and the trace, plus the replay of
+a session holding turns the actor may no longer see, E0-Access.8) and
+reindex. Every probe first indexes the seeded entries the way
 the write paths do (narrative_tsv + embedding over Shorthand + Narrative,
 then `index_party_fields`), with deterministic fake embeddings, so the GM
 and Party columns are both populated and a non-GM search has something to
@@ -21,6 +23,7 @@ from tests.ev4.families import (
     assert_captured_context_clean, assert_counts_and_ranking_unchanged, assert_hidden_equals_missing, assert_no_canary,
 )
 from tests.ev4.fixtures import mint_canary
+from tests.ev4.probes._support import add_chat_session, assert_same_answer, redacted_messages
 from tests.ev4.registry import ev4_probe
 from tests.ev4.report import record_leak
 
@@ -114,7 +117,8 @@ async def use_fake_llm(ev4, actor) -> None:
 
 
 def _trace(body: dict) -> list:
-    """What retrieval decided, as the actor sees it: candidates and sources."""
+    """What retrieval decided, as the actor sees it: candidates, sources and
+    citations (ids, order, count)."""
     retrieval = body.get("retrieval") or {}
     return [
         [(c["id"], c["vector_distance"], c["lexical_rank"], c["passed_gate"], c["used"])
@@ -122,6 +126,8 @@ def _trace(body: dict) -> list:
         [s["id"] for s in body.get("sources", [])],
         body.get("canon_sources"),
         retrieval.get("system_prompt"),
+        [(c["ref"]["kind"], c["ref"]["id"], c["ref"].get("field"), c["title"], c["quote"])
+         for c in body.get("citations", [])],
     ]
 
 
@@ -210,10 +216,24 @@ async def _chat_probe(ev4, actor, url: str, trace_of) -> None:
         assert r.status_code == 200, r.text
         before = trace_of(r)
         assert any(row[4] for row in before[0]), before  # non-vacuous: the inn entry is used
+        assert before[4], before  # ... and cited
         await gm_only_change(ev4, "innkeeper")
         r = await assert_captured_context_clean(actor, lambda: actor.post(url, json=body), label=f"{url} after")
         assert_no_canary(actor, r)
         _check_trace_unchanged(actor, url, before, trace_of(r))
+
+        # A session of the actor's in A holding turns they may no longer see
+        # (a reply citing a GM-only entry, legacy turns): none of it goes back
+        # into the prompt (nor the query rewrite), and the reply is clean.
+        sid = await add_chat_session(ev4, actor.user_id, await redacted_messages(ev4))
+        replay = {**body, "session_id": str(sid)}
+        r = await assert_captured_context_clean(actor, lambda: actor.post(url, json=replay), label=f"{url} replay")
+        assert_no_canary(actor, r)
+        assert r.status_code == 200, r.text
+        # An archived session is never posted to: the one 404, as for a missing one.
+        archived = await add_chat_session(ev4, actor.user_id, await redacted_messages(ev4), archived=True)
+        assert_same_answer(actor, await actor.post(url, json={**body, "session_id": str(archived)}),
+                           await actor.post(url, json={**body, "session_id": MISSING_ID}), f"{url} archived session")
 
 
 @ev4_probe("POST", "/api/chat/")

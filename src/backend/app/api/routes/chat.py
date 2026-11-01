@@ -1,43 +1,69 @@
-import uuid
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, cast, Text
-from sqlalchemy.orm.attributes import flag_modified
-from app.core.limiter import limiter, user_or_ip
+"""The Chronicler (E0-Access.8): chat, its stored sessions and their citations.
 
-from app.db.session import get_db
-from app.db.models.user import User
-from app.db.models.campaign import Campaign
-from app.db.models.journal import JournalEntry
-from app.db.models.chat import ChatSession
-from app.schemas.chat import (
-    ChatRequest,
-    ChatResponse,
-    ChatSessionSummary,
-    ChatSessionDetail,
-    ChatMessage,
-    JournalSource,
-    RetrievalCandidate,
-    RetrievalDebug,
+Every body is built GM-shaped here and projected through
+`access.project_chat`: a GM ctx gets the GM schemas (Shorthand, canon
+sources, the system prompt in the trace), anyone else the Party schemas,
+which have none of those. A chat in a Campaign uses the caller's ctx there
+(`ctx_for_request`: preview narrows, a POST in preview is 404); a chat with
+no Campaign reads the user's own entries in the Campaigns they GM, through
+their `role_map`.
+
+Stored messages are `{role, content, refs, grounded}` (`StoredChatMessage`).
+A message whose refs the reader can no longer all see is redacted on read
+and left out of the prompt history; an archived session is never replayed,
+never posted to, and to a Player is absent (list) or 404. Denied, hidden,
+another user's and missing sessions are the same 404.
+"""
+import uuid
+from typing import Any
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from sqlalchemy import Text, cast, false, or_, select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import flag_modified
+
+from app.access import (
+    PLAYER, PREVIEW_HEADER, CHAT_DETAIL, CHAT_META, CHAT_REPLY, GM, CampaignContext, NotFound, RoleMap, check_chat_session,
+    ctx_for_request, not_found, project_chat, replay_history, resolve_sources, role_map, session_visible_text,
+    visible_refs,
 )
-from app.access import GM, CampaignContext, NotFound, ctx_for, role_map
+from app.access.context import PREVIEW_MEMBER
 from app.api.deps import get_current_user, get_user_llm_config
-from app.services.chat_service import build_chat_messages, rewrite_search_query, check_kobold_health, settings as chat_settings
-from app.services.llm_provider import complete_messages
+from app.core.limiter import limiter, user_or_ip
+from app.db.models.campaign import Campaign
+from app.db.models.chat import ChatSession
+from app.db.models.journal import JournalEntry
+from app.db.models.user import User
+from app.db.session import get_db
+from app.domain.enums import EntryKind
+from app.schemas.chat import (
+    ChatGMResponse, ChatRequest, ChatSessionDetailGM, ChatSessionSummary, StoredChatMessage,
+)
+from app.schemas.sources import SourceKind, SourceRef
+from app.services import llm_config_service
+from app.services.chat_service import (
+    build_chat_messages, check_kobold_health, rewrite_search_query, settings as chat_settings,
+)
+from app.services.llm_provider import LLMConfig, complete_messages
 from app.services.retrieval_service import (
     RAG_RELEVANCE_MAX_DISTANCE, SOURCE_DOCUMENTS, hybrid_search_journal, hybrid_search_own_journals,
     retrieve_sources,
 )
-from app.services.source_service import retrieve_canon_context
 from app.services.shorthand_service import get_glossary
-from app.services.llm_provider import LLMConfig
-from app.services import llm_config_service
+from app.services.source_service import retrieve_canon_context
 
 router = APIRouter()
 
 # The relevance gate lives in retrieval_service.RAG_RELEVANCE_MAX_DISTANCE
 # now (imported above) — one constant shared by journal retrieval, canon
 # retrieval, and the transparency panel's reported threshold.
+
+_GM_OR_PARTY = ("GM: the GM schema; Player or member preview: the Party schema (no `shorthand`, no "
+                "`system_prompt`, empty `canon_sources`).")
+_LIST_LIMIT = 50
+_SEARCH_POOL = 200  # sessions the SQL prefilter hands to the visible-text match
+
+ChatScope = CampaignContext | RoleMap
 
 
 @router.get("/health")
@@ -47,185 +73,208 @@ async def chat_health() -> dict:
     return {"ai_online": online}
 
 
-@router.get("/sessions", response_model=list[ChatSessionSummary])
-async def list_sessions(
-    search: str | None = Query(None, max_length=200),
-    user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-) -> list[ChatSessionSummary]:
-    query = (
-        select(ChatSession, Campaign.name)
-        .outerjoin(Campaign, ChatSession.campaign_id == Campaign.id)
-        .where(ChatSession.user_id == user.id)
-    )
-    if search:
-        term = f"%{search}%"
-        query = query.where(
-            ChatSession.title.ilike(term)
-            | cast(ChatSession.messages, Text).ilike(term)
-        )
-    query = query.order_by(ChatSession.updated_at.desc()).limit(50)
-    result = await db.execute(query)
-    rows = result.all()
-    return [
-        ChatSessionSummary(
-            id=str(session.id),
-            title=session.title,
-            campaign_id=str(session.campaign_id) if session.campaign_id else None,
-            campaign_name=campaign_name,
-            message_count=session.message_count,
-            created_at=session.created_at,
-            updated_at=session.updated_at,
-        )
-        for session, campaign_name in rows
-    ]
-
-
-@router.get("/sessions/{session_id}", response_model=ChatSessionDetail)
-async def get_session(
-    session_id: str,
-    user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-) -> ChatSessionDetail:
+async def _own_session(db: AsyncSession, user: User, session_id: str) -> tuple[ChatSession, str | None]:
+    """The user's own session `session_id` and its Campaign's name; the one
+    404 for a bad id, a missing session or another user's."""
     try:
-        sid = uuid.UUID(session_id)
+        sid = uuid.UUID(str(session_id))
     except ValueError:
-        raise HTTPException(status_code=404, detail="Session not found")
-
-    result = await db.execute(
+        not_found()
+    row = (await db.execute(
         select(ChatSession, Campaign.name)
         .outerjoin(Campaign, ChatSession.campaign_id == Campaign.id)
         .where(ChatSession.id == sid, ChatSession.user_id == user.id)
-    )
-    row = result.one_or_none()
-    if not row:
-        raise HTTPException(status_code=404, detail="Session not found")
+    )).one_or_none()
+    if row is None:
+        not_found()
+    return row[0], row[1]
 
-    session, campaign_name = row
-    return ChatSessionDetail(
+
+async def _session_scope(request: Request, db: AsyncSession, user: User, session: ChatSession) -> ChatScope:
+    """The ctx a session is read with: the caller's ctx in its Campaign (404
+    once they are no longer a Member), or their role map for a session with
+    no Campaign. In member preview a Campaign session is 404 (the member
+    view is nobody's, so it owns no session), and a campaign-less one reads
+    as a Player everywhere; any write in preview is 404."""
+    if session.campaign_id is not None:
+        return await ctx_for_request(request, db, user, session.campaign_id)
+    roles = await role_map(db, user)
+    if request.headers.get(PREVIEW_HEADER) == PREVIEW_MEMBER:
+        if request.method.upper() not in ("GET", "HEAD", "OPTIONS"):
+            not_found()
+        roles = RoleMap({cid: PLAYER for cid in roles}, user_id=roles.user_id)
+    return roles
+
+
+def _summary(session: ChatSession, campaign_name: str | None) -> ChatSessionSummary:
+    return ChatSessionSummary(
         id=str(session.id),
         title=session.title,
         campaign_id=str(session.campaign_id) if session.campaign_id else None,
         campaign_name=campaign_name,
         message_count=session.message_count,
-        messages=[ChatMessage(**m) for m in session.messages],
         created_at=session.created_at,
         updated_at=session.updated_at,
+        archived_at=session.archived_at,
     )
+
+
+@router.get("/sessions", response_model=list[ChatSessionSummary])
+async def list_sessions(
+    request: Request,
+    search: str | None = Query(None, max_length=200),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[ChatSessionSummary]:
+    """The user's sessions, newest first: those with no Campaign, and those
+    of Campaigns they still belong to; archived ones only where they are GM.
+    `search` matches the title or the text of a message the user may still
+    read (a redacted message matches nothing)."""
+    roles = await role_map(db, user)
+    if request.headers.get(PREVIEW_HEADER) == PREVIEW_MEMBER:
+        # Preview only narrows: list (and search) as if a Player everywhere.
+        roles = RoleMap({cid: PLAYER for cid in roles}, user_id=roles.user_id)
+    gm_ids = [cid for cid, role in roles.items() if role == GM]
+    member_ids = list(roles)
+    all_gm = all(role == GM for role in roles.values())
+    query = (
+        select(ChatSession, Campaign.name)
+        .outerjoin(Campaign, ChatSession.campaign_id == Campaign.id)
+        .where(
+            ChatSession.user_id == user.id,
+            or_(ChatSession.campaign_id.is_(None),
+                ChatSession.campaign_id.in_(member_ids) if member_ids else false()),
+            or_(ChatSession.archived_at.is_(None),
+                ChatSession.campaign_id.is_(None) if all_gm else false(),
+                ChatSession.campaign_id.in_(gm_ids) if gm_ids else false()),
+        )
+        .order_by(ChatSession.updated_at.desc())
+    )
+    if not search:
+        rows = (await db.execute(query.limit(_LIST_LIMIT))).all()
+        return [_summary(s, name) for s, name in rows]
+
+    # SQL narrows (a superset: ILIKE over the stored JSON), then only the
+    # title and the messages the user may still read are matched.
+    term = f"%{search}%"
+    query = query.where(ChatSession.title.ilike(term) | cast(ChatSession.messages, Text).ilike(term))
+    rows = (await db.execute(query.limit(_SEARCH_POOL))).all()
+    needle = search.lower()
+    out: list[ChatSessionSummary] = []
+    for session, name in rows:
+        if needle in (session.title or "").lower():
+            out.append(_summary(session, name))
+        else:
+            try:
+                texts = await session_visible_text(db, session, roles)
+            except NotFound:
+                continue
+            if any(needle in t.lower() for t in texts):
+                out.append(_summary(session, name))
+        if len(out) >= _LIST_LIMIT:
+            break
+    return out
+
+
+@router.get("/sessions/{session_id}", response_model=None,
+            responses={200: {"model": ChatSessionDetailGM, "description": _GM_OR_PARTY}})
+async def get_session(
+    session_id: str,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """One of the user's sessions, its messages redacted by what they may
+    see now. An archived session is readable by a GM ctx only."""
+    session, campaign_name = await _own_session(db, user, session_id)
+    scope = await _session_scope(request, db, user, session)
+    return await project_chat(db, session, scope, CHAT_DETAIL, extra={"campaign_name": campaign_name})
 
 
 @router.delete("/sessions/{session_id}", status_code=204)
 async def delete_session(
     session_id: str,
+    request: Request,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> None:
-    try:
-        sid = uuid.UUID(session_id)
-    except ValueError:
-        raise HTTPException(status_code=404, detail="Session not found")
-
-    result = await db.execute(
-        select(ChatSession).where(ChatSession.id == sid, ChatSession.user_id == user.id)
-    )
-    session = result.scalar_one_or_none()
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
-
+    session, _ = await _own_session(db, user, session_id)
+    scope = await _session_scope(request, db, user, session)  # a DELETE in preview is 404
+    check_chat_session(session, scope)
+    if session.archived_at is not None:
+        not_found()  # archived sessions are read-only, even to a GM ctx
     await db.delete(session)
     await db.commit()
 
 
 class _ChatPrep:
-    """Everything the blocking and streaming chat endpoints share: resolved
-    campaign, rewritten retrieval query, hybrid-retrieval results, canon
-    context, the loaded-or-created session, and the exact messages array for
-    the completion. Built by _prepare_chat below."""
-    campaign_uuid: uuid.UUID | None
-    # The caller's ctx in campaign_uuid (None for a chat with no Campaign).
-    # Only a GM ctx (or no Campaign: the user's own GM entries) sees
-    # Shorthand, glossary, canon and the system prompt (E0-Access.7).
-    ctx: CampaignContext | None
-    search_query: str
-    rewritten_from: str | None
-    journal_context: list[dict]
-    sources: list[JournalSource]
-    retrieval_candidates: list[RetrievalCandidate]
-    canon_sources: list[str]
+    """Everything the blocking and streaming chat endpoints share, built by
+    _prepare_chat: the session, the scope its body is projected with, the
+    exact messages array for the completion, the GM-shaped body, the
+    projected SSE meta, and what the assistant turn stores."""
+    ctx: CampaignContext | None  # None: a chat with no Campaign
+    scope: ChatScope
     session: ChatSession
-    history: list[dict]
+    stored: list[dict]           # the session's messages as stored (never rewritten)
     chat_messages: list[dict]
+    body: dict[str, Any]         # GM-shaped: sources, canon_sources, grounded, retrieval, citations
+    meta: dict[str, Any]         # the SSE meta event, projected for the ctx
+    refs: list[SourceRef]        # what the reply drew on (all visible to the ctx)
+    grounded: bool
 
-    def grounded(self) -> bool:
-        return not (self.campaign_uuid and not self.sources and not self.canon_sources)
 
-    @property
-    def is_gm(self) -> bool:
-        return self.ctx is None or self.ctx.role == GM
-
-    def retrieval_debug(self) -> RetrievalDebug:
-        system_prompt = self.chat_messages[0]["content"] if self.chat_messages else None
-        return RetrievalDebug(
-            query=self.search_query,
-            rewritten_from=self.rewritten_from,
-            threshold=RAG_RELEVANCE_MAX_DISTANCE,
-            candidates=self.retrieval_candidates,
-            # The system prompt can carry Shorthand and the glossary: GM only.
-            system_prompt=system_prompt if self.is_gm else None,
-        )
+def _entry_ref(entry: JournalEntry, is_gm: bool) -> SourceRef:
+    """The citation of a retrieved entry: the whole record for a GM, the
+    Narrative alone for anyone else (Design Notes: `field=None` includes the
+    Shorthand)."""
+    kind = SourceKind.PLAYER_JOURNAL if str(entry.kind) == EntryKind.PLAYER.value else SourceKind.JOURNAL
+    return SourceRef(kind=kind, id=entry.id, field=None if is_gm else "narrative")
 
 
 async def _prepare_chat(
+    request: Request,
     body: ChatRequest,
     user: User,
     db: AsyncSession,
     config: LLMConfig,
 ) -> _ChatPrep:
-    # --- Resolve campaign context ---
+    # --- Resolve the ctx: a denied, missing or malformed Campaign (and a
+    # POST in preview) is the one 404, never a silent fall-back.
+    ctx: CampaignContext | None = None
     campaign_name: str | None = None
     genre: str | None = None
-    campaign_uuid: uuid.UUID | None = None
-
     if body.campaign_id:
-        try:
-            campaign_uuid = uuid.UUID(body.campaign_id)
-        except ValueError:
-            pass
+        ctx = await ctx_for_request(request, db, user, body.campaign_id)
+        campaign = await db.get(Campaign, ctx.campaign_id)
+        if campaign is None:
+            not_found()
+        campaign_name = campaign.name
+        genre = campaign.genre.value
+        scope: ChatScope = ctx
+    else:
+        scope = await role_map(db, user)
+    # No Campaign: the user's own entries in Campaigns they GM, read as GM.
+    is_gm = ctx is None or ctx.is_gm
 
-    ctx: CampaignContext | None = None
-    if campaign_uuid:
-        try:
-            ctx = await ctx_for(db, user.id, campaign_uuid)
-            campaign = await db.get(Campaign, ctx.campaign_id)
-            if campaign is None:
-                raise NotFound()
-            campaign_name = campaign.name
-            genre = campaign.genre.value
-        except NotFound:
-            ctx = None
-            campaign_uuid = None  # no access — fall back to the user's own history below
-    is_gm = ctx is None or ctx.role == GM
+    # --- The session: the user's own, of this Campaign (or of none), not
+    # archived. History is what may be replayed: {role, content} of the
+    # messages ctx may still see.
+    session: ChatSession | None = None
+    if body.session_id:
+        session, _ = await _own_session(db, user, body.session_id)
+        if session.campaign_id != (ctx.campaign_id if ctx is not None else None) or session.archived_at is not None:
+            not_found()
+        check_chat_session(session, scope)
+    history = await replay_history(db, session, scope)
 
     # --- Query rewriting: follow-ups ("what did he find there?") carry no
-    # retrieval signal — resolve them against recent history into a
-    # standalone query first. Retrieval-only; the model still sees the
-    # user's actual message. See chat_service.rewrite_search_query.
-    history_for_rewrite: list[dict] = []
-    if body.session_id:
-        try:
-            sid_prev = uuid.UUID(body.session_id)
-            prev = await db.execute(
-                select(ChatSession).where(ChatSession.id == sid_prev, ChatSession.user_id == user.id)
-            )
-            prev_session = prev.scalar_one_or_none()
-            if prev_session is not None:
-                history_for_rewrite = list(prev_session.messages)
-        except (ValueError, Exception):
-            pass
+    # retrieval signal — resolve them against recent (replayable) history
+    # into a standalone query first. Retrieval-only; the model still sees
+    # the user's actual message. See chat_service.rewrite_search_query.
     search_query = body.message
     rewritten_from: str | None = None
     try:
-        rewritten = await rewrite_search_query(body.message, history_for_rewrite, config)
+        rewritten = await rewrite_search_query(body.message, history, config)
         if rewritten:
             search_query = rewritten
             rewritten_from = body.message
@@ -234,50 +283,59 @@ async def _prepare_chat(
 
     # --- RAG: hybrid (vector + full-text, RRF-fused) search over journal
     # entries — see retrieval_service.py for why hybrid beats either alone.
+    # Every candidate is re-checked through access.visible_refs.
     journal_context: list[dict] = []
-    sources: list[JournalSource] = []
-    retrieval_candidates: list[RetrievalCandidate] = []
-
+    sources: list[dict] = []
+    candidates: list[dict] = []
+    refs: list[SourceRef] = []
+    citations: list = []
     try:
         if ctx is not None:
             # GM: today's columns and gate. Anyone else: Party Narratives of
             # the entries they may see, never the Shorthand.
             results = await hybrid_search_journal(db, search_query, ctx=ctx)
         else:
-            # No Campaign: the user's own entries in Campaigns they GM.
-            results = await hybrid_search_own_journals(db, search_query, roles=await role_map(db, user))
+            results = await hybrid_search_own_journals(db, search_query, roles=scope)
+        entry_refs = {r.entry.id: _entry_ref(r.entry, is_gm) for r in results}
+        shown = set(await visible_refs(db, entry_refs.values(), scope))
         for r in results:
-            # Hidden means absent: a non-GM gets no Shorthand anywhere (the
-            # Party schemas without the field are E0-Access.8).
-            shorthand = r.entry.shorthand if is_gm else ""
-            retrieval_candidates.append(RetrievalCandidate(
-                id=str(r.entry.id),
-                shorthand=shorthand[:120],
-                session_date=str(r.entry.session_date) if r.entry.session_date else None,
-                vector_distance=round(r.vector_distance, 4) if r.vector_distance is not None else None,
-                lexical_rank=r.lexical_rank,
-                rrf_score=round(r.rrf_score, 5),
-                passed_gate=r.passed_gate,
-                used=r.used,
-            ))
+            ref = entry_refs[r.entry.id]
+            if ref not in shown:
+                continue
+            entry = r.entry
+            session_date = str(entry.session_date) if entry.session_date else None
+            candidate = {
+                "id": str(entry.id),
+                "session_date": session_date,
+                "vector_distance": round(r.vector_distance, 4) if r.vector_distance is not None else None,
+                "lexical_rank": r.lexical_rank,
+                "rrf_score": round(r.rrf_score, 5),
+                "passed_gate": r.passed_gate,
+                "used": r.used,
+            }
+            if is_gm:
+                candidate["shorthand"] = entry.shorthand[:120]
+            candidates.append(candidate)
             if r.used:
-                item = {
-                    "narrative": r.entry.narrative,
-                    "session_date": str(r.entry.session_date) if r.entry.session_date else None,
+                item = {"narrative": entry.narrative, "session_date": session_date}
+                source = {
+                    "id": str(entry.id),
+                    "snippet": entry.narrative[:200],
+                    "session_date": session_date,
+                    "distance": round(r.vector_distance, 4) if r.vector_distance is not None else None,
+                    "method": r.method,
                 }
                 if is_gm:
-                    item["shorthand"] = r.entry.shorthand
+                    item["shorthand"] = entry.shorthand
+                    source["shorthand"] = entry.shorthand
                 journal_context.append(item)
-                sources.append(JournalSource(
-                    id=str(r.entry.id),
-                    snippet=r.entry.narrative[:200],
-                    session_date=str(r.entry.session_date) if r.entry.session_date else None,
-                    shorthand=shorthand,
-                    distance=round(r.vector_distance, 4) if r.vector_distance is not None else None,
-                    method=r.method,
-                ))
+                sources.append(source)
+                refs.append(ref)
+        citations = await resolve_sources(db, refs, scope)
     except Exception:
-        pass  # RAG failure must not break chat
+        # RAG failure must not break chat, and must not leave a half-built
+        # body (sources and stored refs without their citations).
+        journal_context, sources, candidates, refs, citations = [], [], [], [], []
 
     canon_context: str | None = None
     canon_sources: list[str] = []
@@ -293,65 +351,64 @@ async def _prepare_chat(
         pass  # RAG failure must not break chat
 
     shorthand_glossary: list[dict] | None = None
-    if campaign_uuid and is_gm:  # the glossary is GM-only
+    if ctx is not None and ctx.is_gm:  # the glossary is GM-only
         try:
-            shorthand_glossary = await get_glossary(db, campaign_uuid)
+            shorthand_glossary = await get_glossary(db, ctx.campaign_id)
         except Exception:
             pass  # same — a glossary lookup failure must not break chat
 
-    # --- Load or create session ---
-    session: ChatSession | None = None
-
-    if body.session_id:
-        try:
-            sid = uuid.UUID(body.session_id)
-        except ValueError:
-            sid = None
-        if sid:
-            res = await db.execute(
-                select(ChatSession).where(ChatSession.id == sid, ChatSession.user_id == user.id)
-            )
-            session = res.scalar_one_or_none()
-
     if session is None:
-        title = body.message[:80].strip() or "New conversation"
         session = ChatSession(
             user_id=user.id,
-            campaign_id=campaign_uuid,
-            title=title,
+            campaign_id=ctx.campaign_id if ctx is not None else None,
+            title=body.message[:80].strip() or "New conversation",
             messages=[],
             message_count=0,
         )
         db.add(session)
         await db.flush()
 
-    history = list(session.messages)
     chat_messages = build_chat_messages(
         body.message, history, campaign_name, genre, journal_context,
-        canon_context=canon_context, shorthand_glossary=shorthand_glossary,
+        canon_context=canon_context, shorthand_glossary=shorthand_glossary, ctx=ctx,
     )
+    grounded = not (ctx is not None and not sources and not canon_sources)
 
     prep = _ChatPrep()
-    prep.campaign_uuid = campaign_uuid
     prep.ctx = ctx
-    prep.search_query = search_query
-    prep.rewritten_from = rewritten_from
-    prep.journal_context = journal_context
-    prep.sources = sources
-    prep.retrieval_candidates = retrieval_candidates
-    prep.canon_sources = canon_sources
+    prep.scope = scope
     prep.session = session
-    prep.history = history
+    prep.stored = list(session.messages or [])
     prep.chat_messages = chat_messages
+    prep.refs = refs
+    prep.grounded = grounded
+    prep.body = {
+        "session_id": str(session.id),
+        "sources": sources,
+        "canon_sources": canon_sources,
+        "grounded": grounded,
+        "retrieval": {
+            "query": search_query,
+            "rewritten_from": rewritten_from,
+            "threshold": RAG_RELEVANCE_MAX_DISTANCE,
+            "candidates": candidates,
+            # The system prompt can carry Shorthand and the glossary: GM only.
+            "system_prompt": chat_messages[0]["content"] if is_gm and chat_messages else None,
+        },
+        "citations": citations,
+    }
+    prep.meta = (await project_chat(db, session, scope, CHAT_META, extra=prep.body)).model_dump(mode="json")
     return prep
 
 
 async def _persist_chat_turn(
     db: AsyncSession, prep: _ChatPrep, user: User, config: LLMConfig, user_message: str, reply: str
 ) -> None:
-    prep.session.messages = prep.history + [
-        {"role": "user", "content": user_message},
-        {"role": "assistant", "content": reply},
+    """Append the turn as stored messages: refs and the grounded flag, never
+    titles or quotes. Earlier messages stay as stored (redaction is on read)."""
+    prep.session.messages = prep.stored + [
+        StoredChatMessage(role="user", content=user_message).stored(),
+        StoredChatMessage(role="assistant", content=reply, refs=prep.refs, grounded=prep.grounded).stored(),
     ]
     prep.session.message_count = len(prep.session.messages)
     flag_modified(prep.session, "messages")
@@ -359,7 +416,8 @@ async def _persist_chat_turn(
     await llm_config_service.meter(db, user, config, user_message, reply)
 
 
-@router.post("/", response_model=ChatResponse)
+@router.post("/", response_model=None,
+             responses={200: {"model": ChatGMResponse, "description": _GM_OR_PARTY}})
 @limiter.limit("20/minute", key_func=user_or_ip)
 async def chat(
     request: Request,
@@ -367,21 +425,15 @@ async def chat(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     config: LLMConfig = Depends(get_user_llm_config),
-) -> ChatResponse:
-    prep = await _prepare_chat(body, user, db, config)
+):
+    prep = await _prepare_chat(request, body, user, db, config)
     reply = await complete_messages(
         prep.chat_messages, config, max_tokens=600,
         timeout=chat_settings.kobold_timeout_seconds,
     )
+    out = await project_chat(db, prep.session, prep.scope, CHAT_REPLY, extra={**prep.body, "reply": reply})
     await _persist_chat_turn(db, prep, user, config, body.message, reply)
-    return ChatResponse(
-        reply=reply,
-        session_id=str(prep.session.id),
-        sources=prep.sources,
-        canon_sources=prep.canon_sources,
-        grounded=prep.grounded(),
-        retrieval=prep.retrieval_debug(),
-    )
+    return out
 
 
 @router.post("/stream")
@@ -395,16 +447,17 @@ async def chat_stream(
 ):
     """Server-sent-events version of POST / — same retrieval, same
     persistence, but tokens render as they generate. Event order: one `meta`
-    event (session id, sources, grounded flag, retrieval trace — all known
-    before generation starts), then `delta` events, then `done` (or `error`
-    if the model was unreachable before any token arrived). The frontend
-    falls back to the blocking endpoint if this one fails."""
+    event (session id, sources, grounded flag, retrieval trace, citations —
+    all known before generation starts, projected like the blocking reply),
+    then `delta` events, then `done` (or `error` if the model was unreachable
+    before any token arrived). The frontend falls back to the blocking
+    endpoint if this one fails."""
     import json as _json
     from fastapi.responses import StreamingResponse
     from starlette.background import BackgroundTask
     from app.services import llm_provider
 
-    prep = await _prepare_chat(body, user, db, config)
+    prep = await _prepare_chat(request, body, user, db, config)
     # Reserve the local-LLM slot before the stream starts, so a busy gate is
     # a normal 503 {"code": "llm_busy"} (LLMBusy handler) rather than a
     # stream that opens and then fails. A no-op slot for BYOK.
@@ -414,14 +467,7 @@ async def chat_stream(
         error: HTTPException | None = None
         parts: list[str] = []
         try:
-            meta = {
-                "session_id": str(prep.session.id),
-                "sources": [s.model_dump() for s in prep.sources],
-                "canon_sources": prep.canon_sources,
-                "grounded": prep.grounded(),
-                "retrieval": prep.retrieval_debug().model_dump(),
-            }
-            yield f"event: meta\ndata: {_json.dumps(meta)}\n\n"
+            yield f"event: meta\ndata: {_json.dumps(prep.meta)}\n\n"
             # held(): stream_messages' own gate acquire becomes a no-op.
             with slot.held():
                 try:

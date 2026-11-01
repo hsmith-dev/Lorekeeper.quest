@@ -155,3 +155,53 @@ def assert_same_answer(actor: Actor, hidden: httpx.Response, missing: httpx.Resp
         diffs.append("headers differ")
     if diffs:
         record_leak(f"EV-4 leak: {actor.name} can tell a hidden from a missing {label}", diffs)
+
+
+# ── Chat sessions (E0-Access.8) ────────────────────────────────────────────
+
+_IN_A = object()
+
+
+async def add_chat_session(ev4, user_id: uuid.UUID, messages: list[dict], *, campaign_id=_IN_A,
+                           archived: bool = False, title: str | None = None) -> uuid.UUID:
+    """A committed chat session of `user_id` (Campaign A by default; None
+    for no Campaign) holding `messages` exactly as stored."""
+    from app.db.models.chat import ChatSession
+
+    cid = ev4.a.campaign_id if campaign_id is _IN_A else campaign_id
+    session = ChatSession(
+        id=uuid.uuid4(), user_id=user_id, campaign_id=cid, title=title or f"Chat {uuid.uuid4().hex[:8]}",
+        messages=messages, message_count=len(messages),
+        archived_at=datetime.now(timezone.utc) if archived else None,
+    )
+    ev4.db.add(session)
+    await ev4.db.commit()
+    return session.id
+
+
+def chat_ref(entry_id: uuid.UUID, kind: str = "journal", field: str | None = "narrative") -> dict:
+    """A stored SourceRef."""
+    out = {"kind": kind, "id": str(entry_id)}
+    if field is not None:
+        out["field"] = field
+    return out
+
+
+async def redacted_messages(ev4) -> list[dict]:
+    """Stored messages for a session in A: a turn citing a Party entry (plain
+    text, visible to every Member), then a reply citing a GM-only entry and a
+    legacy turn (no `refs`), whose texts are canaries. A non-GM of A must
+    read the last three redacted and never get them back in a prompt."""
+    a = ev4.a.campaign_id
+    hidden = await add_entry(ev4, visibility="gm")
+    visible = ev4.a.ids["journal_entries"][0]  # the Drowsy Dragon entry: Party, kind gm
+    return [
+        {"role": "user", "content": "Tell me about the inn.", "refs": []},
+        {"role": "assistant", "content": "The inn was quiet that night.", "refs": [chat_ref(visible)],
+         "grounded": True},
+        {"role": "user", "content": "And the vault?", "refs": []},
+        {"role": "assistant", "content": f"{mint_canary('CHATCITE', a).token} guards the vault.",
+         "refs": [chat_ref(hidden)], "grounded": True},
+        {"role": "user", "content": f"{mint_canary('CHATLEGACY', a).token} who is the lich?"},
+        {"role": "assistant", "content": f"{mint_canary('CHATLEGACY', a).token} Barnaby."},
+    ]

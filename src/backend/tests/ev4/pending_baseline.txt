@@ -15,7 +15,6 @@ DELETE /api/campaigns/{campaign_id}
 DELETE /api/campaigns/{campaign_id}/members/{member_id}
 DELETE /api/campaigns/{campaign_id}/share/{token_id}
 DELETE /api/campaigns/{campaign_id}/tag-categories/{category_id}
-DELETE /api/chat/sessions/{session_id}
 DELETE /api/session-plans/{plan_id}
 DELETE /api/settings/evaluations/{evaluation_id}
 DELETE /api/shorthand/{term_id}
@@ -33,9 +32,6 @@ GET /api/campaigns/{campaign_id}/export
 GET /api/campaigns/{campaign_id}/members
 GET /api/campaigns/{campaign_id}/share
 GET /api/campaigns/{campaign_id}/tag-categories
-GET /api/chat/health
-GET /api/chat/sessions
-GET /api/chat/sessions/{session_id}
 GET /api/feedback/
 GET /api/feedback/{feedback_id}/context
 GET /api/health

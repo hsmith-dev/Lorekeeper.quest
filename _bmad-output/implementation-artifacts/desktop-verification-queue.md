@@ -96,3 +96,6 @@ Stories were merged on green GitHub CI while the desktop was offline (owner deci
 ## E0-Access.7 — Party-only search and retrieval (PR #49)
 - [ ] **Deploy step (put in release notes):** after deploying, run once in the backend container `python scripts/backfill_party_embeddings.py` (fills empty/stale `party_tsv` + `party_embedding`; idempotent)
 - [ ] Known: a duplicate entry that slips past Valkey in the first 24 h after deploy hits the DB constraint → 500 instead of 409 (deferred)
+
+## E0-Access.8 — Player-safe Chronicler chat with SourceRef citations (PR #53)
+- [ ] Real chat on Ollama `lorekeeper`: as a Player in a seeded Campaign, `POST /api/chat/stream` → the `meta` event has no `shorthand`/`system_prompt` but has `citations`; as the GM, both are present

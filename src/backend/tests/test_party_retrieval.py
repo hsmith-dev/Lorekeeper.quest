@@ -474,9 +474,10 @@ async def test_chat_player_gets_no_gm_text_and_gm_keeps_it(db, world, client):
     for secret in ("SECRETWORD", "GLOSSTERM", "GLOSSMEANING", "- Notes"):
         assert secret not in prompt and secret not in r.text
     data = r.json()
-    assert data["sources"] and all(s["shorthand"] == "" for s in data["sources"])
-    assert data["retrieval"]["system_prompt"] is None
-    assert all(c["shorthand"] == "" for c in data["retrieval"]["candidates"])
+    # The Party schemas (E0-Access.8): no `shorthand`, no `system_prompt`.
+    assert data["sources"] and all("shorthand" not in s for s in data["sources"])
+    assert "system_prompt" not in data["retrieval"]
+    assert all("shorthand" not in c for c in data["retrieval"]["candidates"])
 
     with llm_provider.capture() as cap:
         r = await client.post("/api/chat/stream", headers=bearer(world.p), json=body)
@@ -484,7 +485,7 @@ async def test_chat_player_gets_no_gm_text_and_gm_keeps_it(db, world, client):
     assert "SECRETWORD" not in r.text and "GLOSSTERM" not in r.text
     assert "SECRETWORD" not in json.dumps([c.messages for c in cap.calls])
     meta = json.loads(r.text.split("event: meta\ndata: ", 1)[1].split("\n", 1)[0])
-    assert meta["retrieval"]["system_prompt"] is None
+    assert "system_prompt" not in meta["retrieval"]
 
     # Positive control: the GM's prompt still has the Shorthand and the glossary.
     with llm_provider.capture() as cap:

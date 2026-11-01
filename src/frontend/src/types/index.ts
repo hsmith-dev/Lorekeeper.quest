@@ -198,6 +198,28 @@ export interface GenerateDraftResponse {
 export interface ChatMessage {
   role: "user" | "assistant";
   content: string;
+  // Stored sessions (E0-Access.8): what the reply cited, whether it was
+  // grounded, and whether it is hidden because the reader can no longer see
+  // what it drew on (content is then a notice).
+  refs?: SourceRef[];
+  grounded?: boolean | null;
+  redacted?: boolean;
+}
+
+export type SourceKind = "journal" | "player_journal" | "canon_note" | "entity_field" | "live_segment" | "recap";
+
+export interface SourceRef {
+  kind: SourceKind;
+  id: string;
+  field?: string | null;
+  span?: [number, number] | null;
+}
+
+/** A citation: built only by the backend's access.resolve_sources. */
+export interface ResolvedSource {
+  ref: SourceRef;
+  title: string;
+  quote: string;
 }
 
 export interface ChatRequest {
@@ -212,7 +234,8 @@ export interface JournalSource {
   id: string;
   snippet: string;
   session_date: string | null;
-  shorthand: string;
+  // GM only: the Party schema has no `shorthand`.
+  shorthand?: string;
 }
 
 export interface ChatResponse {
@@ -224,6 +247,7 @@ export interface ChatResponse {
   // the reply is model invention, not campaign record; the UI labels it.
   grounded: boolean;
   retrieval?: RetrievalDebug | null;
+  citations?: ResolvedSource[];
 }
 
 export interface WeeklyCount {
@@ -261,6 +285,7 @@ export interface ChatSessionSummary {
   message_count: number;
   created_at: string;
   updated_at: string;
+  archived_at?: string | null;
 }
 
 export interface ChatSessionDetail extends ChatSessionSummary {
@@ -488,7 +513,7 @@ export interface AdminLogs {
 
 export interface RetrievalCandidate {
   id: string;
-  shorthand: string;
+  shorthand?: string; // GM only
   session_date: string | null;
   vector_distance: number | null;
   lexical_rank: number | null;
@@ -502,5 +527,5 @@ export interface RetrievalDebug {
   rewritten_from: string | null;
   threshold: number;
   candidates: RetrievalCandidate[];
-  system_prompt: string | null;
+  system_prompt?: string | null; // GM only
 }
