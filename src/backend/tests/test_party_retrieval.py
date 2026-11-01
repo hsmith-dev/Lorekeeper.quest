@@ -340,7 +340,11 @@ async def test_generate_409_only_for_the_same_campaign_and_author(db, world, cli
     assert (await post(world.owner, world.a)).status_code == 201
     assert (await post(world.owner, world.a)).status_code == 409
     assert (await post(world.owner, other)).status_code == 201
-    assert (await post(world.p, world.a)).status_code == 201
+    # Another author in A (a Co-GM) is not told about the Owner's row.
+    assert (await post(world.co_gm, world.a)).status_code == 201
+    # E0-Access.6: generate is GM only, so a Player never reaches the check.
+    r = await post(world.p, world.a)
+    assert r.status_code == 404 and r.json() == {"detail": "Not found"}
 
 
 # ── Providers ──────────────────────────────────────────────────────────────

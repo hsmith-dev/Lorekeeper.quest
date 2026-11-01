@@ -4,7 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import func, select
 
 from app.access import (
-    CampaignContext, check_create, ctx_for_request, not_found, project, project_all, require_campaign,
+    CampaignContext, can_write, check_create, ctx_for_request, not_found, project, project_all, require_campaign,
     require_campaign_for, scoped_get, scoped_select,
 )
 from app.db.session import get_db
@@ -14,13 +14,18 @@ from app.schemas.character_sheet import (
     TemplateCreate, TemplateUpdate, TemplateGMResponse,
     CharacterSheetCreate, CharacterSheetUpdate, CharacterSheetGMResponse,
 )
-from app.api.deps import get_current_user
+from app.api.deps import PARTY_READ, get_current_user
 
 router = APIRouter()
 
 # Character sheets (and their templates) are shared campaign knowledge: any
-# owner or member may read/write/delete the ones they can see (Player write
-# rules arrive with E0-Access.6). Every row comes from scoped_select /
+# owner or member may read the ones they can see. Writes (E0-Access.6) keep
+# `player` dependencies and go through access.can_write on the row: a GM may
+# write any sheet or template; a Player only the sheet of their own linked PC
+# (always false until F3-world adds `entities`), so today only GMs write
+# them. A refused write is the one 404. Account gate (app/api/deps.py): the
+# lists and the sheet read are Party reads (openapi_extra=PARTY_READ); every
+# write needs a paid or granted account. Every row comes from scoped_select /
 # scoped_get and every body goes through access.project (E0-Access.4): a
 # sheet the caller may not see (visibility gm, or another user's private
 # one) is absent from lists and counts and is the one 404 by id.
@@ -49,7 +54,7 @@ async def _project_template(db: AsyncSession, template: CharacterSheetTemplate, 
 
 # ── Templates ────────────────────────────────────────────────────────────────
 
-@router.get("/templates", response_model=None,
+@router.get("/templates", response_model=None, openapi_extra=PARTY_READ,
             responses={200: {"model": list[TemplateGMResponse], "description": _GM_OR_PARTY}})
 async def list_templates(
     ctx: CampaignContext = Depends(require_campaign("player")),
@@ -94,6 +99,7 @@ async def update_template(
     db: AsyncSession = Depends(get_db),
 ):
     template = await scoped_get(db, CharacterSheetTemplate, ctx, template_id)
+    can_write(ctx, template)
     if body.name is not None:
         template.name = body.name
     if body.fields is not None:
@@ -114,6 +120,7 @@ async def delete_template(
     expected to warn using the list response's character_count before calling
     this, same pattern as removing a campaign member with delete_entries."""
     template = await scoped_get(db, CharacterSheetTemplate, ctx, template_id)
+    can_write(ctx, template)
     # The cascade must not destroy sheets the caller cannot see: refuse (as a
     # missing template) when any of its sheets is hidden from ctx.
     total = (await db.execute(
@@ -127,7 +134,7 @@ async def delete_template(
 
 # ── Character sheets ─────────────────────────────────────────────────────────
 
-@router.get("/", response_model=None,
+@router.get("/", response_model=None, openapi_extra=PARTY_READ,
             responses={200: {"model": list[CharacterSheetGMResponse], "description": _GM_OR_PARTY}})
 async def list_character_sheets(
     ctx: CampaignContext = Depends(require_campaign("player")),
@@ -162,7 +169,7 @@ async def create_character_sheet(
     return project(sheet, ctx)
 
 
-@router.get("/{sheet_id}", response_model=None,
+@router.get("/{sheet_id}", response_model=None, openapi_extra=PARTY_READ,
             responses={200: {"model": CharacterSheetGMResponse, "description": _GM_OR_PARTY}})
 async def get_character_sheet(
     sheet_id: uuid.UUID,
@@ -181,6 +188,7 @@ async def update_character_sheet(
     db: AsyncSession = Depends(get_db),
 ):
     sheet = await scoped_get(db, CharacterSheet, ctx, sheet_id)
+    can_write(ctx, sheet)
     if body.name is not None:
         sheet.name = body.name
     if body.data is not None:
@@ -200,5 +208,6 @@ async def delete_character_sheet(
     db: AsyncSession = Depends(get_db),
 ) -> None:
     sheet = await scoped_get(db, CharacterSheet, ctx, sheet_id)
+    can_write(ctx, sheet)
     await db.delete(sheet)
     await db.commit()

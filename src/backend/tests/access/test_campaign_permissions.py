@@ -383,7 +383,7 @@ async def test_analytics_top_tags_and_own_entries(client, db, ev4):
         assert narrative not in md.text
 
 
-async def test_non_gm_drafts_get_no_gm_context_and_gms_keep_it(client, db, ev4, monkeypatch):
+async def test_drafts_are_gm_only_and_gms_keep_gm_context(client, db, ev4, monkeypatch):
     from app.api.routes import journals as journal_routes
     from app.services import journal_service, llm_provider
     from tests.ev4.probes.retrieval import use_fake_llm
@@ -401,19 +401,26 @@ async def test_non_gm_drafts_get_no_gm_context_and_gms_keep_it(client, db, ev4, 
     term = ev4.a.canary("TERM").token  # the seeded (gm) glossary term
     a = str(ev4.a.campaign_id)
 
-    async def prompts(actor, url, body):
+    async def prompts(actor, url, body, ok):
         with llm_provider.capture() as cap:
             r = await client.post(url, json=body, headers=actor.headers)
-        assert r.status_code in (200, 201), r.text
+        if ok:
+            assert r.status_code in (200, 201), r.text
+        else:
+            assert r.status_code == 404 and r.json() == NOT_FOUND, r.text
+            assert cap.calls == [], url
         return " ".join(str(m.get("content")) for call in cap.calls for m in call.messages)
 
-    for who, sees in (("player", False), ("co_gm", True)):
+    # E0-Access.6: both are GM only. A Player is refused like a missing
+    # Campaign with no LLM call; a Co-GM's prompt keeps the GM context.
+    for who, gm in (("player", False), ("co_gm", True)):
         actor = await ev4.actor(who)
         await use_fake_llm(ev4, actor)
-        draft = await prompts(actor, "/api/journals/generate-draft", {"notes": "met the innkeeper", "campaign_id": a})
+        draft = await prompts(actor, "/api/journals/generate-draft",
+                              {"notes": "met the innkeeper", "campaign_id": a}, gm)
         one_step = await prompts(actor, "/api/journals/generate", {
-            "notes": "met the innkeeper", "campaign_id": a, "entry_hash": uuid.uuid4().hex})
-        assert (term in draft) is sees and (term in one_step) is sees, who
+            "notes": "met the innkeeper", "campaign_id": a, "entry_hash": uuid.uuid4().hex}, gm)
+        assert (term in draft) is gm and (term in one_step) is gm, who
 
 
 async def test_gm_ai_helpers_run_for_a_co_gm(client, ev4, monkeypatch):

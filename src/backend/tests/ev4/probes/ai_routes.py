@@ -2,14 +2,15 @@
 get_campaign_with_access: journals autocomplete / generate-draft / recap /
 summarize-session, npcs extract and quests suggest.
 
-Routes built from GM content (Shorthand, NPCs, Quests) need `gm` and refuse
-anyone else with the missing-Campaign 404 before any LLM call. The Party
-routes (generate-draft, summarize-session) serve every Member, and the LLM
-context built for a non-GM holds no GM-only text: the seeded glossary term
-and source chunk of A are canaries.
+E0-Access.6: every one of them needs `gm` and refuses anyone else with the
+missing-Campaign 404 before any LLM call (generate-draft and
+summarize-session included: Players are locked out of the AI helpers). A
+GM's LLM context may hold the GM-only glossary term and source chunk of A
+(canaries only a GM of A may see).
 """
 from __future__ import annotations
 
+from app.services import llm_provider
 from tests.ev4.families import assert_captured_context_clean, assert_hidden_equals_missing, assert_no_canary
 from tests.ev4.probes._support import MISSING, assert_same_answer, authenticated, is_gm_of_a, outsider
 from tests.ev4.probes.retrieval import use_fake_llm
@@ -28,7 +29,10 @@ async def _body_route(ev4, actor, url: str, body, *, allowed: bool) -> None:
     hidden = await outsider(ev4)
     targets = [hidden.campaign_id] + ([] if allowed else [ev4.a.campaign_id])
     for cid in targets:
-        r = await assert_captured_context_clean(actor, lambda: actor.post(url, json=body(cid)), label=f"{url} {cid}")
+        with llm_provider.capture() as cap:
+            r = await assert_captured_context_clean(actor, lambda: actor.post(url, json=body(cid)),
+                                                    label=f"{url} {cid}")
+        assert cap.calls == [], f"{url}: a refused request made an LLM call"
         assert_same_answer(actor, r, await actor.post(url, json=body(MISSING)), url)
     if allowed:
         r = await assert_captured_context_clean(actor, lambda: actor.post(url, json=body(ev4.a.campaign_id)),
@@ -53,14 +57,14 @@ async def probe_autocomplete(ev4, actor):
 async def probe_generate_draft(ev4, actor):
     await _body_route(ev4, actor, "/api/journals/generate-draft",
                       lambda cid: {"notes": "met the innkeeper", "campaign_id": str(cid)},
-                      allowed=authenticated(actor))
+                      allowed=is_gm_of_a(ev4, actor))
 
 
 @ev4_probe("POST", "/api/journals/summarize-session", actors=WITH_CO_GM)
 async def probe_summarize_session(ev4, actor):
     await _body_route(ev4, actor, "/api/journals/summarize-session",
                       lambda cid: {"transcript": "We went to the inn.", "campaign_id": str(cid)},
-                      allowed=authenticated(actor))
+                      allowed=is_gm_of_a(ev4, actor))
 
 
 @ev4_probe("POST", "/api/journals/recap", actors=WITH_CO_GM)

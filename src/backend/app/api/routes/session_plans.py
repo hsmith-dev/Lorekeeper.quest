@@ -3,7 +3,8 @@ from fastapi import APIRouter, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.access import (
-    CampaignContext, check_create, ctx_for_request, project, project_all, require_campaign, require_campaign_for,
+    CampaignContext, can_write, check_create, ctx_for_request, project, project_all, require_campaign,
+    require_campaign_for,
     scoped_get, scoped_select,
 )
 from app.core.limiter import limiter, user_or_ip
@@ -21,7 +22,7 @@ from app.schemas.session_plan import (
     SessionPlanUpdate,
     SessionPlanResponse,
 )
-from app.api.deps import get_current_user, get_user_llm_config
+from app.api.deps import PARTY_READ, get_current_user, get_user_llm_config
 from app.services.chat_service import generate_session_plan
 from app.services.llm_provider import LLMConfig
 from app.services import llm_config_service
@@ -30,7 +31,10 @@ router = APIRouter()
 
 # Session plans are GM prep (E0-Access.5): GMs of the plan's Campaign (Owner
 # or Co-GM) write them; a Player reads only plans whose Visibility covers
-# them. Every denial, and a hidden plan, is the one 404.
+# them. Every denial, and a hidden plan, is the one 404. Every write calls
+# can_write on the row (E0-Access.6). Account gate (app/api/deps.py): the
+# list and the item read are Party reads (openapi_extra=PARTY_READ);
+# generate and the writes need a paid or granted account.
 _plan_player = require_campaign_for(SessionPlan, "plan_id", "player")
 _plan_gm = require_campaign_for(SessionPlan, "plan_id", "gm")
 
@@ -42,14 +46,15 @@ async def generate_plan_draft(
     body: SessionPlanGenerateRequest,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
-    config: LLMConfig = Depends(get_user_llm_config),
 ) -> SessionPlanGenerateResponse:
     """Draft a session plan from campaign context — WITHOUT saving anything,
     same pattern as journal narrative drafts: generate, let the GM review and
     edit, then POST / to actually persist it. GM only: the draft is built
-    from Shorthand, NPCs and Quests (GM content)."""
+    from Shorthand, NPCs and Quests (GM content); a Player gets the 404
+    before the LLM config is resolved (E0-Access.6)."""
     ctx = await ctx_for_request(request, db, user, body.campaign_id, "gm")
     campaign = await scoped_get(db, Campaign, ctx, ctx.campaign_id)
+    config: LLMConfig = await get_user_llm_config(user=user, db=db)
 
     entries_result = await db.execute(
         scoped_select(JournalEntry, ctx).with_only_columns(JournalEntry.shorthand)
@@ -104,7 +109,7 @@ async def create_session_plan(
     return project(plan, ctx)
 
 
-@router.get("/", response_model=list[SessionPlanResponse])
+@router.get("/", response_model=list[SessionPlanResponse], openapi_extra=PARTY_READ)
 async def list_session_plans(
     ctx: CampaignContext = Depends(require_campaign("player")),
     db: AsyncSession = Depends(get_db),
@@ -115,7 +120,7 @@ async def list_session_plans(
     return await project_all(db, result.scalars().all(), ctx)
 
 
-@router.get("/{plan_id}", response_model=SessionPlanResponse)
+@router.get("/{plan_id}", response_model=SessionPlanResponse, openapi_extra=PARTY_READ)
 async def get_session_plan(
     plan_id: uuid.UUID,
     ctx: CampaignContext = Depends(_plan_player),
@@ -132,6 +137,7 @@ async def update_session_plan(
     db: AsyncSession = Depends(get_db),
 ):
     plan = await scoped_get(db, SessionPlan, ctx, plan_id)
+    can_write(ctx, plan)
     for field, value in body.model_dump(exclude_none=True).items():
         setattr(plan, field, value)
     await db.commit()
@@ -146,5 +152,6 @@ async def delete_session_plan(
     db: AsyncSession = Depends(get_db),
 ) -> None:
     plan = await scoped_get(db, SessionPlan, ctx, plan_id)
+    can_write(ctx, plan)
     await db.delete(plan)
     await db.commit()
