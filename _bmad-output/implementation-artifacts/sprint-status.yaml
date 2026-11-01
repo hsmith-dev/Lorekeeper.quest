@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 10-31-2026 23:30
-last_updated: 11-01-2026 00:39
+last_updated: 11-01-2026 00:40
 project: Lorekeeper.quest
 project_key: NOKEY
 tracking_system: file-system
@@ -69,7 +69,7 @@ development_status:
   2-3-one-github-pages-deployer: done
   2-4-the-test-database-url-can-be-overridden-from-the-environment: done
   2-5-tests-build-the-schema-from-alembic-migrations: done
-  2-6-migration-chain-gates-and-ci-with-no-path-filters: backlog
+  2-6-migration-chain-gates-and-ci-with-no-path-filters: done
   2-7-licence-register-and-strict-commercial-mode: done
   2-8-the-licence-check-scans-the-docker-images-we-actually-ship: done
   2-9-owner-confirms-or-replaces-the-three-licence-exceptions: backlog
