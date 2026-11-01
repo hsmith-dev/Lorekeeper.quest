@@ -224,3 +224,5 @@ Status: done
 
 **Needs desktop verification:** none beyond what ran (the desktop was online for this story).
 
+
+**Post-review addition (coordinator data-safety review):** the revision is the first that needs PostgreSQL 15+ (`ON DELETE SET NULL (col)`). `upgrade()` now runs `require_postgres_15` (`SHOW server_version_num` < 150000 raises `UnsupportedPostgresError` with a clear message) before any DDL, online mode only. Covered by `tests/migrations/test_pg_version_guard.py` (faked version query; asserts no DDL runs before the guard). Requirement documented in README, `docs/UPGRADING.md` and `.env.example`.

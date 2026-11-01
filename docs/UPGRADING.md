@@ -4,6 +4,17 @@ Notes for self-hosters on what an upgrade changes in your data. Every
 upgrade runs `alembic upgrade head` when the web container starts; there is
 nothing to run by hand.
 
+## Requirement: PostgreSQL 15 or newer
+
+PostgreSQL 15+ (16 recommended; bundled). The compose stack ships
+`pgvector/pgvector:pg16`, so a standard install needs nothing. If you point
+`DATABASE_URL` at your own server, it must be PostgreSQL 15 or newer with the
+`vector` extension: the F3-world upgrade (revision `03c0b504f1d1`) uses a
+PostgreSQL 15 feature. On an older server the upgrade stops before changing
+anything, with "Lorekeeper requires PostgreSQL 15 or newer (found X)". Upgrade
+the server (for example with `pg_upgrade`, or a dump and restore into a 16
+server), then start Lorekeeper again.
+
 ## NPCs and Quests become Entities (F3-world, E0-WorldCore.2)
 
 Your NPCs and Quests are now Entities. They start GM-only. Your Players, who were Members before this release, see none of them until you publish them from World.

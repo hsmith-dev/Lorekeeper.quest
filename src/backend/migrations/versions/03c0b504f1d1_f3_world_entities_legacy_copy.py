@@ -310,7 +310,30 @@ def _journal_fk(column: str) -> sa.ForeignKeyConstraint:
     return sa.ForeignKeyConstraint([column], ['journal_entries.id'], ondelete='SET NULL')
 
 
+# `ON DELETE SET NULL (column)` needs PostgreSQL 15+. Checked before any DDL,
+# so an older server is refused with a clear message and nothing changes.
+MIN_SERVER_VERSION_NUM = 150000
+
+
+class UnsupportedPostgresError(RuntimeError):
+    """The database server is older than this revision supports."""
+
+
+def require_postgres_15(bind) -> None:
+    """Raise UnsupportedPostgresError when the server is older than PostgreSQL 15."""
+    raw = bind.execute(sa.text("SHOW server_version_num")).scalar()
+    version_num = int(raw)
+    if version_num < MIN_SERVER_VERSION_NUM:
+        major, minor = divmod(version_num, 10000)
+        found = f"{major}.{minor}" if major >= 10 else str(raw)
+        raise UnsupportedPostgresError(
+            f"Lorekeeper requires PostgreSQL 15 or newer (found {found}). The bundled compose uses "
+            "pgvector/pgvector:pg16; see docs/UPGRADING.md.")
+
+
 def upgrade() -> None:
+    if not context.is_offline_mode():
+        require_postgres_15(op.get_bind())
     op.create_table(
         'entities',
         sa.Column('id', sa.UUID(), nullable=False),
