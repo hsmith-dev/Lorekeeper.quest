@@ -1,7 +1,7 @@
 import uuid
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, or_
+from sqlalchemy import or_
 from sqlalchemy.orm import selectinload
 
 from app.access import (
@@ -17,7 +17,7 @@ from app.db.models.journal import JournalEntry
 from app.db.models.tag import Tag
 from app.schemas.npc import NpcCreate, NpcUpdate, NpcGMResponse, NpcExtractResponse
 from app.schemas.journal import JournalLiteResponse
-from app.api.deps import get_current_user, get_user_llm_config, get_campaign_with_access
+from app.api.deps import get_current_user, get_user_llm_config
 from app.services.nlp_service import extract_tags
 from app.services.chat_service import generate_npc_bio
 from app.services.llm_provider import LLMConfig
@@ -142,21 +142,21 @@ async def get_npc_entries(
 async def generate_npc_bio_route(
     npc_id: uuid.UUID,
     npc: NpcEntry = Depends(_visible_npc),
+    ctx: CampaignContext = Depends(_npc_ctx),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     config: LLMConfig = Depends(get_user_llm_config),
 ) -> dict:
-    campaign = await db.get(Campaign, npc.campaign_id)
+    campaign = await scoped_get(db, Campaign, ctx, ctx.campaign_id)
     entries_result = await db.execute(
-        select(JournalEntry)
+        scoped_select(JournalEntry, ctx)
         .where(
-            JournalEntry.campaign_id == npc.campaign_id,
             or_(
                 JournalEntry.shorthand.ilike(f"%{npc.name}%"),
                 JournalEntry.narrative.ilike(f"%{npc.name}%"),
             ),
         )
-        .order_by(JournalEntry.created_at.desc())
+        .order_by(JournalEntry.created_at.desc(), JournalEntry.id)
         .limit(10)
     )
     rows = list(entries_result.scalars().all())
@@ -175,16 +175,15 @@ async def generate_npc_bio_route(
 
 @router.post("/extract", response_model=NpcExtractResponse)
 async def extract_npcs_from_journals(
-    campaign_id: uuid.UUID = Query(...),
-    user: User = Depends(get_current_user),
+    ctx: CampaignContext = Depends(require_campaign("gm")),
     db: AsyncSession = Depends(get_db),
 ) -> NpcExtractResponse:
-    """Run spaCy NER over recent journal entries and return PERSON entity names."""
-    await get_campaign_with_access(db, campaign_id, user)
+    """Run spaCy NER over recent journal entries (`campaign_id` query
+    parameter) and return PERSON entity names. GM only: it reads Shorthand
+    and the NPC list (always_gm)."""
     entries_result = await db.execute(
-        select(JournalEntry.shorthand, JournalEntry.narrative)
-        .where(JournalEntry.campaign_id == campaign_id)
-        .order_by(JournalEntry.created_at.desc())
+        scoped_select(JournalEntry, ctx).with_only_columns(JournalEntry.shorthand, JournalEntry.narrative)
+        .order_by(JournalEntry.created_at.desc(), JournalEntry.id)
         .limit(15)
     )
     rows = entries_result.all()
@@ -196,9 +195,7 @@ async def extract_npcs_from_journals(
     names = [t.name for t in tags if t.tag_type == TagType.character]
 
     # Exclude names already in the wiki for this campaign
-    existing_result = await db.execute(
-        select(NpcEntry.name).where(NpcEntry.campaign_id == campaign_id)
-    )
+    existing_result = await db.execute(scoped_select(NpcEntry, ctx).with_only_columns(NpcEntry.name))
     existing = {n.lower() for (n,) in existing_result.all()}
     suggestions = [n for n in names if n.lower() not in existing]
 

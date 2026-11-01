@@ -1,4 +1,4 @@
-"""Unit tests for scripts/check_scoped_queries.py (CI-8, E0-Access.2 part).
+"""Unit tests for scripts/check_scoped_queries.py (CI-8: E0-Access.2, .3 and .5 parts).
 
 Run: python -m pytest -q scripts/test_check_scoped_queries.py  (stdlib + pytest)
 """
@@ -7,6 +7,7 @@ from __future__ import annotations
 import importlib.util
 import sys
 import textwrap
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -54,9 +55,11 @@ def test_real_definition_is_found_and_exempt():
 
 
 def test_main_exit_codes(tmp_path, capsys):
-    assert csq.main(["--app", str(make_app(tmp_path, {}))]) == 0
+    empty = tmp_path / "empty_baseline.txt"
+    empty.write_text("")
+    assert csq.main(["--app", str(make_app(tmp_path, {})), "--baseline", str(empty)]) == 0
     bad = make_app(tmp_path / "bad", {"services/other.py": "def f(ctx):\n    return ctx.as_system('merge')\n"})
-    assert csq.main(["--app", str(bad)]) == 1
+    assert csq.main(["--app", str(bad), "--baseline", str(empty)]) == 1
     out = capsys.readouterr().out
     assert "app/services/other.py:2" in out and "as_system" in out
 
@@ -151,3 +154,167 @@ def test_read_only_inside_access_and_strings_pass(tmp_path):
         "access/reduced.py": "def r(ctx):\n    return dataclasses.replace(ctx, read_only=True)\n",
         "services/s.py": "KIND = 'read_only'\nx = {'read_only': True}\n",
     }) == []
+
+
+# ---- E0-Access.5: deprecated helpers and the scoped-query ratchet -----------
+
+# The ceiling: the baseline may lose lines, never gain them. Lower a count (or
+# drop a key) in the same PR that removes a line from
+# scripts/scoped_queries_baseline.txt.
+FROZEN_BASELINE = {
+    "app/api/routes/admin.py::_user_to_admin_response owner_check:Campaign.user_id": 1,
+    "app/api/routes/admin.py::_user_to_admin_response select:Campaign": 1,
+    "app/api/routes/admin.py::_user_to_admin_response select:JournalEntry": 1,
+    "app/api/routes/admin.py::list_users select:Campaign": 1,
+    "app/api/routes/admin.py::list_users select:JournalEntry": 1,
+    "app/api/routes/campaigns.py::list_campaigns select:Campaign": 1,
+    "app/api/routes/character_sheets.py::delete_template select:CharacterSheet": 1,
+    "app/api/routes/chat.py::_prepare_chat get:Campaign": 1,
+    "app/api/routes/chat.py::_prepare_chat select:ChatSession": 2,
+    "app/api/routes/chat.py::delete_session select:ChatSession": 1,
+    "app/api/routes/chat.py::get_session select:Campaign": 1,
+    "app/api/routes/chat.py::get_session select:ChatSession": 1,
+    "app/api/routes/chat.py::list_sessions select:Campaign": 1,
+    "app/api/routes/chat.py::list_sessions select:ChatSession": 1,
+    "app/api/routes/feedback.py::get_feedback_context get:Campaign": 1,
+    "app/api/routes/feedback.py::get_feedback_context select:JournalEntry": 1,
+    "app/api/routes/feedback.py::get_feedback_context select:NpcEntry": 1,
+    "app/api/routes/feedback.py::get_feedback_context select:Quest": 1,
+    "app/api/routes/feedback.py::get_feedback_context select:SourceDocument": 1,
+    "app/api/routes/feedback.py::list_feedback select:Campaign": 1,
+    "app/api/routes/journals.py::attach_tag select:Tag": 1,
+    "app/api/routes/share.py::join_campaign get:Campaign": 1,
+    "app/api/routes/share.py::join_campaign select:CampaignMember": 1,
+    "app/services/journal_service.py::create_journal_entry raw_sql:journal_entries": 1,
+    "app/services/journal_service.py::create_journal_entry select:JournalEntry": 1,
+    "app/services/journal_service.py::create_journal_entry select:Tag": 1,
+    "app/services/journal_service.py::generate_draft_narrative select:Campaign": 1,
+    "app/services/retrieval_service.py::_search select:JournalEntry": 2,
+    "app/services/shorthand_service.py::get_glossary select:ShorthandTerm": 1,
+    "app/services/source_service.py::retrieve_canon_context select:SourceChunk": 1,
+    "app/services/source_service.py::retrieve_canon_context select:SourceDocument": 1,
+}
+
+REGISTRY_SRC = '''
+REGISTRY: dict = {
+    JournalEntry: stored(),
+    Campaign: membership(PUBLIC),
+}
+'''
+MODELS_SRC = '''
+class JournalEntry(Base):
+    __tablename__ = "journal_entries"
+
+class Campaign(Base):
+    __tablename__ = "campaigns"
+
+class Feedback(Base):
+    __tablename__ = "feedback"
+'''
+
+
+def ratchet_app(tmp_path: Path, files: dict[str, str]) -> Path:
+    return make_app(tmp_path, {"access/registry.py": REGISTRY_SRC, "db/models/models.py": MODELS_SRC, **files})
+
+
+def ratchet(tmp_path: Path, files: dict[str, str], baseline: str = "") -> list[str]:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    path = tmp_path / "baseline.txt"
+    path.write_text(baseline)
+    return csq.check_ratchet(ratchet_app(tmp_path, files), path)
+
+
+def test_repo_ratchet_is_clean():
+    errors = csq.check_ratchet()
+    assert not errors, "\n".join(errors)
+
+
+def test_baseline_never_grows():
+    keys, errors = csq.load_baseline(csq.BASELINE)
+    assert not errors
+    grown = {k: n for k, n in Counter(keys).items() if n > FROZEN_BASELINE.get(k, 0)}
+    assert not grown, (f"scoped_queries_baseline.txt gained {sorted(grown)}; the baseline only shrinks. Read "
+                       "through app.access (scoped_select / scoped_get / scoped_select_multi) instead")
+
+
+def test_registered_models_come_from_the_registry_and_tablenames(tmp_path):
+    real = csq.registered_models(csq.APP)
+    assert real["JournalEntry"] == "journal_entries" and real["Campaign"] == "campaigns" and "Feedback" not in real
+    assert csq.registered_models(ratchet_app(tmp_path, {})) == {"JournalEntry": "journal_entries",
+                                                                "Campaign": "campaigns"}
+
+
+@pytest.mark.parametrize("body, key", [
+    ("from sqlalchemy import select\ndef f():\n    return select(JournalEntry)\n",
+     "app/services/s.py::f select:JournalEntry"),
+    ("import sqlalchemy as sa\ndef f():\n    return sa.select(JournalEntry.shorthand)\n",
+     "app/services/s.py::f select:JournalEntry"),
+    ("def f():\n    return select(func.count(JournalEntry.id))\n", "app/services/s.py::f select:JournalEntry"),
+    ("async def f(db, i):\n    return await db.get(Campaign, i)\n", "app/services/s.py::f get:Campaign"),
+    ("async def f(self, i):\n    return await self.session.get(JournalEntry, i)\n",
+     "app/services/s.py::f get:JournalEntry"),
+    ("def f():\n    return text('UPDATE journal_entries SET x = 1')\n", "app/services/s.py::f raw_sql:journal_entries"),
+    ("async def f(c):\n    await c.exec_driver_sql('select * from CAMPAIGNS')\n", "app/services/s.py::f raw_sql:campaigns"),
+    ("def f(u):\n    return Campaign.user_id == u.id\n", "app/services/s.py::f owner_check:Campaign.user_id"),
+    ("def f(u):\n    return u.id != Campaign.user_id\n", "app/services/s.py::f owner_check:Campaign.user_id"),
+    ("class K:\n    def m(self):\n        return select(Campaign)\n", "app/services/s.py::K.m select:Campaign"),
+    ("X = select(Campaign)\n", "app/services/s.py::<module> select:Campaign"),
+])
+def test_unbaselined_site_fails_and_baselined_passes(tmp_path, body, key):
+    errors = ratchet(tmp_path / "bad", {"services/s.py": body})
+    assert len(errors) == 1 and "outside app/access/" in errors[0], errors
+    assert ratchet(tmp_path / "ok", {"services/s.py": body}, key + "\n") == []
+
+
+def test_each_site_needs_its_own_line(tmp_path):
+    body = "def f():\n    a = select(Campaign)\n    return a, select(Campaign)\n"
+    one = "app/services/s.py::f select:Campaign\n"
+    assert len(ratchet(tmp_path / "one", {"services/s.py": body}, one)) == 1
+    assert ratchet(tmp_path / "two", {"services/s.py": body}, one * 2) == []
+
+
+def test_unregistered_models_access_package_and_strings_pass(tmp_path):
+    assert ratchet(tmp_path, {
+        "services/s.py": ("def f(db, campaign, d):\n    return (select(Feedback), db.get(Feedback, 1), "
+                          "text('select * from feedback'), campaign.user_id == 1, get(JournalEntry))\n"),
+        "access/r.py": "def f(db):\n    return select(JournalEntry), db.get(Campaign, 1), Campaign.user_id == 1\n",
+        "services/doc.py": '"""select(JournalEntry) and Campaign.user_id == u in a docstring."""\n',
+    }) == []
+
+
+def test_stale_baseline_line_fails(tmp_path):
+    errors = ratchet(tmp_path, {}, "app/services/gone.py::f select:Campaign\n")
+    assert len(errors) == 1 and "no longer exist" in errors[0] and "delete the line" in errors[0]
+
+
+def test_malformed_baseline_line_fails(tmp_path):
+    errors = ratchet(tmp_path, {}, "# comment\n\nselect(Campaign) somewhere\n")
+    assert len(errors) == 1 and "not `<path>::<function> <kind>:<target>`" in errors[0]
+
+
+@pytest.mark.parametrize("rel, body", [
+    ("api/routes/r.py", "from app.api.deps import get_campaign_with_access\n"),
+    ("api/routes/r.py", "from app.api.deps import accessible_campaign_ids as ids\n"),
+    ("api/routes/r.py", "import app.api.deps as d\nasync def r(db, c, u):\n    return await d.get_campaign_with_access(db, c, u)\n"),
+    ("api/routes/r.py", "async def r(db, u):\n    return await accessible_campaign_ids(db, u)\n"),
+    ("api/deps.py", "async def accessible_campaign_ids(db, user):\n    return []\n"),
+    ("services/s.py", "async def get_campaign_with_access(db, c, u):\n    return None\n"),
+])
+def test_deprecated_helper_reference_fails(tmp_path, rel, body):
+    errors = ratchet(tmp_path, {rel: body})
+    assert errors and "deprecated" in errors[0] and "require_campaign" in errors[0], errors
+
+
+def test_deprecated_definition_in_deps_and_comments_pass(tmp_path):
+    assert ratchet(tmp_path, {
+        "api/deps.py": "async def get_campaign_with_access(db, campaign_id, user, require_owner=False):\n    return None\n",
+        "api/routes/feedback.py": "# Not gated through get_campaign_with_access (a comment)\nX = 'accessible_campaign_ids'\n",
+    }) == []
+
+
+def test_main_runs_the_ratchet(tmp_path, capsys):
+    app = ratchet_app(tmp_path, {"services/s.py": "def f():\n    return select(Campaign)\n"})
+    empty = tmp_path / "b.txt"
+    empty.write_text("")
+    assert csq.main(["--app", str(app), "--baseline", str(empty)]) == 1
+    assert "app/services/s.py:2: select `Campaign`" in capsys.readouterr().out

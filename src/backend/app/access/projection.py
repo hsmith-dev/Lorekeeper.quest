@@ -66,7 +66,11 @@ from app.db.models.chat import ChatSession
 from app.db.models.journal import JournalEntry
 from app.db.models.npc import NpcEntry
 from app.db.models.quest import Quest
+from app.db.models.session_plan import SessionPlan
+from app.db.models.shorthand import ShorthandTerm
+from app.db.models.source import SourceDocument
 from app.db.models.tag import JournalTag, Tag
+from app.db.models.tag_category import TagCategory
 from app.schemas.campaign import CampaignGMResponse, CampaignPartyResponse
 from app.schemas.character_sheet import (
     CharacterSheetGMResponse, CharacterSheetPartyResponse, TemplateGMResponse, TemplatePartyResponse,
@@ -77,8 +81,12 @@ from app.schemas.chat import (
 from app.schemas.journal import JournalGMResponse, JournalLiteResponse, JournalPartyResponse
 from app.schemas.npc import NpcGMResponse, NpcPartyResponse
 from app.schemas.quest import QuestGMResponse, QuestPartyResponse
+from app.schemas.session_plan import SessionPlanGMResponse, SessionPlanPartyResponse
 from app.schemas.share import PublicCampaignResponse
 from app.schemas.sources import SourceRef
+from app.schemas.shorthand import ShorthandGMResponse, ShorthandPartyResponse
+from app.schemas.source import SourceDocumentGMResponse, SourceDocumentPartyResponse
+from app.schemas.tag_category import TagCategoryGMResponse, TagCategoryPartyResponse
 from app.schemas.tag import (
     TagGMResponse, TagPartyResponse, TagWithCountGMResponse, TagWithCountPartyResponse,
 )
@@ -125,6 +133,12 @@ PROJECTIONS: dict[type | tuple[type, str], Projection] = {
     (ChatSession, CHAT_META): Projection(ChatMetaGM, ChatMetaParty),
     (ChatSession, CHAT_REPLY): Projection(ChatGMResponse, ChatPartyResponse),
     (ChatSession, CHAT_DETAIL): Projection(ChatSessionDetailGM, ChatSessionDetailParty),
+    # E0-Access.5: GM authoring rows a non-GM may see when their Visibility
+    # covers them (no GM-only fields yet).
+    ShorthandTerm: Projection(ShorthandGMResponse, ShorthandPartyResponse),
+    SessionPlan: Projection(SessionPlanGMResponse, SessionPlanPartyResponse),
+    SourceDocument: Projection(SourceDocumentGMResponse, SourceDocumentPartyResponse),
+    TagCategory: Projection(TagCategoryGMResponse, TagCategoryPartyResponse),
 }
 
 

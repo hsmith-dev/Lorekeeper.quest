@@ -518,13 +518,19 @@ async def test_delete_journal_allowed_paths(client, db, scene):
 
     own, players, gms = entry(player.user_id), entry(player.user_id), entry(ev4.a.owner_id)
     await db.commit()
-    assert (await client.delete(f"/api/journals/{own.id}", headers=player.headers)).status_code == 204
+    # E0-Access.5: delete needs `gm` in the entry's Campaign. A Player cannot
+    # delete even their own entry (Player Journal deletes arrive with E7).
+    r = await client.delete(f"/api/journals/{own.id}", headers=player.headers)
+    assert r.status_code == 404 and r.json() == NOT_FOUND
+    assert await db.scalar(sa.select(sa.func.count()).where(JournalEntry.id == own.id)) == 1
     owner = (await ev4.actor("gm_owner")).headers
     assert (await client.delete(f"/api/journals/{players.id}", headers=owner)).status_code == 204
+    # A Co-GM deletes any entry of the Campaign, the Owner's included.
     co_gm = (await ev4.actor("co_gm")).headers
-    r = await client.delete(f"/api/journals/{gms.id}", headers=co_gm)
-    assert r.status_code == 404 and r.json() == NOT_FOUND
-    assert await db.scalar(sa.select(sa.func.count()).where(JournalEntry.id == gms.id)) == 1
+    assert (await client.delete(f"/api/journals/{gms.id}", headers=co_gm)).status_code == 204
+    assert (await client.delete(f"/api/journals/{own.id}", headers=co_gm)).status_code == 204
+    for e in (own, players, gms):
+        assert await db.scalar(sa.select(sa.func.count()).where(JournalEntry.id == e.id)) == 0
 
 
 async def test_character_sheet_success_paths_as_a_player(client, scene):
@@ -576,15 +582,20 @@ async def test_tag_attach_and_detach_paths(client, db, scene):
     ev4 = scene.ev4
     player = (await ev4.actor("player")).headers
     gm = (await ev4.actor("gm_owner")).headers
+    co_gm = (await ev4.actor("co_gm")).headers
     visible_cat = (await db.get(Tag, scene.visible_cat_tag)).custom_category_id
-    r = await client.post(f"/api/journals/{scene.entry}/tags",
-                          json={"name": f"Ilmater {uuid.uuid4().hex[:6]}", "custom_category_id": str(visible_cat)},
-                          headers=player)
+    body = {"name": f"Ilmater {uuid.uuid4().hex[:6]}", "custom_category_id": str(visible_cat)}
+    # E0-Access.5: attach and detach need `gm` in the entry's Campaign.
+    r = await client.post(f"/api/journals/{scene.entry}/tags", json=body, headers=player)
+    assert r.status_code == 404 and r.json() == NOT_FOUND
+    r = await client.post(f"/api/journals/{scene.entry}/tags", json=body, headers=co_gm)
     assert r.status_code == 201, r.text
     assert r.json()["custom_category"]["id"] == str(visible_cat)
-    # A Player detaches a manual link; a GM detaches a Shorthand-sourced one.
+    r = await client.delete(f"/api/journals/{scene.entry}/tags/{scene.manual_tag}", headers=player)
+    assert r.status_code == 404 and r.json() == NOT_FOUND
+    # A Co-GM detaches a manual link; the Owner a Shorthand-sourced one.
     assert (await client.delete(f"/api/journals/{scene.entry}/tags/{scene.manual_tag}",
-                                headers=player)).status_code == 204
+                                headers=co_gm)).status_code == 204
     assert (await client.delete(f"/api/journals/{scene.entry}/tags/{scene.shorthand_tag}",
                                 headers=gm)).status_code == 204
     for tag_id in (scene.manual_tag, scene.shorthand_tag):

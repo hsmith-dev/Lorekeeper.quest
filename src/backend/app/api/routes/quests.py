@@ -1,7 +1,7 @@
 import uuid
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, or_
+from sqlalchemy import or_
 from sqlalchemy.orm import selectinload
 
 from app.access import (
@@ -17,7 +17,7 @@ from app.db.models.journal import JournalEntry
 from app.db.models.tag import Tag
 from app.schemas.quest import QuestCreate, QuestUpdate, QuestGMResponse, QuestSuggestResponse
 from app.schemas.journal import JournalLiteResponse
-from app.api.deps import get_current_user, get_user_llm_config, get_campaign_with_access
+from app.api.deps import get_current_user, get_user_llm_config
 from app.services.chat_service import suggest_quests, generate_quest_description
 from app.services.llm_provider import LLMConfig
 from app.services import llm_config_service
@@ -142,21 +142,21 @@ async def get_quest_entries(
 async def generate_quest_description_route(
     quest_id: uuid.UUID,
     quest: Quest = Depends(_visible_quest),
+    ctx: CampaignContext = Depends(_quest_ctx),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     config: LLMConfig = Depends(get_user_llm_config),
 ) -> dict:
-    campaign = await db.get(Campaign, quest.campaign_id)
+    campaign = await scoped_get(db, Campaign, ctx, ctx.campaign_id)
     entries_result = await db.execute(
-        select(JournalEntry)
+        scoped_select(JournalEntry, ctx)
         .where(
-            JournalEntry.campaign_id == quest.campaign_id,
             or_(
                 JournalEntry.shorthand.ilike(f"%{quest.title}%"),
                 JournalEntry.narrative.ilike(f"%{quest.title}%"),
             ),
         )
-        .order_by(JournalEntry.created_at.desc())
+        .order_by(JournalEntry.created_at.desc(), JournalEntry.id)
         .limit(10)
     )
     rows = list(entries_result.scalars().all())
@@ -174,17 +174,18 @@ async def generate_quest_description_route(
 
 @router.post("/suggest", response_model=QuestSuggestResponse)
 async def suggest_quests_from_journals(
-    campaign_id: uuid.UUID = Query(...),
+    ctx: CampaignContext = Depends(require_campaign("gm")),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     config: LLMConfig = Depends(get_user_llm_config),
 ) -> QuestSuggestResponse:
-    campaign = await get_campaign_with_access(db, campaign_id, user)
+    """Quest ideas from recent Shorthand (`campaign_id` query parameter). GM
+    only: Shorthand is GM content and Quests are always_gm."""
+    campaign = await scoped_get(db, Campaign, ctx, ctx.campaign_id)
 
     entries_result = await db.execute(
-        select(JournalEntry.shorthand)
-        .where(JournalEntry.campaign_id == campaign_id)
-        .order_by(JournalEntry.created_at.desc())
+        scoped_select(JournalEntry, ctx).with_only_columns(JournalEntry.shorthand)
+        .order_by(JournalEntry.created_at.desc(), JournalEntry.id)
         .limit(8)
     )
     rows = entries_result.all()

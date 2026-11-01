@@ -1,14 +1,18 @@
 import uuid
 from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File, Form
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
+from sqlalchemy import func
 
+from app.access import (
+    CampaignContext, check_create, ctx_for_request, project, require_campaign, require_campaign_for, scoped_get,
+    scoped_select,
+)
 from app.core.limiter import limiter
 from app.db.session import get_db
 from app.db.models.user import User
 from app.db.models.source import SourceDocument, SourceChunk
 from app.schemas.source import SourceDocumentResponse
-from app.api.deps import get_current_user, get_campaign_with_access, accessible_campaign_ids
+from app.api.deps import get_current_user
 from app.services.source_service import extract_text, chunk_text
 from app.services.embedding_service import embed
 
@@ -17,32 +21,25 @@ router = APIRouter()
 _ALLOWED_TYPES = {"text/plain", "text/markdown", "application/pdf"}
 _MAX_BYTES = 15 * 1024 * 1024  # 15 MB
 
+# Source documents are GM material (E0-Access.5): GMs of the Campaign (Owner
+# or Co-GM) upload and delete them; a Player lists only documents whose
+# Visibility covers them. Every denial, and a hidden document, is the one 404.
+_source_gm = require_campaign_for(SourceDocument, "source_id", "gm")
+
 
 @router.get("/", response_model=list[SourceDocumentResponse])
 async def list_sources(
-    campaign_id: uuid.UUID,
-    user: User = Depends(get_current_user),
+    ctx: CampaignContext = Depends(require_campaign("player")),
     db: AsyncSession = Depends(get_db),
-) -> list[SourceDocumentResponse]:
-    await get_campaign_with_access(db, campaign_id, user)
+):
     result = await db.execute(
-        select(SourceDocument, func.count(SourceChunk.id))
+        scoped_select(SourceDocument, ctx)
         .outerjoin(SourceChunk, SourceChunk.source_document_id == SourceDocument.id)
-        .where(SourceDocument.campaign_id == campaign_id)
+        .add_columns(func.count(SourceChunk.id))
         .group_by(SourceDocument.id)
-        .order_by(SourceDocument.created_at.desc())
+        .order_by(SourceDocument.created_at.desc(), SourceDocument.id)
     )
-    return [
-        SourceDocumentResponse(
-            id=doc.id,
-            campaign_id=doc.campaign_id,
-            title=doc.title,
-            filename=doc.filename,
-            chunk_count=count,
-            created_at=doc.created_at,
-        )
-        for doc, count in result.all()
-    ]
+    return [project(doc, ctx, extra={"chunk_count": count}) for doc, count in result.all()]
 
 
 @router.post("/", response_model=SourceDocumentResponse, status_code=201)
@@ -54,8 +51,8 @@ async def upload_source(
     file: UploadFile = File(...),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
-) -> SourceDocumentResponse:
-    await get_campaign_with_access(db, campaign_id, user)
+):
+    ctx = await ctx_for_request(request, db, user, campaign_id, "gm")
 
     content_type = (file.content_type or "").lower()
     if content_type not in _ALLOWED_TYPES and not file.filename.lower().endswith((".txt", ".md", ".pdf")):
@@ -79,6 +76,7 @@ async def upload_source(
         title=(title or file.filename).strip()[:200],
         filename=file.filename,
     )
+    check_create(doc, ctx)
     db.add(doc)
     await db.flush()
 
@@ -94,27 +92,15 @@ async def upload_source(
 
     await db.commit()
     await db.refresh(doc)
-
-    return SourceDocumentResponse(
-        id=doc.id,
-        campaign_id=doc.campaign_id,
-        title=doc.title,
-        filename=doc.filename,
-        chunk_count=len(chunks),
-        created_at=doc.created_at,
-    )
+    return project(doc, ctx, extra={"chunk_count": len(chunks)})
 
 
 @router.delete("/{source_id}", status_code=204)
 async def delete_source(
     source_id: uuid.UUID,
-    user: User = Depends(get_current_user),
+    ctx: CampaignContext = Depends(_source_gm),
     db: AsyncSession = Depends(get_db),
 ) -> None:
-    result = await db.execute(select(SourceDocument).where(SourceDocument.id == source_id))
-    doc = result.scalar_one_or_none()
-    if not doc:
-        raise HTTPException(status_code=404, detail="Source document not found")
-    await get_campaign_with_access(db, doc.campaign_id, user)
+    doc = await scoped_get(db, SourceDocument, ctx, source_id)
     await db.delete(doc)
     await db.commit()

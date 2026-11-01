@@ -23,25 +23,33 @@ async def generate_draft_narrative(
     campaign_id: uuid.UUID,
     notes: str,
     config: LLMConfig | None = None,
+    *,
+    gm_context: bool = True,
 ) -> str:
     """The generation half of create_journal_entry, pulled out on its own so a
     narrative can be previewed and edited before anything is persisted (see
     POST /api/journals/generate-draft) — create_journal_entry calls this too
-    when the caller doesn't already have an edited narrative to save."""
+    when the caller doesn't already have an edited narrative to save.
+
+    `gm_context=False` (a caller who is not GM of the Campaign) leaves out
+    the GM-only context: no source-document canon and no Shorthand glossary,
+    so a Player's draft is built from their own notes only (E0-Access.5)."""
     from app.db.models.campaign import Campaign
     campaign_result = await db.execute(select(Campaign).where(Campaign.id == campaign_id))
     campaign = campaign_result.scalar_one_or_none()
     if campaign is None:
         raise HTTPException(status_code=404, detail="Campaign not found")
 
-    try:
-        canon_context, _ = await retrieve_canon_context(db, notes, user_id, campaign_id)
-    except Exception:
-        canon_context = None  # RAG failure must not block journal generation
-    try:
-        shorthand_glossary = await get_glossary(db, campaign_id)
-    except Exception:
-        shorthand_glossary = None  # same — a glossary lookup failure must not block generation
+    canon_context = shorthand_glossary = None
+    if gm_context:
+        try:
+            canon_context, _ = await retrieve_canon_context(db, notes, user_id, campaign_id)
+        except Exception:
+            canon_context = None  # RAG failure must not block journal generation
+        try:
+            shorthand_glossary = await get_glossary(db, campaign_id)
+        except Exception:
+            shorthand_glossary = None  # same — a glossary lookup failure must not block generation
 
     # Quick-entry length preference (Settings → AI). Same must-not-block
     # posture as the lookups above — a missing row just means no preference.
@@ -71,6 +79,8 @@ async def create_journal_entry(
     session_date: date | None,
     config: LLMConfig | None = None,
     narrative: str | None = None,
+    *,
+    gm_context: bool = True,
 ) -> JournalEntry:
     """Persist a journal entry. If `narrative` isn't supplied (the one-step
     generate-and-save path, still supported for callers that skip the
@@ -78,9 +88,10 @@ async def create_journal_entry(
     no user present to review anything), it's generated here via
     generate_draft_narrative exactly as before. If it IS supplied — the
     normal interactive path now: generate a draft, let the user read/edit it,
-    then save — no LLM call happens in this function at all."""
+    then save — no LLM call happens in this function at all. `gm_context`
+    is passed to generate_draft_narrative."""
     if narrative is None:
-        narrative = await generate_draft_narrative(db, user_id, campaign_id, notes, config)
+        narrative = await generate_draft_narrative(db, user_id, campaign_id, notes, config, gm_context=gm_context)
 
     extracted: list[ExtractedTag] = extract_tags(narrative)
 

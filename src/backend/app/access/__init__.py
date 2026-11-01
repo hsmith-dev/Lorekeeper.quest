@@ -10,7 +10,8 @@ lattice, the registry (`visible_clause`, `audience_of`, `scoped_select`,
 `scoped_get`, `DERIVED_REGISTRY`), `audience_ctx` and the preview header.
 E0-Access.4 adds the projections (`project`, `project_all`, `PROJECTIONS`),
 Share Links (`share_ctx`, `resolve_share_token`), `ctx_for_request`,
-`role_ctx` and the `Vary` middleware. E0-Access.8 adds citations
+`role_ctx` and the `Vary` middleware. E0-Access.5 adds `role_map_for_request`
+(cross-Campaign lists honour the preview header). E0-Access.8 adds citations
 (`register_resolver`, `visible_refs`, `resolve_sources`, `message_refs`) and
 the chat projections (`project_chat`, `replay_history`).
 """
@@ -21,6 +22,7 @@ from app.access.audience import (
 from app.access.context import (
     ANON_VIEW, MEMBER_VIEW, PREVIEW_HEADER, AsUser, CampaignContext, RoleMap, VaryMiddleware, as_user,
     audience_ctx, ctx_for, ctx_for_request, require_campaign, require_campaign_for, role_ctx, role_map,
+    role_map_for_request,
     scoped_select_multi,
 )
 from app.access.identity import bearer_scheme, get_current_user
@@ -130,6 +132,7 @@ __all__ = [
     "require_campaign",
     "require_campaign_for",
     "role_map",
+    "role_map_for_request",
     "scoped_get",
     "scoped_select",
     "scoped_select_multi",

@@ -205,3 +205,48 @@ async def redacted_messages(ev4) -> list[dict]:
         {"role": "user", "content": f"{mint_canary('CHATLEGACY', a).token} who is the lich?"},
         {"role": "assistant", "content": f"{mint_canary('CHATLEGACY', a).token} Barnaby."},
     ]
+
+
+# ── E0-Access.5 ────────────────────────────────────────────────────────────
+
+def _text(ev4, kind: str, hidden: bool) -> str:
+    return mint_canary(kind, ev4.a.campaign_id).token if hidden else f"{kind.lower()} {uuid.uuid4().hex[:8]}"
+
+
+async def add_term(ev4, *, visibility: str = "gm") -> uuid.UUID:
+    """A shorthand term in A; a hidden one is all canary."""
+    from app.db.models.shorthand import ShorthandTerm
+
+    hidden = visibility != "party"
+    term = ShorthandTerm(id=uuid.uuid4(), user_id=ev4.a.owner_id, campaign_id=ev4.a.campaign_id,
+                         term=_text(ev4, "XTERM", hidden)[:50], meaning=_text(ev4, "XMEANING", hidden),
+                         visibility=visibility)
+    ev4.db.add(term)
+    await ev4.db.commit()
+    return term.id
+
+
+async def add_plan(ev4, *, visibility: str = "gm") -> uuid.UUID:
+    """A session plan in A; a hidden one is all canary."""
+    from app.db.models.session_plan import SessionPlan
+
+    hidden = visibility != "party"
+    plan = SessionPlan(id=uuid.uuid4(), user_id=ev4.a.owner_id, campaign_id=ev4.a.campaign_id,
+                       title=_text(ev4, "XPLANTITLE", hidden), content=_text(ev4, "XPLAN", hidden),
+                       visibility=visibility)
+    ev4.db.add(plan)
+    await ev4.db.commit()
+    return plan.id
+
+
+async def add_source(ev4, *, visibility: str = "gm") -> uuid.UUID:
+    """A source document in A; a hidden one is all canary."""
+    from app.db.models.source import SourceDocument
+
+    hidden = visibility != "party"
+    name = _text(ev4, "XSRC", hidden)
+    doc = SourceDocument(id=uuid.uuid4(), user_id=ev4.a.owner_id, campaign_id=ev4.a.campaign_id, title=name,
+                         filename=f"{name}.txt", visibility=visibility)
+    ev4.db.add(doc)
+    await ev4.db.commit()
+    return doc.id
