@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings
@@ -16,6 +17,26 @@ try:
 except IndexError:
     _ROOT_ENV = Path(__file__).resolve().parent / ".env.not-found"
 
+logger = logging.getLogger(__name__)
+
+# The compose service is `valkey`. The scheme stays redis://: it names the wire
+# protocol (RESP), which Valkey speaks, and redis-py (the client we use) does
+# not accept valkey://.
+DEFAULT_VALKEY_URL = "redis://valkey:6379/0"
+
+_redis_url_warned = False
+
+
+def _warn_redis_url_deprecated() -> None:
+    """Log the REDIS_URL deprecation once per process, not once per Settings()."""
+    global _redis_url_warned
+    if not _redis_url_warned:
+        _redis_url_warned = True
+        logger.warning(
+            "REDIS_URL is deprecated; set VALKEY_URL instead (same value). "
+            "Using REDIS_URL because VALKEY_URL is unset."
+        )
+
 
 class Settings(BaseSettings):
     # Database
@@ -26,8 +47,13 @@ class Settings(BaseSettings):
     postgres_host: str = "localhost"
     postgres_port: int = 5432
 
-    # Redis
-    redis_url: str = "redis://localhost:6379/0"
+    # Valkey (Redis-compatible key-value server). Read it as
+    # `settings.valkey_url`, nothing else. Unset or empty: fall back to the
+    # deprecated REDIS_URL (with a one-time warning), then DEFAULT_VALKEY_URL.
+    # The value is a redis:// URL on purpose: see DEFAULT_VALKEY_URL.
+    valkey_url: str = ""
+    # Deprecated alias for VALKEY_URL, read only by _resolve_valkey_url.
+    redis_url: str | None = None
 
     # JWT
     secret_key: str
@@ -168,6 +194,16 @@ class Settings(BaseSettings):
         # Always a real model name, so callers never need their own fallback.
         if not self.local_llm_model:
             self.local_llm_model = self.kobold_model
+        return self
+
+    @model_validator(mode="after")
+    def _resolve_valkey_url(self) -> "Settings":
+        if not self.valkey_url:
+            if self.redis_url:
+                _warn_redis_url_deprecated()
+                self.valkey_url = self.redis_url
+            else:
+                self.valkey_url = DEFAULT_VALKEY_URL
         return self
 
     class Config:

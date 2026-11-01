@@ -14,7 +14,7 @@ from app.core.limiter import limiter
 from app.core.config import get_settings
 from app.core.errors import LLMError, llm_exception_handler
 from app.core.logging import configure_logging
-from app.core.redis_client import init_redis, close_redis
+from app.core.valkey_client import init_valkey, close_valkey
 from app.services.nlp_service import load_nlp_model
 from app.services.embedding_service import load_embedding_model
 from app.services.chat_service import check_kobold_health
@@ -34,12 +34,12 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     configure_logging(settings.log_level, settings.log_file)
     logger.info("Starting Lorekeeper API", extra={"env": settings.environment})
-    await init_redis()
+    await init_valkey()
     load_nlp_model()
     load_embedding_model()
     yield
     logger.info("Shutting down Lorekeeper API")
-    await close_redis()
+    await close_valkey()
 
 
 def create_app() -> FastAPI:

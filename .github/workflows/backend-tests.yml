@@ -34,11 +34,11 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
-      redis:
+      valkey:
         # For the `real` parametrisation of tests/test_llm_gate.py (Lua,
-        # ZSETs against a real server). Valkey, not Redis: Valkey is BSD,
-        # while Redis 7.4+ is RSALv2/SSPL (owner still deciding which ships).
-        image: valkey/valkey:8-alpine
+        # ZSETs against a real server). Same pinned tag as the compose files:
+        # Valkey (BSD-3-Clause) replaced Redis, whose 7.4+ is RSALv2/SSPL.
+        image: valkey/valkey:8.1.11-alpine
         ports:
           - 6379:6379
         options: >-
@@ -103,5 +103,5 @@ jobs:
           POSTGRES_PASSWORD: changeme
           SECRET_KEY: ci-test-secret-key-not-used-anywhere-real
           # DB 15 so the gate tests never share a keyspace with anything else.
-          REDIS_TEST_URL: redis://localhost:6379/15
+          VALKEY_TEST_URL: redis://localhost:6379/15
         run: python -m pytest -v

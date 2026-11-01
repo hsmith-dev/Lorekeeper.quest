@@ -46,7 +46,7 @@ float on their base tags and a base-image rebuild can add a package without any
 change in this repo.
 
 Upstream images that compose only references and we run unmodified
-(`pgvector/pgvector`, `redis`, `ollama/ollama`) are not rebuilt here; each is an
+(`pgvector/pgvector`, `valkey/valkey`, `ollama/ollama`) are not rebuilt here; each is an
 `image` entry in the register.
 
 Reproduce locally:
@@ -172,8 +172,12 @@ proprietary terms that the commercial and AGPL editions cannot pass on.
 ## Owner-approved exceptions
 
 `[[exception]]` entries in the policy record packages the owner accepts despite
-the rules: fpdf2 (LGPL-3.0), python-bidi (LGPL, via easyocr), caniuse-lite
-(CC-BY-4.0) and the `redis:7-alpine` image (RSALv2 / SSPLv1). All four are
-marked `OWNER TO CONFIRM`. E0-QA.9 records the decisions. For redis, the
-choice is between pinning `redis:7.2-alpine` (the last BSD-3-Clause release)
-and switching to Valkey.
+the rules: fpdf2 (LGPL-3.0), python-bidi (LGPL, via easyocr) and caniuse-lite
+(CC-BY-4.0). All three are marked `OWNER TO CONFIRM`. E0-QA.9 records the
+decisions.
+
+The former fourth exception, the `redis:7-alpine` image (Redis 7.4.x, RSALv2 /
+SSPLv1), is gone: on 2026-11-01 the owner replaced Redis with Valkey
+(`valkey/valkey:8.1.11-alpine`, BSD-3-Clause, Linux Foundation), which needs no
+exception in either edition. The app still talks to it with the redis-py client
+(MIT) over the `redis://` wire protocol; neither is the Redis server.

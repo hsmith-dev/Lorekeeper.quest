@@ -265,8 +265,5 @@ reason = "Browser-support data used by browserslist/autoprefixer at build time o
 
 # --- Register entries (licenses/register.yaml), ecosystem = entry kind -------
 
-[[exception]]
-ecosystem = "image"
-package = "redis"
-license = "LicenseRef-RSALv2 OR SSPL-1.0"
-reason = "redis:7-alpine resolves to Redis 7.4.x (RSALv2 / SSPLv1, source-available, not OSI). Run unmodified as a separate upstream container. OWNER TO CONFIRM; permissive options: pin redis:7.2-alpine (last BSD-3-Clause) or switch to valkey/valkey (BSD-3-Clause)."
+# (No image exceptions: the RSALv2/SSPL redis image was replaced by Valkey,
+# BSD-3-Clause, on 2026-11-01.)

@@ -1,21 +1,9 @@
-import redis.asyncio as aioredis
-from app.core.config import get_settings
+"""Deprecated: renamed to app.core.valkey_client (the server is now Valkey).
 
-_redis: aioredis.Redis | None = None
+Kept so code written against the old names still imports. New code uses
+get_valkey / init_valkey / close_valkey.
+"""
 
-
-async def init_redis() -> None:
-    global _redis
-    settings = get_settings()
-    _redis = aioredis.from_url(settings.redis_url, decode_responses=True)
-
-
-async def close_redis() -> None:
-    if _redis:
-        await _redis.aclose()
-
-
-def get_redis() -> aioredis.Redis:
-    if _redis is None:
-        raise RuntimeError("Redis not initialized")
-    return _redis
+from app.core.valkey_client import close_valkey as close_redis  # noqa: F401
+from app.core.valkey_client import get_valkey as get_redis  # noqa: F401
+from app.core.valkey_client import init_valkey as init_redis  # noqa: F401

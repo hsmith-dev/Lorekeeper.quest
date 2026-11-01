@@ -55,19 +55,19 @@ entries:
     editions: [agpl, commercial]
     images: [postgres]
     notes: PostgreSQL 16 plus the pgvector extension, both under the PostgreSQL licence. Used unmodified.
-  - name: redis
+  - name: valkey/valkey
     kind: image
-    version: "7-alpine"
-    license: LicenseRef-RSALv2 OR SSPL-1.0
-    source_url: https://hub.docker.com/_/redis
+    version: "8.1.11-alpine"
+    license: BSD-3-Clause
+    source_url: https://github.com/valkey-io/valkey
     editions: [agpl, commercial]
-    images: [redis]
+    images: [valkey]
     notes: >-
-      docker-compose uses redis:7-alpine, which resolves to Redis 7.4.x
-      (verified 7.4.12): dual RSALv2 / SSPLv1, not OSI-approved. Redis 7.2.x
-      was the last BSD-3-Clause release. Covered by an [[exception]] marked
-      OWNER TO CONFIRM; permissive options: pin redis:7.2-alpine or switch to
-      valkey/valkey (BSD-3-Clause).
+      Redis-compatible key-value server (Linux Foundation), used unmodified as
+      the compose `valkey` service. Replaced redis:7-alpine (Redis 7.4.x,
+      RSALv2 / SSPLv1) by owner decision 2026-11-01. The app still uses the
+      redis-py client (MIT, listed under python) and the redis:// URL scheme.
+      Image: https://hub.docker.com/r/valkey/valkey
   - name: nginx
     kind: image
     version: "1.27-alpine"

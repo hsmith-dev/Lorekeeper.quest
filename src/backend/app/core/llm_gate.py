@@ -3,8 +3,8 @@
 The platform's own Ollama serves one request at a time on the Reference Box
 (OLLAMA_NUM_PARALLEL=1). Without a gate, whichever call arrives first wins, so
 a background Job can sit in front of a live Rolling Recap or a GM's question.
-This module is a Redis priority semaphore every platform-LLM call goes
-through:
+This module is a Valkey (Redis-protocol) priority semaphore every platform-LLM
+call goes through:
 
     async with llm_slot(GateClass.job_backfill):
         ...  # at most `capacity` of these run at once, across all workers
@@ -60,7 +60,7 @@ from redis.exceptions import RedisError
 
 from app.core.config import get_settings
 from app.core.errors import LLMBusy
-from app.core.redis_client import get_redis
+from app.core.valkey_client import get_valkey
 
 logger = logging.getLogger(__name__)
 
@@ -373,11 +373,11 @@ _gate: LLMGate | None = None
 
 
 def get_gate() -> LLMGate:
-    """The shared gate, built from the app's Redis client and settings. Raises
-    RuntimeError when Redis isn't initialised. Rebuilt if the client changes
+    """The shared gate, built from the app's Valkey client and settings. Raises
+    RuntimeError when Valkey isn't initialised. Rebuilt if the client changes
     (tests, or a reconnect that replaced it)."""
     global _gate
-    redis = get_redis()
+    redis = get_valkey()
     if _gate is None or _gate.redis is not redis:
         s = get_settings()
         _gate = LLMGate(redis, capacity=s.llm_gate_capacity, wait_s=s.llm_gate_wait_s)
@@ -386,15 +386,15 @@ def get_gate() -> LLMGate:
 
 async def acquire(cls: GateClass | str | None = None, *, wait_s: float | None = None) -> Slot:
     """Acquire a slot on the shared gate. A no-op Slot when this context
-    already holds one, or when Redis is unavailable (fail open)."""
+    already holds one, or when Valkey is unavailable (fail open)."""
     gate_class = _coerce(cls)
     if _held.get():
         return Slot()
-    # Must not block AI features: without Redis, run ungated (Ollama still
+    # Must not block AI features: without Valkey, run ungated (Ollama still
     # serialises requests; only the ordering is lost).
     try:
         gate = get_gate()
-    except RuntimeError as exc:  # Redis not initialised
+    except RuntimeError as exc:  # Valkey not initialised
         _log("llm_gate_unavailable", logging.WARNING, gate_class=str(gate_class), error=type(exc).__name__)
         return Slot()
     try:

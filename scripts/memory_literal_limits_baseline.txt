@@ -8,7 +8,7 @@
 # Format: <compose file> <service> <value>  # <reason>
 
 docker-compose.prod.yml postgres 3g  # pre-AD-7 limit; E0-Platform.7 moves it to POSTGRES_MEM_LIMIT (AD-7: 768m)
-docker-compose.prod.yml redis 512m  # pre-AD-7 limit; E0-Platform.7 moves it to REDIS_MEM_LIMIT (AD-7: 128m)
+docker-compose.prod.yml valkey 512m  # pre-AD-7 limit (service renamed from redis, same value); E0-Platform.7 moves it to VALKEY_MEM_LIMIT (AD-7: 128m)
 docker-compose.prod.yml ollama 14g  # pre-AD-7 limit; E0-Platform.7 moves it to OLLAMA_MEM_LIMIT (AD-7: 5.25g)
 docker-compose.prod.yml backend 14g  # pre-AD-7 limit (models still in-process); E0-Platform.7 moves it to WEB/WORKER_MEM_LIMIT (AD-7: 1g each)
 docker-compose.prod.yml nginx 256m  # pre-AD-7 limit; E0-Platform.7 moves it to NGINX_MEM_LIMIT (AD-7: 128m)

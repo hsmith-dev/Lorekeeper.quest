@@ -17,7 +17,7 @@ sys.modules[_spec.name] = cmb
 _spec.loader.exec_module(cmb)
 
 # AD-7's table: ollama 5.25g, ml 2.5g, tts 2.5g, stt 1.25g, web 1g, worker 1g,
-# postgres 768m, redis 128m, nginx 128m = 14.5 GiB exactly.
+# postgres 768m, valkey 128m, nginx 128m = 14.5 GiB exactly.
 AD7 = """\
 OLLAMA_MEM_LIMIT=5.25g
 # ML_MEM_LIMIT=2560m
@@ -26,7 +26,7 @@ STT_MEM_LIMIT=1.25g
 WEB_MEM_LIMIT=1g
 WORKER_MEM_LIMIT=1024m
 POSTGRES_MEM_LIMIT=768m
-REDIS_MEM_LIMIT=128m
+VALKEY_MEM_LIMIT=128m
 #NGINX_MEM_LIMIT=128M
 """
 
@@ -35,7 +35,7 @@ REDIS_MEM_LIMIT=128m
 # PR that moves a literal to a *_MEM_LIMIT variable (E0-Platform.7).
 FROZEN_LITERALS = frozenset({
     ("docker-compose.prod.yml", "postgres", "3g"),
-    ("docker-compose.prod.yml", "redis", "512m"),
+    ("docker-compose.prod.yml", "valkey", "512m"),  # was "redis" (renamed, same limit)
     ("docker-compose.prod.yml", "ollama", "14g"),
     ("docker-compose.prod.yml", "backend", "14g"),
     ("docker-compose.prod.yml", "nginx", "256m"),
