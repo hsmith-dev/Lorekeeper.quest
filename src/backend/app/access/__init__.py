@@ -17,7 +17,11 @@ the chat projections (`project_chat`, `replay_history`). E0-Access.9 adds
 the one Visibility writer (`set_visibility`, `set_visibility_many`), its kind
 map (`register_visibility_kind`), the extension points
 (`register_stale_marker`, `register_visibility_listener`) and
-`mark_dependents_stale`.
+`mark_dependents_stale`. E0-Access.10 adds grant changes (`change_member_role`,
+`remove_member`, `revoke_share_token`, `campaign_grants_removed`,
+`publish_grant_change`, `grant_channel`, `grant_changed`, `grant_watch`, `GRANT_POLL_S`) and
+the cache key scheme (`cache_key`, `cache_generation`, `cached_json`,
+`invalidate_campaign_cache`, `CACHE_TTL_S`).
 """
 from app.access.audience import (
     ALWAYS_GM_FIELDS, GM_AUDIENCE, MEMBERS, PUBLIC, AnyOf, Audience, AudienceLevel, covers, ctx_audience,
@@ -28,6 +32,11 @@ from app.access.context import (
     audience_ctx, ctx_for, ctx_for_request, require_campaign, require_campaign_for, role_ctx, role_map,
     role_map_for_request,
     scoped_select_multi,
+)
+from app.access.cache import CACHE_TTL_S, cache_generation, cache_key, cached_json, invalidate_campaign_cache
+from app.access.grants import (
+    GRANT_POLL_S, campaign_grants_removed, change_member_role, grant_changed, grant_channel, grant_watch,
+    publish_grant_change, remove_member, revoke_share_token,
 )
 from app.access.identity import bearer_scheme, get_current_user
 from app.access.policy import (
@@ -54,6 +63,20 @@ from app.access.visibility import (
 )
 
 __all__ = [
+    "CACHE_TTL_S",
+    "GRANT_POLL_S",
+    "cache_generation",
+    "cache_key",
+    "cached_json",
+    "campaign_grants_removed",
+    "change_member_role",
+    "grant_changed",
+    "grant_channel",
+    "grant_watch",
+    "invalidate_campaign_cache",
+    "publish_grant_change",
+    "remove_member",
+    "revoke_share_token",
     "VisibilityError",
     "VisibilityKind",
     "mark_dependents_stale",

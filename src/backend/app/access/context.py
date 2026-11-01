@@ -56,8 +56,11 @@ from app.db.session import get_db
 class CampaignContext:
     """Who is asking, in which Campaign, with which Role.
 
-    `grant_id` is the `campaign_members.id` (None for the Owner and for anon),
-    `access_epoch` is copied from that grant (0 for the Owner). `actor` is
+    `grant_id` names the grant the ctx stands on: the `campaign_members.id`
+    of a Member, the `campaign_share_tokens.id` of a Share Link ctx, None for
+    the Owner and for reduced ctxs (`audience_ctx`, `role_ctx`).
+    `access_epoch` is copied from that grant (0 for the Owner); a grant
+    change bumps it (`access.grants`, E0-Access.10). `actor` is
     "user" for every ctx a request or `ctx_for` builds; only `as_system`
     produces "system". `read_only` marks a reduced ctx (`audience_ctx`): it
     reads with a narrower Audience and may write nothing.

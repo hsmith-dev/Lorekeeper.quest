@@ -22,8 +22,8 @@ from app.db.models.campaign_member import CampaignMember
 from app.schemas.share import ShareTokenResponse, ShareTokenCreate, CampaignMemberResponse
 from app.schemas.tag_category import TagCategoryCreate, TagCategoryResponse
 from app.access import (
-    CampaignContext, check_create, project, project_all, require_campaign, role_map_for_request, scoped_get,
-    scoped_select,
+    CampaignContext, campaign_grants_removed, check_create, project, project_all, remove_member, require_campaign,
+    revoke_share_token as revoke_grant, role_map_for_request, scoped_get, scoped_select,
 )
 from app.api.deps import get_current_user, get_user_llm_config
 from app.services.export_service import build_campaign_markdown, build_campaign_pdf
@@ -260,7 +260,8 @@ async def revoke_share_token(
     db: AsyncSession = Depends(get_db),
 ) -> None:
     token = await scoped_get(db, CampaignShareToken, ctx, token_id)
-    token.revoked = True
+    # E0-Access.10: revoked, access_epoch + 1, and the access: publish after commit.
+    await revoke_grant(db, token)
     await db.commit()
 
 
@@ -307,7 +308,8 @@ async def remove_campaign_member(
         )
         for entry in entries_result.scalars().all():
             await db.delete(entry)
-    await db.delete(member)
+    # E0-Access.10: the grant is gone; open streams close on the publish.
+    await remove_member(db, member)
     await db.commit()
 
 
@@ -331,7 +333,7 @@ async def leave_campaign(
             detail="You own this campaign — delete it instead of leaving it.",
         )
     member = await scoped_get(db, CampaignMember, ctx, ctx.grant_id)
-    await db.delete(member)
+    await remove_member(db, member)
     await db.commit()
 
 
@@ -387,5 +389,7 @@ async def delete_campaign(
     db: AsyncSession = Depends(get_db),
 ) -> None:
     campaign = await scoped_get(db, Campaign, ctx, ctx.campaign_id)
+    # Every grant goes with the Campaign: close their streams after commit.
+    await campaign_grants_removed(db, ctx.campaign_id)
     await db.delete(campaign)
     await db.commit()
