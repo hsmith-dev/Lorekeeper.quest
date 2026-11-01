@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 10-31-2026 23:30
-last_updated: 10-31-2026 22:36
+last_updated: 10-31-2026 22:58
 project: Lorekeeper.quest
 project_key: NOKEY
 tracking_system: file-system
@@ -145,7 +145,7 @@ development_status:
   8-2-fix-destructive-text-contrast-migrate-hardcoded-colours-and: backlog
   8-3-slideover-focus-trap-wide-and-full-screen-variants-push-head: backlog
   8-4-segmentedcontrol-tabs-and-combobox-primitives: backlog
-  8-5-toast-emptystate-modelmissingnotice-and-shared-state-pattern: backlog
+  8-5-toast-emptystate-modelmissingnotice-and-shared-state-pattern: done
   8-6-spoiler-safety-components-and-the-preview-shell: backlog
   8-7-global-current-campaign-and-the-campaignswitcher: backlog
   8-8-nav-restructure-route-redirects-unified-not-found-and-route: backlog
