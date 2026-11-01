@@ -16,6 +16,9 @@ Where each CHECK lives:
 - MentionSourceField -> entity_mentions.source_field     (E0-WorldCore.2)
 - TagSourceField     -> journal_tags.source_field        (E0-Access.1)
 - EntryKind          -> journal_entries.kind             (E0-Access.1)
+- JobStatus          -> jobs.status, data_backfills.status (E0-Jobs.1)
+- JobQueue           -> jobs.queue                       (E0-Jobs.1)
+- JobErrorCode       -> jobs.error_code                  (E0-Jobs.1)
 
 Two StrEnums mirror Postgres enum types instead of a CHECK (AD-12). The
 F1-core revision (c95acb56c595) creates the types; models bind them with
@@ -39,6 +42,10 @@ One StrEnum has no CHECK: LocationKind is the closed set of a Location's
 `attributes.kind`, a key inside the entities.attributes JSONB. It is checked
 by app.domain.entity_types.validate_attributes, and CI-10 lists it under
 ATTRIBUTE_ENUMS.
+
+The three Job enums live here, not in app/jobs, for the same reason: the
+Job models import them (AD-1). app/jobs/errors.py re-exports JobErrorCode,
+which AD-4 places there, with its terminal and retryable sets.
 
 Entity statuses are not an enum: they are plain text, checked per type by
 app.domain.entity_types.validate_status.
@@ -147,6 +154,42 @@ class CampaignRole(StrEnum):
 
     CO_GM = "co_gm"
     PLAYER = "player"
+
+
+class JobStatus(StrEnum):
+    """The lifecycle of a `jobs` row (AD-2); also data_backfills.status."""
+
+    QUEUED = "queued"
+    RUNNING = "running"
+    DONE = "done"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class JobQueue(StrEnum):
+    """The three RQ queues, in priority order (AD-2)."""
+
+    INTERACTIVE = "interactive"
+    ONSAVE = "onsave"
+    BACKFILL = "backfill"
+
+
+class JobErrorCode(StrEnum):
+    """Why a Job failed (jobs.error_code, AD-4). Closed and append-only:
+    every LLMError.code (app/core/errors.py) is a member."""
+
+    LLM_CONFIG = "llm_config"
+    # StructuredOutputError.code (RC-4 renamed it from structured_output).
+    AI_OUTPUT_UNUSABLE = "ai_output_unusable"
+    PERMISSION_CHANGED = "permission_changed"
+    MODEL_UNAVAILABLE = "model_unavailable"
+    LLM_UNAVAILABLE = "llm_unavailable"
+    LLM_BUSY = "llm_busy"
+    TIMEOUT = "timeout"
+    INTERRUPTED = "interrupted"
+    INTERNAL = "internal"
+    # PromptBudgetError.code (E0-LLM.1).
+    PROMPT_TOO_LARGE = "prompt_too_large"
 
 
 def _literal(value: str) -> str:

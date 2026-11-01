@@ -36,6 +36,9 @@ from app.domain.enums import (
     EntityChangeOp,
     EntityType,
     EntryKind,
+    JobErrorCode,
+    JobQueue,
+    JobStatus,
     LocationKind,
     MentionOrigin,
     MentionSourceField,
@@ -48,6 +51,10 @@ from app.domain.enums import (
 ENUM_CHECKS: list[tuple[type[StrEnum], str, str]] = [
     (TagSourceField, "journal_tags", "source_field"),  # E0-Access.1
     (EntryKind, "journal_entries", "kind"),            # E0-Access.1
+    (JobStatus, "jobs", "status"),                     # E0-Jobs.1
+    (JobQueue, "jobs", "queue"),                       # E0-Jobs.1
+    (JobErrorCode, "jobs", "error_code"),              # E0-Jobs.1
+    (JobStatus, "data_backfills", "status"),           # E0-Jobs.1
 ]
 
 # (StrEnum class, Postgres enum type name) for the AD-12 PG enums.

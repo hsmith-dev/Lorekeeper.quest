@@ -387,7 +387,7 @@ def scoped_select_multi(model: type, roles: Mapping[uuid.UUID, str], user_id: uu
                                audience=ctx_audience(GM, uid))
 
     branches = []
-    if isinstance(reg, registry.Derived):
+    if isinstance(reg, (registry.Derived, registry.DerivedFromSources)):
         # A derived predicate is scoped to one Campaign (its parent EXISTS),
         # for GMs too: one branch per Campaign, exactly as scoped_select.
         for cid in gm_ids:

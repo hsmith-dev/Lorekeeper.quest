@@ -49,12 +49,13 @@ FROZEN_IGNORES = {
 REQUIRED_CONTRACTS = {"layers": "layers", "domain": "forbidden", "clients": "forbidden",
                       "clients_callers": "forbidden", "models": "forbidden"}
 
-# app.access (AD-13) sits between services and schemas (E0-Access.2).
-REQUIRED_LAYERS = ["app.api", "app.services", "app.access", "app.schemas", "app.db", "app.core", "(app.domain)"]
+# app.access (AD-13) sits between services and schemas (E0-Access.2); app.jobs
+# (AD-2) between api and services (E0-Jobs.1).
+REQUIRED_LAYERS = ["app.api", "app.jobs", "app.services", "app.access", "app.schemas", "app.db", "app.core", "(app.domain)"]
 # The models contract, frozen whole: dropping a source module or a forbidden
 # package is a weakening and must show up here in review.
 FROZEN_MODEL_SOURCES = frozenset({
-    "app.api", "app.clients", "app.services", "app.access", "app.schemas", "app.db", "app.core", "app.domain",
+    "app.api", "app.jobs", "app.clients", "app.services", "app.access", "app.schemas", "app.db", "app.core", "app.domain",
     "app.main",
 })
 FROZEN_MODEL_PACKAGES = frozenset({
@@ -190,7 +191,9 @@ TODAY = {
                                     "from app.schemas import journal\nfrom app.clients import ml\n"),
     "access/context.py": ("from app.schemas import journal\nfrom app.db import base\nfrom app.core import config\n"
                           "from app.domain import embedding\n"),
-    "api/routes.py": "from app.services import journal_service\n",
+    "api/routes.py": "from app.services import journal_service\nfrom app.jobs import errors\n",
+    "jobs/errors.py": ("from app.services import journal_service\nfrom app.access import context\n"
+                       "from app.core import config\nfrom app.domain import embedding\n"),
     "schemas/journal.py": "from app.domain import embedding\n",
     "db/base.py": "from app.core import config\n",
     "core/config.py": "from app.domain import embedding\n",
@@ -204,7 +207,7 @@ def lint(tmp_path: Path, extra: dict[str, str | None] | None = None) -> subproce
     files = dict(TODAY)
     files.update(extra or {})
     pkg = tmp_path / "app"
-    for sub in ("", "api", "services", "access", "schemas", "db", "core", "domain", "clients"):
+    for sub in ("", "api", "jobs", "services", "access", "schemas", "db", "core", "domain", "clients"):
         (pkg / sub).mkdir(parents=True, exist_ok=True)
         (pkg / sub / "__init__.py").write_text("")
     for rel, body in files.items():
@@ -242,6 +245,11 @@ def test_layout_like_today_passes(tmp_path):
     ({"domain/bad.py": "from app.access import context\n"}, "AD-1 app.domain imports no other app package", "app.domain.bad -> app.access"),
     ({"clients/bad.py": "from app.access import context\n"}, "AD-1 app.clients imports only", "app.clients.bad -> app.access"),
     ({"access/bad.py": "import torch\n"}, "AD-1 no model packages", "app.access.bad -> torch"),
+    # app.jobs (E0-Jobs.1): below api, above services.
+    ({"jobs/bad.py": "import app.api.routes\n"}, "AD-1 layers", "app.jobs.bad -> app.api"),
+    ({"services/bad.py": "from app.jobs import errors\n"}, "AD-1 layers", "app.services.bad -> app.jobs"),
+    ({"access/bad.py": "from app.jobs import errors\n"}, "AD-1 layers", "app.access.bad -> app.jobs"),
+    ({"jobs/bad.py": "import torch\n"}, "AD-1 no model packages", "app.jobs.bad -> torch"),
 ])
 def test_planted_violation_fails(tmp_path, plant, contract, offender):
     r = lint(tmp_path, plant)

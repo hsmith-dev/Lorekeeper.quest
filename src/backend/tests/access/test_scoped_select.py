@@ -30,10 +30,15 @@ from app.db.models import (
     CharacterSheet, ChatSession, JournalEntry, SessionPlan, ShorthandTerm, SourceChunk, SourceDocument,
     TagCategory,
 )
+from app.access.registry import AlwaysGM, scope_column
 from app.db.session import get_db
 from tests.ev4.fixtures import ev4, find_canaries, mint_canary  # noqa: F401  (ev4 registers the fixture)
 
 NOT_FOUND = {"detail": "Not found"}
+# The global always_gm models (derived_sources, data_backfills) have no
+# Campaign scope; scoped_select refuses them (tests/access/test_audience.py).
+CAMPAIGN_MODELS = [m for m in REGISTRY if not (
+    scope_column(m) is None and isinstance(REGISTRY[m], AlwaysGM))]
 RANDOM = uuid.UUID("00000000-0000-4000-8000-000000000000")
 
 # The text column each stored model's extra rows carry their token in.
@@ -145,7 +150,7 @@ async def scene(ev4, db):
 async def _scan(db, ctx: CampaignContext) -> tuple[set[str], str]:
     tokens: set[str] = set()
     texts = []
-    for model in REGISTRY:
+    for model in CAMPAIGN_MODELS:
         for row in (await db.execute(scoped_select(model, ctx))).scalars().all():
             text = _row_text(model, row)
             texts.append(text)
@@ -308,7 +313,7 @@ async def test_audience_ctx_on_real_ctxs(db, scene):
         audience_ctx(scene.ev4.b.campaign_id, ANON_VIEW, by=c["gm_owner"])
     # as_user(player) from the GM reads exactly what the Player reads.
     via_gm = audience_ctx(a, as_user(player.user_id), by=c["gm_owner"])
-    for model in REGISTRY:
+    for model in CAMPAIGN_MODELS:
         got = {sa.inspect(r).identity for r in (await db.execute(scoped_select(model, via_gm))).scalars()}
         own = {sa.inspect(r).identity for r in (await db.execute(scoped_select(model, c["player"]))).scalars()}
         assert got == own, model.__name__

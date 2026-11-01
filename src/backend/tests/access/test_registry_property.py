@@ -8,6 +8,11 @@ For random rows and a pool of ctxs in Campaign A:
 Users and Campaigns A and B are created once per test (flushed, never
 committed). Each hypothesis example inserts 1–4 random rows inside a
 savepoint and rolls it back, so examples never see each other's rows.
+
+The global models (no campaign_id: derived_sources, data_backfills) are
+always_gm and refused by scoped_select, so they have no spec here;
+tests/access/test_audience.py covers them. Stored files use test-only
+derived types registered by the `file_types` fixture.
 """
 from __future__ import annotations
 
@@ -21,13 +26,14 @@ import sqlalchemy as sa
 from hypothesis import HealthCheck, given, settings, strategies as st
 
 from app.access import (
-    ANON_VIEW, MEMBER_VIEW, REGISTRY, AnyOf, CampaignContext, as_user, audience_ctx, audience_of, ctx_for,
-    scoped_select, visible_to,
+    ANON_VIEW, DERIVED_REGISTRY, MEMBER_VIEW, REGISTRY, AnyOf, CampaignContext, as_user, audience_ctx, audience_of,
+    ctx_for, register_derived, scoped_select, visible_to,
 )
+from app.access import registry as reg
 from app.db.models import (
-    Campaign, CampaignMember, CampaignShareToken, CharacterSheet, CharacterSheetTemplate, ChatSession, Genre,
-    JournalEntry, JournalTag, NpcEntry, Quest, SessionPlan, ShorthandTerm, SourceChunk, SourceDocument, Tag,
-    TagCategory, User,
+    Campaign, CampaignMember, CampaignShareToken, CharacterSheet, CharacterSheetTemplate, ChatSession,
+    DataBackfill, DerivedSource, Genre, Job, JournalEntry, JournalTag, NpcEntry, Quest, SessionPlan, ShorthandTerm,
+    SourceChunk, SourceDocument, StoredFile, Tag, TagCategory, User,
 )
 from app.domain.enums import CampaignRole, EntryKind, TagSourceField, Visibility
 
@@ -45,6 +51,19 @@ visibilities = st.sampled_from(list(Visibility))
 kinds = st.sampled_from(list(EntryKind))
 authors = st.sampled_from(AUTHORS)
 source_fields = st.one_of(st.none(), st.sampled_from(list(TagSourceField)))
+
+
+# Registered models with no Campaign scope: always_gm, refused by scoped_select.
+GLOBAL_MODELS = {DerivedSource, DataBackfill}
+CAMPAIGN_MODELS = [m for m in REGISTRY if m not in GLOBAL_MODELS]
+
+# Test-only file types (the `file_types` fixture registers them): one that
+# derives from journal entries and an unmodelled kind, one that does not
+# derive from journal entries, and one that is never registered.
+FILE_TYPES = {"prop_file": ["journal", "prop_unmodelled"], "prop_entity_file": ["prop_entity"]}
+file_kinds = st.sampled_from([*FILE_TYPES, "prop_unregistered"])
+ref_kinds = st.sampled_from(["journal", "prop_unmodelled", "prop_entity"])
+ref_fields = st.sampled_from([None, "narrative", "shorthand", "gm_notes"])
 
 
 def _uid() -> str:
@@ -132,11 +151,35 @@ SPECS = {
     CampaignShareToken: st.fixed_dictionaries({"campaign": campaigns, "author": authors,
                                                "kind": st.sampled_from(("read_only", "collaborate"))}),
     CharacterSheetTemplate: st.fixed_dictionaries({"campaign": campaigns, "author": authors}),
+    Job: st.fixed_dictionaries({"campaign": campaigns, "creator": st.one_of(st.none(), authors)}),
+    StoredFile: st.fixed_dictionaries({
+        "campaign": campaigns, "kind": file_kinds, "stale": st.booleans(),
+        "owner": st.one_of(st.none(), authors),
+        "sources": st.lists(st.fixed_dictionaries({
+            "ref_kind": ref_kinds, "entry": entry_spec, "ref_field": ref_fields, "missing": st.booleans(),
+        }), min_size=0, max_size=3),
+    }),
 }
 
 
 def test_every_registered_model_has_a_spec():
-    assert set(SPECS) == set(REGISTRY)
+    assert set(SPECS) == set(CAMPAIGN_MODELS)
+    assert set(SPECS) | GLOBAL_MODELS == set(REGISTRY)
+
+
+def test_global_models_are_the_unscoped_always_gm_ones():
+    assert {m for m in REGISTRY if reg.scope_column(m) is None and not isinstance(REGISTRY[m], reg.Derived)} \
+        == GLOBAL_MODELS
+    assert all(isinstance(REGISTRY[m], reg.AlwaysGM) for m in GLOBAL_MODELS)
+
+
+@pytest.fixture
+def file_types():
+    saved = list(DERIVED_REGISTRY)
+    for name, derive_from in FILE_TYPES.items():
+        register_derived(name, derive_from)
+    yield
+    DERIVED_REGISTRY[:] = saved
 
 
 def _rows_strategy(model):
@@ -190,6 +233,28 @@ async def _build(db, w: World, model, s: dict) -> Built:
         CharacterSheetTemplate: lambda: CharacterSheetTemplate(campaign_id=cid, created_by_user_id=uid, name="t",
                                                                fields=[]),
     }
+    if model is Job:
+        creator = w.users[s["creator"]].id if s["creator"] else None
+        job = Job(campaign_id=cid, kind="system.noop", queue="interactive", idempotency_key=_uid(),
+                  ctx_kind="user", ctx_user_id=creator, created_by=creator)
+        db.add(job)
+        await db.flush()
+        return Built(job, cid == w.a)
+    if model is StoredFile:
+        f = StoredFile(id=uuid.uuid4(), campaign_id=cid, kind=s["kind"], storage_key=_uid(),
+                       content_type="application/pdf", size=1, sha256="0" * 64, stale=s["stale"],
+                       audience_owner_id=w.users[s["owner"]].id if s["owner"] else None)
+        db.add(f)
+        await db.flush()
+        pairs = []
+        for src in s["sources"]:
+            e = await _entry(db, w, src["entry"])
+            ds = DerivedSource(derived_type=f.kind, derived_id=f.id, ref_kind=src["ref_kind"],
+                               ref_id=uuid.uuid4() if src["missing"] else e.id, ref_field=src["ref_field"])
+            db.add(ds)
+            pairs.append((ds, None if src["missing"] else e))
+        await db.flush()
+        return Built(f, cid == w.a, pairs)
     if model in simple:
         row = simple[model]()
         db.add(row)
@@ -254,10 +319,10 @@ async def _check(db, w: World, model, built: list[Built]) -> None:
         )
 
 
-@pytest.mark.parametrize("model", list(REGISTRY), ids=lambda m: m.__tablename__)
+@pytest.mark.parametrize("model", CAMPAIGN_MODELS, ids=lambda m: m.__tablename__)
 @SETTINGS
 @given(data=st.data())
-async def test_visible_clause_agrees_with_audience_of(db, world, model, data):
+async def test_visible_clause_agrees_with_audience_of(db, world, file_types, model, data):
     specs = data.draw(_rows_strategy(model), label="rows")
     sp = await db.begin_nested()
     try:
