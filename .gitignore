@@ -68,3 +68,6 @@ htmlcov/
 backups/
 .claude/settings.local.json
 **/.claude/settings.local.json
+
+# Claude Code agent worktrees (local only)
+.claude/worktrees/
