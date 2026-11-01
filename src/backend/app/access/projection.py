@@ -21,7 +21,9 @@ unless one is named (Campaign: `PublicCampaignResponse`).
   5. pruning: an entry's tag whose `journal_tags` link ctx may not see
      (`source_field=shorthand`) is dropped; a tag's `custom_category` ctx may
      not see (hidden, or of another Campaign) is None; a field hidden by
-     `field_visibility` renders as the schema default (None when none);
+     `field_visibility` renders as the schema default (None when none), and
+     on an Entity as its unset value (`entity_types.party_view`: status the
+     type's default, a hidden attribute key dropped);
   6. `extra` fields (counts, `is_owner`, `share_kind`) merged, then validated.
 
 `project_all(db, rows, ctx)` takes one ctx or a `role_map` (a per-row
@@ -56,13 +58,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.access.audience import ALWAYS_GM_FIELDS, stored_audience, visible_to
 from app.access.context import CampaignContext, RoleMap, role_ctx
 from app.access.policy import ANON, GM, PLAYER, not_found
+from app.domain import entity_types
 from app.access.registry import (
-    Derived, Stored, UnregisteredModel, audience_of, gm_fields, registration, scope_column,
+    Derived, Stored, UnregisteredModel, audience_of, gm_fields, narrowed_audience, registration, scope_column,
 )
 from app.access.sources import message_refs, visible_refs as _visible_refs
 from app.db.models.campaign import Campaign
 from app.db.models.character_sheet import CharacterSheet, CharacterSheetTemplate
 from app.db.models.chat import ChatSession
+from app.db.models.entity import (
+    Entity, EntityAlias, EntityChange, EntityMention, EntityRelationship, QuestStep, RelationshipType,
+)
 from app.db.models.journal import JournalEntry
 from app.db.models.npc import NpcEntry
 from app.db.models.quest import Quest
@@ -77,6 +83,12 @@ from app.schemas.character_sheet import (
 )
 from app.schemas.chat import (
     ChatGMResponse, ChatMetaGM, ChatMetaParty, ChatPartyResponse, ChatSessionDetailGM, ChatSessionDetailParty,
+)
+from app.schemas.entities import (
+    EntityAliasGMResponse, EntityAliasPartyResponse, EntityChangeGMResponse, EntityChangePartyResponse,
+    EntityGMResponse, EntityMentionGMResponse, EntityMentionPartyResponse, EntityPartyResponse,
+    EntityRelationshipGMResponse, EntityRelationshipPartyResponse, QuestStepGMResponse, QuestStepPartyResponse,
+    RelationshipTypeGMResponse, RelationshipTypePartyResponse,
 )
 from app.schemas.journal import JournalGMResponse, JournalLiteResponse, JournalPartyResponse
 from app.schemas.npc import NpcGMResponse, NpcPartyResponse
@@ -139,6 +151,15 @@ PROJECTIONS: dict[type | tuple[type, str], Projection] = {
     SessionPlan: Projection(SessionPlanGMResponse, SessionPlanPartyResponse),
     SourceDocument: Projection(SourceDocumentGMResponse, SourceDocumentPartyResponse),
     TagCategory: Projection(TagCategoryGMResponse, TagCategoryPartyResponse),
+    # E0-WorldCore.2 (F3-world). An Entity's hidden fields render as unset
+    # (_render_entity_unset).
+    Entity: Projection(EntityGMResponse, EntityPartyResponse),
+    EntityAlias: Projection(EntityAliasGMResponse, EntityAliasPartyResponse),
+    EntityMention: Projection(EntityMentionGMResponse, EntityMentionPartyResponse),
+    RelationshipType: Projection(RelationshipTypeGMResponse, RelationshipTypePartyResponse),
+    EntityRelationship: Projection(EntityRelationshipGMResponse, EntityRelationshipPartyResponse),
+    QuestStep: Projection(QuestStepGMResponse, QuestStepPartyResponse),
+    EntityChange: Projection(EntityChangeGMResponse, EntityChangePartyResponse),
 }
 
 
@@ -172,7 +193,9 @@ def _row_campaign(obj: Any) -> uuid.UUID | None:
 
 def _check_row(obj: Any, ctx: CampaignContext) -> None:
     """`not_found()` unless `obj` is in ctx's Campaign and its Audience covers
-    ctx. Derived rows (tags) are trusted from the scoped query that loaded them."""
+    ctx. Derived rows (tags) are trusted from the scoped query that loaded them.
+    A stored row with `narrowed_by` parents (entity_relationships) needs those
+    relationships loaded (selectinload) for audience_of."""
     model = type(obj)
     reg = registration(model)
     if isinstance(reg, Derived):
@@ -205,7 +228,11 @@ def check_create(obj: Any, ctx: CampaignContext) -> None:
         kind = None
         if reg.kind_field:
             kind = getattr(obj, reg.kind_field) or _column_default(model, reg.kind_field)
-        aud = stored_audience(vis, getattr(obj, reg.owner_field), kind)
+        aud = stored_audience(vis, getattr(obj, reg.owner_field) if reg.owner_field else None, kind)
+        # The floor (its column default when unset) and the narrowing parents
+        # (loaded relationships; unloaded raises) narrow a create too.
+        aud = narrowed_audience(obj, reg, aud,
+                                floor_value=_column_default(model, reg.floor) if reg.floor else None)
     else:
         aud = audience_of(obj)
     if not visible_to(aud, ctx):
@@ -265,13 +292,62 @@ def _apply_field_visibility(obj: Any, reg: Any, schema: type[BaseModel], data: d
     if not isinstance(reg, Stored) or not reg.field_visibility:
         return
     per_field = getattr(obj, reg.field_visibility, None) or {}
-    owner_id = getattr(obj, reg.owner_field, None)
+    owner_id = getattr(obj, reg.owner_field) if reg.owner_field else None
     kind = getattr(obj, reg.kind_field) if reg.kind_field else None
+    hidden: list[str] = []
     for name, vis in dict(per_field).items():
-        if name not in schema.model_fields or vis is None:
+        if vis is None:
             continue
-        if not visible_to(stored_audience(vis, owner_id, kind), ctx):
+        try:
+            shown = visible_to(stored_audience(vis, owner_id, kind), ctx)
+        except ValueError:  # not a Visibility: fail closed
+            shown = False
+        if not shown:
+            hidden.append(str(name))
+    if isinstance(obj, Entity):
+        _render_entity_unset(obj, schema, data, hidden)
+        return
+    for name in hidden:
+        if name in schema.model_fields:
             data[name] = _field_default(schema, name)
+
+
+# Entity fields entity_types.party_unset renders (besides `attributes.<key>`).
+_ENTITY_UNSET_FIELDS = frozenset({"status", "description", "aliases", "gm_notes"})
+_ATTRIBUTES_PREFIX = "attributes."
+
+
+def _render_entity_unset(obj: Entity, schema: type[BaseModel], data: dict[str, Any], hidden: list[str]) -> None:
+    """A hidden Entity field renders exactly as unset (AD-13): status as the
+    type's default, description None, a hidden attribute key dropped
+    (entity_types.party_view). Any other optional hidden schema field gets the
+    schema default; a required one (name, which is never hidden) is left as
+    is. An attribute key the type does not define is dropped too, and a
+    hidden status also drops `completed_at` (it would reveal the status)."""
+    known = set(entity_types.attribute_keys(obj.type))
+    registry_hidden = []
+    drop_attrs = ["completed_at"] if "status" in hidden else []
+    for name in hidden:
+        if name in _ENTITY_UNSET_FIELDS:
+            if name in data:
+                registry_hidden.append(name)
+        elif name.startswith(_ATTRIBUTES_PREFIX):
+            key = name[len(_ATTRIBUTES_PREFIX):]
+            if key in known:
+                registry_hidden.append(name)
+            else:
+                drop_attrs.append(key)
+        elif name in schema.model_fields and not schema.model_fields[name].is_required():
+            data[name] = _field_default(schema, name)
+    if "attributes" in data:
+        attrs = data["attributes"]
+        data["attributes"] = dict(attrs) if attrs is not None else {}
+        for key in drop_attrs:
+            data["attributes"].pop(key, None)
+    elif any(n.startswith(_ATTRIBUTES_PREFIX) for n in registry_hidden):
+        registry_hidden = [n for n in registry_hidden if not n.startswith(_ATTRIBUTES_PREFIX)]
+    if registry_hidden:
+        data.update(entity_types.party_view(obj.type, data, registry_hidden))
 
 
 def project(obj: Any, ctx: CampaignContext, *, variant: str | None = None,

@@ -23,6 +23,9 @@ from app.db.models.character_sheet import CharacterSheetTemplate, CharacterSheet
 from app.db.models.app_config import AppConfig
 from app.db.models.job import Job, DataBackfill
 from app.db.models.stored_file import StoredFile, DerivedSource
+from app.db.models.entity import (
+    Entity, EntityAlias, EntityMention, RelationshipType, EntityRelationship, QuestStep, EntityChange,
+)
 
 __all__ = [
     "User", "Campaign", "Genre", "JournalEntry", "Tag", "JournalTag", "TagType", "TagCategory",
@@ -32,5 +35,6 @@ __all__ = [
     "ModelEvaluation", "PromoCode", "PromoCodeRedemption", "Subscription", "SessionPlan",
     "Feedback", "FeedbackCategory", "PasswordResetToken", "AdminMessage", "ShorthandTerm",
     "CharacterSheetTemplate", "CharacterSheet", "AppConfig", "Job", "DataBackfill", "StoredFile",
-    "DerivedSource",
+    "DerivedSource", "Entity", "EntityAlias", "EntityMention", "RelationshipType", "EntityRelationship",
+    "QuestStep", "EntityChange",
 ]

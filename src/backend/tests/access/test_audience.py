@@ -20,8 +20,9 @@ from app.access import (
 from app.access import registry as reg
 from app.db.models import (
     Campaign, CampaignMember, CampaignShareToken, CharacterSheet, CharacterSheetTemplate, ChatSession,
-    DataBackfill, DerivedSource, Feedback, Job, JournalEntry, JournalTag, NpcEntry, Quest, SessionPlan,
-    ShorthandTerm, SourceChunk, SourceDocument, StoredFile, Tag, TagCategory,
+    DataBackfill, DerivedSource, Entity, EntityAlias, EntityChange, EntityMention, EntityRelationship, Feedback,
+    Job, JournalEntry, JournalTag, NpcEntry, Quest, QuestStep, RelationshipType, SessionPlan, ShorthandTerm,
+    SourceChunk, SourceDocument, StoredFile, Tag, TagCategory,
 )
 from app.db.models.journal import JournalEntry as JE
 
@@ -159,6 +160,9 @@ def test_every_current_table_is_registered_as_the_story_says():
         CharacterSheetTemplate: reg.Membership,
         Job: reg.AlwaysGM, StoredFile: reg.DerivedFromSources, DerivedSource: reg.AlwaysGM,
         DataBackfill: reg.AlwaysGM,
+        # E0-WorldCore.2 (F3-world).
+        Entity: reg.Stored, EntityRelationship: reg.Stored, RelationshipType: reg.Membership,
+        EntityAlias: reg.Derived, QuestStep: reg.Derived, EntityMention: reg.Derived, EntityChange: reg.Derived,
     }
     assert {m: type(r) for m, r in REGISTRY.items()} == expect
     assert REGISTRY[Job].owner_field == "created_by"

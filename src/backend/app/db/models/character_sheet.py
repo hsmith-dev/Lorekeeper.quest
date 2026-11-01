@@ -1,5 +1,5 @@
 import uuid
-from sqlalchemy import String, ForeignKey
+from sqlalchemy import String, ForeignKey, ForeignKeyConstraint
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.base import Base, TimestampMixin, VISIBILITY_ENUM
@@ -40,6 +40,11 @@ class CharacterSheet(Base, TimestampMixin):
     stat block a player fills in and grows over a campaign."""
 
     __tablename__ = "character_sheets"
+    __table_args__ = (
+        # F3-world: ON DELETE SET NULL (pc_entity_id) in the migration; reflected as SET NULL.
+        ForeignKeyConstraint(["campaign_id", "pc_entity_id"], ["entities.campaign_id", "entities.id"],
+                             name="fk_character_sheets_pc_entity", ondelete="SET NULL"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     campaign_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("campaigns.id", ondelete="CASCADE"))
@@ -53,7 +58,7 @@ class CharacterSheet(Base, TimestampMixin):
     # isn't schema-validated server-side per-type, same trust level as any
     # other free-form JSON blob in this app (e.g. ChatSession.messages).
     data: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
-    # No FK yet: F3-world (E0-WorldCore.2) adds it.
+    # The PC Entity this sheet belongs to (same Campaign; F3-world FK).
     pc_entity_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     visibility: Mapped[Visibility] = mapped_column(
         VISIBILITY_ENUM, nullable=False, default=Visibility.PARTY, server_default=Visibility.PARTY.value)

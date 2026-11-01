@@ -55,6 +55,11 @@ ENUM_CHECKS: list[tuple[type[StrEnum], str, str]] = [
     (JobQueue, "jobs", "queue"),                       # E0-Jobs.1
     (JobErrorCode, "jobs", "error_code"),              # E0-Jobs.1
     (JobStatus, "data_backfills", "status"),           # E0-Jobs.1
+    (EntityType, "entities", "type"),                  # E0-WorldCore.2
+    (CharacterKind, "entities", "kind"),               # E0-WorldCore.2
+    (EntityChangeOp, "entity_changes", "op"),          # E0-WorldCore.2
+    (MentionOrigin, "entity_mentions", "origin"),      # E0-WorldCore.2
+    (MentionSourceField, "entity_mentions", "source_field"),  # E0-WorldCore.2
 ]
 
 # (StrEnum class, Postgres enum type name) for the AD-12 PG enums.
@@ -65,13 +70,7 @@ PG_ENUMS: list[tuple[type[StrEnum], str]] = [
 
 # StrEnums in app/domain/enums.py whose CHECK column does not exist yet, with
 # the story that adds it. Move an entry to ENUM_CHECKS in that story's PR.
-ENUM_CHECKS_PENDING: dict[type[StrEnum], str] = {
-    EntityType: "E0-WorldCore.2",          # entities.type
-    CharacterKind: "E0-WorldCore.2",       # entities.kind
-    EntityChangeOp: "E0-WorldCore.2",      # entity_changes.op
-    MentionOrigin: "E0-WorldCore.2",       # entity_mentions.origin
-    MentionSourceField: "E0-WorldCore.2",  # entity_mentions.source_field
-}
+ENUM_CHECKS_PENDING: dict[type[StrEnum], str] = {}
 
 # StrEnums that are the choices of a CHOICE attribute in an entities.attributes
 # JSONB key: no CHECK, ever; app.domain.entity_types.validate_attributes checks

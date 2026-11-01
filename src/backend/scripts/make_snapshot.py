@@ -79,8 +79,27 @@ _ENTRIES = [
 ]
 
 
+# (name, role, status, description, notes). A pc, an npc and a faction, so
+# the F3-world copy (03c0b504f1d1) maps each role; notes become gm_notes.
+_NPCS = [
+    ("Veyra", "pc", "alive", "A ranger from the eastern hills.", "Secretly the heir to Brackenford."),
+    ("The Millwright", "npc", "unknown", None, None),
+    ("The Reed Guild", "faction", "dead", "Smugglers who worked the ford.", "Broken up by the party."),
+]
+# (title, status, description, notes, updated_at). The completed Quest's
+# updated_at is its completed_at after F3-world.
+_QUESTS = [
+    ("Find the lost bell", "active", "The mill bell vanished a year ago.", None, TS),
+    ("Clear the ford", "completed", None, "The goblin chief escaped.", "'2026-01-08 18:30:00+00'"),
+]
+
+
 def _q(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
+
+
+def _q_or_null(value: str | None) -> str:
+    return "NULL" if value is None else _q(value)
 
 
 def seed_statements() -> list[str]:
@@ -134,21 +153,19 @@ def seed_statements() -> list[str]:
         "INSERT INTO journal_tags (journal_id, tag_id) VALUES "
         f"('{_ENTRIES[1][0]}', '00000000-0000-4000-8000-000000000601')"
     )
-    for i, (name, role, status) in enumerate(
-        [("Veyra", "pc", "alive"), ("The Millwright", "npc", "unknown")], start=1
-    ):
+    for i, (name, role, status, description, notes) in enumerate(_NPCS, start=1):
         stmts.append(
             "INSERT INTO npcs (id, user_id, campaign_id, name, role, status, description, "
             f"notes, created_at, updated_at) VALUES ('00000000-0000-4000-8000-00000000070{i}', "
-            f"'{OWNER}', '{CAMPAIGN}', {_q(name)}, '{role}', '{status}', NULL, NULL, {TS}, {TS})"
+            f"'{OWNER}', '{CAMPAIGN}', {_q(name)}, '{role}', '{status}', {_q_or_null(description)}, "
+            f"{_q_or_null(notes)}, {TS}, {TS})"
         )
-    for i, (title, status) in enumerate(
-        [("Find the lost bell", "active"), ("Clear the ford", "completed")], start=1
-    ):
+    for i, (title, status, description, notes, updated_at) in enumerate(_QUESTS, start=1):
         stmts.append(
             "INSERT INTO quests (id, user_id, campaign_id, title, description, status, notes, "
             f"created_at, updated_at) VALUES ('00000000-0000-4000-8000-00000000080{i}', "
-            f"'{OWNER}', '{CAMPAIGN}', {_q(title)}, NULL, '{status}', NULL, {TS}, {TS})"
+            f"'{OWNER}', '{CAMPAIGN}', {_q(title)}, {_q_or_null(description)}, '{status}', "
+            f"{_q_or_null(notes)}, {TS}, {updated_at})"
         )
     for i, (uid, campaign) in enumerate(
         [(OWNER, f"'{CAMPAIGN}'"), (MEMBER_A, f"'{CAMPAIGN}'"), (MEMBER_B, "NULL")], start=1
