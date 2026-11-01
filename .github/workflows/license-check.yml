@@ -10,29 +10,7 @@ name: Dependency licences
 on:
   push:
     branches: [main]
-    paths:
-      - "src/backend/requirements*.txt"
-      - "src/frontend/package.json"
-      - "src/frontend/package-lock.json"
-      - ".github/license-policy.toml"
-      - "scripts/check-licenses.py"
-      - "scripts/test_check_licenses.py"
-      - ".github/workflows/license-check.yml"
-      - "licenses/**"
-      - "src/backend/Dockerfile*"
-      - "nginx/**"
   pull_request:
-    paths:
-      - "src/backend/requirements*.txt"
-      - "src/frontend/package.json"
-      - "src/frontend/package-lock.json"
-      - ".github/license-policy.toml"
-      - "scripts/check-licenses.py"
-      - "scripts/test_check_licenses.py"
-      - ".github/workflows/license-check.yml"
-      - "licenses/**"
-      - "src/backend/Dockerfile*"
-      - "nginx/**"
   # Weekly: the shipped images float on their base tags (python:3.11-slim,
   # nginx:1.27-alpine), so a base-image rebuild can add an OS package nobody
   # registered without any change in this repo.

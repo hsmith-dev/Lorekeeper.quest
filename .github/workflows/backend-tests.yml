@@ -2,19 +2,12 @@ name: Backend tests
 
 # Runs the pytest suite in src/backend against a real pgvector-enabled
 # Postgres service container — nothing was running these on push before this
-# workflow existed. Scoped to paths that can actually affect the backend so
-# a frontend-only or docs-only change doesn't wait on a multi-minute spacy/
-# torch install for nothing.
+# workflow existed. No `paths:` filters (AD-21, NFR-4): a required check that
+# is skipped on some PRs is no gate, so every push and PR runs it.
 on:
   push:
     branches: [main]
-    paths:
-      - "src/backend/**"
-      - ".github/workflows/backend-tests.yml"
   pull_request:
-    paths:
-      - "src/backend/**"
-      - ".github/workflows/backend-tests.yml"
 
 jobs:
   test:
@@ -70,6 +63,21 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt -r requirements-dev.txt
+
+      # Two heads would make `alembic upgrade head` fail on every boot.
+      # tests/migrations/test_upgrade_snapshot.py checks this too; this step
+      # fails fast, before the spaCy model download and the test run. It reads
+      # only the scripts in migrations/versions (no database, no env.py).
+      - name: Single Alembic head
+        working-directory: src/backend
+        run: |
+          heads="$(python -m alembic heads)"
+          echo "$heads"
+          if [ "$(printf '%s\n' "$heads" | grep -c .)" -ne 1 ]; then
+            echo "::error::Expected exactly one Alembic head, found:"
+            echo "$heads"
+            exit 1
+          fi
 
       - name: Download spaCy model
         # tests/test_nlp.py loads this directly (see its load_model fixture)
