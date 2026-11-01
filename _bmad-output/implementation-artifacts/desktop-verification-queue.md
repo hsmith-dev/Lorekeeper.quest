@@ -111,3 +111,9 @@ Stories were merged on green GitHub CI while the desktop was offline (owner deci
 
 ## E0-Access.10 — Grant changes bump access_epoch and close open streams (PR #60)
 - [ ] Real client disconnect behind nginx: start `POST /api/chat/stream` with curl, kill curl mid-stream → LLM slot released (`ZCARD llm_gate:holders` → 0) and no watch connection left (`valkey-cli CLIENT LIST | grep sub=`)
+
+## E0-Jobs.8 — File service, access-checked file route, backups (PR #62)
+- [x] ~~nginx internal redirect~~ — checked on the desktop with nginx 1.27: app headers survive, direct `/_files/...` → 404, `..` → 404
+- [ ] `docker compose -f docker-compose.prod.yml config -q`; on a prod bring-up a stored file comes through nginx end to end and `/_files/<key>` returns 404
+- [ ] Throwaway stack: `scripts/backup-db.sh` then `scripts/restore-db.sh` — files archive written, Live audio excluded unless opted in, backend + worker restart
+- [ ] Known: dev compose has no nginx, so `GET /api/files/{id}` returns an empty body in dev

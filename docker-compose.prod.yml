@@ -157,6 +157,9 @@ services:
     volumes:
       - ./src/ml/data:/ml/data:ro
       - backend_logs:/var/log/lorekeeper
+      # Stored files (E0-Jobs.8, FILES_ROOT): written only by
+      # app/services/file_service.py, served by nginx (read-only there).
+      - files_data:/data/files
     depends_on:
       postgres:
         condition: service_healthy
@@ -233,6 +236,10 @@ services:
       backend:
         condition: service_healthy
     command: python -m app.jobs.worker
+    # Jobs write recap audio, Chronicles and map tiles here, and files.gc
+    # sweeps it (E0-Jobs.8).
+    volumes:
+      - files_data:/data/files
     # `docker stop` sends SIGTERM: RQ stops taking Jobs and lets the running
     # ones finish for up to this long, then SIGKILL. A Job killed here stays
     # `running` until the reaper (E0-Jobs.4) requeues it, ~60-90 s later.
@@ -301,6 +308,9 @@ services:
       # entries under live/ are symlinks into archive/, so archive needs to
       # be present too or the symlinks dangle inside the container.
       - /etc/letsencrypt:/etc/letsencrypt:ro
+      # Read-only: nginx only serves stored files, through the internal
+      # /_files/ location after the app's X-Accel-Redirect (E0-Jobs.8).
+      - files_data:/data/files:ro
     deploy:
       resources:
         limits:
@@ -319,3 +329,6 @@ volumes:
   nginx_logs:
   ollama_data:
   backend_logs:
+  # Stored files (E0-Jobs.8): backed up with the database by
+  # scripts/backup-db.sh (docs/DATABASE_BACKUPS.md).
+  files_data:

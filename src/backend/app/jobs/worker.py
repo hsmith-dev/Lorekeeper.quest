@@ -58,7 +58,8 @@ so a retry really waits its delay plus up to one interval),
 older than 60 s with no `next_run_at` (a lost push, a Valkey flush), or a
 dependent whose dependency ended by raw SQL or was deleted. RQ ids map back
 to Job ids (`outbox.job_id_of`). After each pass it runs the data_backfills
-runner (`backfill.run_backfills`). Its thread also drains the delayed set
+runner (`backfill.run_backfills`), then `files_gc.schedule_daily` (E0-Jobs.8:
+the files.gc Jobs, once per UTC day). Its thread also drains the delayed set
 every second (`Reaper.drain`), pushing deferred Jobs when they are due.
 
 `_perform` swaps the process-wide Valkey client (app.core.valkey_client) for
@@ -101,7 +102,7 @@ from app.core.valkey_client import set_valkey
 from app.db.models.job import ACTIVE_STATUSES, Job
 from app.db.models.user import User
 from app.domain.enums import JobErrorCode, JobQueue, JobStatus
-from app.jobs import admission, backfill, outbox
+from app.jobs import admission, backfill, files_gc, outbox
 from app.jobs.errors import TERMINAL_CODES
 from app.jobs.registry import JobKind, get_kind, load_kind_modules
 from app.services import llm_config_service
@@ -835,6 +836,11 @@ class Reaper:
                 await backfill.run_backfills(factory)
             except Exception:
                 logger.exception("data backfill runner failed")
+            try:
+                # The daily files.gc Jobs (E0-Jobs.8): once per UTC day.
+                await files_gc.schedule_daily(factory, self._redis())
+            except Exception:
+                logger.exception("files.gc scheduling failed")
             return result
         finally:
             await engine.dispose()

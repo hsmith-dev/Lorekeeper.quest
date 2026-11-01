@@ -62,6 +62,10 @@ class Settings(BaseSettings):
     # WORKER_PROCESSES: how many LorekeeperWorker processes `python -m
     # app.jobs.worker` runs in its RQ WorkerPool (AD-2: 2).
     worker_processes: int = Field(default=2, ge=1)
+    # FILES_ROOT: the `files_data` volume (E0-Jobs.8). app/services/
+    # file_service.py is the only code that reads or writes under it; nginx
+    # serves it read-only from its internal `/_files/` location.
+    files_root: str = "/data/files"
 
     # JWT
     secret_key: str

@@ -1,12 +1,20 @@
 import asyncio
+import atexit
 import os
 import re
+import shutil
+import tempfile
 from collections.abc import Mapping
 from pathlib import Path
 
 # Must be set before app.main (and so app.core.config) is imported.
 os.environ["ENVIRONMENT"] = "test"
 os.environ["JOBS_EAGER"] = "1"
+# The files_data volume (E0-Jobs.8): a temporary directory for the session,
+# removed at exit, never the real /data/files.
+_FILES_ROOT = tempfile.mkdtemp(prefix="lorekeeper-files-")
+os.environ["FILES_ROOT"] = _FILES_ROOT
+atexit.register(shutil.rmtree, _FILES_ROOT, ignore_errors=True)
 
 import pytest  # noqa: E402
 import pytest_asyncio  # noqa: E402
