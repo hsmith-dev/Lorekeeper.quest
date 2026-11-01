@@ -108,3 +108,6 @@ Stories were merged on green GitHub CI while the desktop was offline (owner deci
 - [x] ~~Crash recovery~~ — proved on the desktop with a real worker container: kill -9 mid-Job, expired retry, deleted dependency, raw-SQL-cancelled dependency, `docker stop` mid-run, Valkey FLUSHALL — all ended correctly, nothing stuck
 - [ ] Soak test: thousands of short Jobs to rule out a fork-while-threaded deadlock (reaper thread lives in the process that forks work horses); none seen in ~12 Jobs
 - [ ] Known timings: a retry waits its backoff + up to 30 s; a container killed outright takes ~60–90 s extra to recover (RQ's dead-worker record must expire)
+
+## E0-Access.10 — Grant changes bump access_epoch and close open streams (PR #60)
+- [ ] Real client disconnect behind nginx: start `POST /api/chat/stream` with curl, kill curl mid-stream → LLM slot released (`ZCARD llm_gate:holders` → 0) and no watch connection left (`valkey-cli CLIENT LIST | grep sub=`)
