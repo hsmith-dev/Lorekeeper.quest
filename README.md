@@ -135,6 +135,33 @@ Running Lorekeeper as a **paid service** (Stripe subscriptions — the integrati
 
 FastAPI backend · React frontend · PostgreSQL + pgvector (embeddings & retrieval) · Redis (caching) · Ollama (LLM serving) · nginx — one Docker Compose stack. See `docs/` for deployment, backups, and email setup, and [docs/RELEASE_NOTES.md](./docs/RELEASE_NOTES.md) for what changed in each release.
 
+## Running tests
+
+The backend suite (`src/backend`) runs against a real pgvector Postgres. Install the dependencies and the spaCy model first:
+
+```bash
+cd src/backend
+pip install -r requirements.txt -r requirements-dev.txt
+python -m spacy download en_core_web_trf
+```
+
+By default the suite connects to:
+
+```
+postgresql+asyncpg://lorekeeper:changeme@localhost:5432/lorekeeper_test
+```
+
+Point it somewhere else with `TEST_DATABASE_URL` (unset or empty means the default). The app's own engine, used by the account gate and `/api/health`, still connects through `DATABASE_URL`, so set that to the same URL. The app's settings also require `POSTGRES_PASSWORD` and `SECRET_KEY`:
+
+```bash
+# Postgres on another machine, e.g. over Tailscale
+URL=postgresql+asyncpg://lorekeeper:changeme@my-desktop.tailnet.ts.net:5432/lorekeeper_test
+TEST_DATABASE_URL=$URL DATABASE_URL=$URL POSTGRES_PASSWORD=changeme SECRET_KEY=test-only \
+  python -m pytest
+```
+
+The suite drops and recreates every table, so it refuses to start unless the database name ends in `_test` or `_test_<lane>` (lane = letters and digits). `lorekeeper` or `lorekeeper_testing` aborts the run before anything connects. The guard checks only the database name, not the host or credentials. When several worktrees share one Postgres, give each its own database, e.g. `lorekeeper_test_e0qa4`. Create it once as the `lorekeeper` role, for example with `psql` on the pgvector server: `CREATE DATABASE lorekeeper_test_e0qa4;`. The suite runs `CREATE EXTENSION IF NOT EXISTS vector` itself, so the `vector` extension must be available on that server (the `pgvector/pgvector` image has it).
+
 ## License
 
 **AGPL-3.0, dual-licensed.** Free to use, modify, and self-host — but if you modify Lorekeeper and make it available to others (including as a network service), the AGPL requires you to publish your complete modified source under the same license. For commercial use without those obligations — a paid hosted service, a proprietary product, unreleased modifications — a separate commercial license is required: see [COMMERCIAL-LICENSE.md](./COMMERCIAL-LICENSE.md).
