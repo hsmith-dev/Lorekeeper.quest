@@ -22,13 +22,13 @@ from fastapi import Depends, FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from app.access import (
-    ANON_VIEW, MEMBER_VIEW, MEMBERS, PREVIEW_HEADER, PUBLIC, REGISTRY, CampaignContext, NotFound, as_user,
+    ANON_VIEW, DERIVED_REGISTRY, MEMBER_VIEW, MEMBERS, PREVIEW_HEADER, PUBLIC, REGISTRY, CampaignContext, NotFound, as_user,
     audience_ctx, ctx_for, gm_fields, require_campaign, require_campaign_for, role_map, scoped_get, scoped_select,
-    scoped_select_multi,
+    register_derived, scoped_select_multi,
 )
 from app.db.models import (
-    CharacterSheet, ChatSession, JournalEntry, SessionPlan, ShorthandTerm, SourceChunk, SourceDocument,
-    TagCategory,
+    CharacterSheet, ChatSession, DerivedSource, Job, JournalEntry, SessionPlan, ShorthandTerm, SourceChunk,
+    SourceDocument, StoredFile, TagCategory,
 )
 from app.access.registry import AlwaysGM, scope_column
 from app.db.session import get_db
@@ -295,6 +295,109 @@ async def test_scoped_select_multi_derived_matches_scoped_select_per_campaign(db
         single = {r.id for r in (await db.execute(scoped_select(SourceChunk, ctx))).scalars().all()}
         assert per_campaign == single, (cid, roles[cid])
         assert single, f"no visible chunk in {roles[cid]} Campaign {cid}"
+
+
+@pytest.fixture
+def file_type():
+    saved = list(DERIVED_REGISTRY)
+    register_derived("scoped_test_file", ["journal"])
+    yield "scoped_test_file"
+    DERIVED_REGISTRY[:] = saved
+
+
+async def _journal(db, campaign_id, author, visibility="party", text="n") -> JournalEntry:
+    e = JournalEntry(user_id=author, campaign_id=campaign_id, shorthand="s", narrative=text,
+                     entry_hash=uuid.uuid4().hex, session_date=date(2026, 2, 1), visibility=visibility)
+    db.add(e)
+    await db.flush()
+    return e
+
+
+async def _sourced_file(db, campaign_id, kind, source: JournalEntry | None, storage_key=None, **kw) -> StoredFile:
+    f = StoredFile(id=uuid.uuid4(), campaign_id=campaign_id, kind=kind, storage_key=storage_key or uuid.uuid4().hex,
+                   content_type="application/pdf", size=1, sha256="0" * 64, **kw)
+    db.add(f)
+    await db.flush()
+    if source is not None:
+        db.add(DerivedSource(derived_type=kind, derived_id=f.id, ref_kind="journal", ref_id=source.id))
+        await db.flush()
+    return f
+
+
+async def test_scoped_select_multi_stored_files_match_scoped_select_per_campaign(db, scene, file_type):
+    """Player in A and C, GM of B: stored files (derived_from_sources) get one
+    branch per Campaign in scoped_select_multi, equal to scoped_select there."""
+    from tests.ev4.fixtures import create_user, seed_canary_campaign
+
+    ev4 = scene.ev4
+    cross = scene.actors["cross_gm_player"]
+    c_owner = await create_user(db, "c_owner")
+    c = await seed_canary_campaign(db, c_owner)
+    await ev4.make_member(role="player", campaign_id=c.campaign_id, user=await db.get(type(c_owner), cross.user_id))
+    a, b = ev4.a.campaign_id, ev4.b.campaign_id
+
+    # A party-sourced file in each Player Campaign, a GM-sourced one in A, and
+    # one in the GM Campaign B (a GM sees every file of their Campaign).
+    party_a = await _journal(db, a, ev4.a.owner_id)
+    await _sourced_file(db, a, file_type, party_a)
+    await _sourced_file(db, a, file_type, await _journal(db, a, ev4.a.owner_id, "gm"))
+    await _sourced_file(db, c.campaign_id, file_type, await _journal(db, c.campaign_id, c_owner.id))
+    await _sourced_file(db, b, file_type, party_a)
+
+    roles = await role_map(db, cross.user_id)
+    assert roles == {a: "player", b: "gm", c.campaign_id: "player"}
+    rows = (await db.execute(scoped_select_multi(StoredFile, roles))).scalars().all()
+    for cid in roles:
+        per_campaign = {r.id for r in rows if r.campaign_id == cid}
+        ctx = await ctx_for(db, cross.user_id, cid)
+        single = {r.id for r in (await db.execute(scoped_select(StoredFile, ctx))).scalars().all()}
+        assert per_campaign == single, (cid, roles[cid])
+        assert single, f"no visible file in {roles[cid]} Campaign {cid}"
+    a_rows = {r.id for r in rows if r.campaign_id == a}
+    assert len(a_rows) == 1, "the GM-sourced file in A must stay hidden from the Player"
+
+
+async def test_jobs_and_files_do_not_leak_to_player_or_anon(db, scene, file_type):
+    """GM-only canaries in jobs and stored_files: a GM-started Job, another
+    Player's Job, a stale file, a file with a GM-only source and a file owned
+    by another Player. The Player, member preview and anon ctxs see none of
+    them; the GM sees all; a plain party-sourced file stays visible."""
+    ev4 = scene.ev4
+    a, gm_id = ev4.a.campaign_id, ev4.a.owner_id
+    player_2 = scene.actors["player_2"]
+    canaries: set[str] = set()
+
+    def token(kind: str) -> str:
+        t = mint_canary(kind, a).token
+        canaries.add(t)
+        return t
+
+    for creator in (gm_id, player_2.user_id):
+        db.add(Job(campaign_id=a, kind="system.noop", queue="interactive", idempotency_key=uuid.uuid4().hex,
+                   ctx_kind="user", ctx_user_id=creator, created_by=creator, stage=token("XJOB")))
+    party = await _journal(db, a, gm_id)
+    gm_entry = await _journal(db, a, gm_id, "gm")
+    await _sourced_file(db, a, file_type, party, token("XFILE"), stale=True)
+    await _sourced_file(db, a, file_type, gm_entry, token("XFILE"))
+    await _sourced_file(db, a, file_type, party, token("XFILE"), audience_owner_id=player_2.user_id)
+    await _sourced_file(db, a, file_type, None, token("XFILE"))  # no sources at all
+    visible = _marker("FILE")
+    await _sourced_file(db, a, file_type, party, visible)
+
+    async def scan(ctx) -> str:
+        texts = []
+        for model in (Job, StoredFile):
+            for row in (await db.execute(scoped_select(model, ctx))).scalars().all():
+                texts.append(_row_text(model, row))
+        return "\n".join(texts)
+
+    for name in ("player", "preview", "anon_share"):
+        text = await scan(scene.ctxs[name])
+        assert not (set(find_canaries(text)) & canaries), name
+        assert visible in text, name
+    gm_text = await scan(scene.ctxs["gm_owner"])
+    assert canaries <= set(find_canaries(gm_text))
+    assert visible in gm_text
 
 
 async def test_audience_ctx_on_real_ctxs(db, scene):

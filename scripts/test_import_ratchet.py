@@ -149,10 +149,10 @@ def test_contract_shapes():
     cp = contracts()
     assert values(cp, "importlinter:contract:layers", "layers") == REQUIRED_LAYERS
     assert values(cp, "importlinter:contract:domain", "source_modules") == ["app.domain"]
-    assert {"app.api", "app.services", "app.access", "app.schemas", "app.db", "app.core", "app.clients",
-            "app.main"} <= set(values(cp, "importlinter:contract:domain", "forbidden_modules"))
+    assert {"app.api", "app.jobs", "app.services", "app.access", "app.schemas", "app.db", "app.core",
+            "app.clients", "app.main"} <= set(values(cp, "importlinter:contract:domain", "forbidden_modules"))
     assert values(cp, "importlinter:contract:clients", "source_modules") == ["app.clients"]
-    assert {"app.api", "app.services", "app.access", "app.schemas", "app.db", "app.main"} <= set(
+    assert {"app.api", "app.jobs", "app.services", "app.access", "app.schemas", "app.db", "app.main"} <= set(
         values(cp, "importlinter:contract:clients", "forbidden_modules"))
     models = "importlinter:contract:models"
     assert set(values(cp, models, "source_modules")) == FROZEN_MODEL_SOURCES
@@ -250,6 +250,8 @@ def test_layout_like_today_passes(tmp_path):
     ({"services/bad.py": "from app.jobs import errors\n"}, "AD-1 layers", "app.services.bad -> app.jobs"),
     ({"access/bad.py": "from app.jobs import errors\n"}, "AD-1 layers", "app.access.bad -> app.jobs"),
     ({"jobs/bad.py": "import torch\n"}, "AD-1 no model packages", "app.jobs.bad -> torch"),
+    ({"clients/bad.py": "from app.jobs import errors\n"}, "AD-1 app.clients imports only", "app.clients.bad -> app.jobs"),
+    ({"domain/bad.py": "from app.jobs import errors\n"}, "AD-1 app.domain imports no other app package", "app.domain.bad -> app.jobs"),
 ])
 def test_planted_violation_fails(tmp_path, plant, contract, offender):
     r = lint(tmp_path, plant)

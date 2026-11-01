@@ -549,8 +549,9 @@ def test_register_source_kind(monkeypatch):
     assert reg.SOURCE_KIND_MODELS["session_plan"] is SessionPlan
     with pytest.raises(ValueError, match="already"):
         reg.register_source_kind("journal", JournalEntry)
-    with pytest.raises(ValueError):
-        reg.register_source_kind("tag", Tag)  # reached through children: no single Audience
+    for ref_kind, derived_model in (("tag", Tag), ("chunk", SourceChunk), ("journal_tag", JournalTag)):
+        with pytest.raises(ValueError, match="derived"):  # its Audience needs its parents
+            reg.register_source_kind(ref_kind, derived_model)
     with pytest.raises(ValueError):
         reg.register_source_kind("file", StoredFile)
     with pytest.raises(ValueError):
@@ -559,3 +560,23 @@ def test_register_source_kind(monkeypatch):
         reg.register_source_kind("feedback", Feedback)
     with pytest.raises(TypeError):
         reg.register_source_kind("", JournalEntry)
+
+
+def test_file_source_model_gm_fields_narrow_in_sql_and_python(monkeypatch, file_types):
+    # A source model with its own GM-only field ("content", not an always-GM field).
+    monkeypatch.setitem(reg.REGISTRY, SessionPlan, reg.stored(gm_fields=("content",)))
+    monkeypatch.setattr(reg, "SOURCE_KIND_MODELS", dict(reg.SOURCE_KIND_MODELS))
+    reg.register_source_kind("plan", SessionPlan)
+    register_derived("test_plan_file", ["plan", "journal"])
+    f = _file("test_plan_file")
+    plan = SessionPlan(id=uuid.uuid4(), user_id=A, campaign_id=CID, title="t", content="c", visibility="party")
+    assert audience_of(f, parents=[_pair(f, plan, ref_kind="plan", ref_field="title")]) == PUBLIC
+    assert audience_of(f, parents=[_pair(f, plan, ref_kind="plan", ref_field="content")]) == GM_AUDIENCE
+    assert audience_of(f, parents=[_pair(f, plan, ref_kind="plan", ref_field="shorthand")]) == GM_AUDIENCE
+    # "content" is GM only for the plan branch, not for journal sources.
+    assert audience_of(f, parents=[_pair(f, _entry(), ref_field="content")]) == PUBLIC
+    sql = _sql(scoped_select(StoredFile, _player(CID, A)))
+    journal_branch = sql.split("ds.ref_kind = 'journal'")[1].split("ds.ref_kind = 'plan'")[0]
+    plan_branch = sql.split("ds.ref_kind = 'plan'")[1]
+    assert "ds.ref_field NOT IN ('gm_notes', 'shorthand', 'voice_notes')" in journal_branch
+    assert "ds.ref_field NOT IN ('content', 'gm_notes', 'shorthand', 'voice_notes')" in plan_branch

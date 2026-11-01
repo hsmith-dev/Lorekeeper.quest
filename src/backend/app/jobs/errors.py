@@ -17,10 +17,13 @@ from __future__ import annotations
 from app.core import errors as llm_errors
 from app.domain.enums import JobErrorCode
 
-# JobErrorCode(...) raises ValueError at import if a terminal LLM error's code is not a member.
+# JobErrorCode(...) raises ValueError at import if an LLM error's code is not a member.
 TERMINAL_CODES: frozenset[JobErrorCode] = frozenset(
     {JobErrorCode(cls.code) for cls in llm_errors.TERMINAL} | {JobErrorCode.PERMISSION_CHANGED}
 )
 RETRYABLE_CODES: frozenset[JobErrorCode] = frozenset(JobErrorCode) - TERMINAL_CODES
+for _cls in llm_errors.RETRYABLE:
+    JobErrorCode(_cls.code)
+del _cls
 
 __all__ = ["JobErrorCode", "RETRYABLE_CODES", "TERMINAL_CODES"]

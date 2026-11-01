@@ -102,13 +102,13 @@ EXPECTED_FK_ON_DELETE = {
     "data_backfills.job_id": "SET NULL",
     "feedback.campaign_id": "SET NULL",
     "feedback.user_id": "CASCADE",
-    "journal_entries.campaign_id": "CASCADE",
-    "journal_entries.user_id": "CASCADE",
-    "journal_tags.journal_id": "CASCADE",
     "jobs.campaign_id": "CASCADE",
     "jobs.created_by": "SET NULL",
     "jobs.ctx_user_id": "SET NULL",
     "jobs.depends_on_job_id": "SET NULL",
+    "journal_entries.campaign_id": "CASCADE",
+    "journal_entries.user_id": "CASCADE",
+    "journal_tags.journal_id": "CASCADE",
     "journal_tags.tag_id": "CASCADE",
     "model_evaluations.user_id": "CASCADE",
     "npcs.campaign_id": "CASCADE",
@@ -297,6 +297,7 @@ async def f2_tables_exist_empty_with_their_indexes(conn: AsyncConnection) -> Non
     assert "(campaign_id, status, created_at)" in defs["ix_jobs_campaign_status_created"]
     assert "(status, queue, created_at)" in defs["ix_jobs_status_queue_created"]
     assert "(ref_kind, ref_id)" in defs["ix_derived_sources_ref"]
+    assert "(derived_type, derived_id)" in defs["ix_derived_sources_derived"]
     assert await conn.scalar(sa.text(
         "SELECT column_default FROM information_schema.columns "
         "WHERE table_schema = current_schema() AND table_name = 'jobs' AND column_name = 'max_attempts'"

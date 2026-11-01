@@ -455,20 +455,26 @@ SOURCE_KIND_MODELS: dict[str, type] = {
 
 def register_source_kind(ref_kind: str, model: type) -> None:
     """Let `derived_sources.ref_kind = ref_kind` resolve to rows of `model`
-    (a registered model with an `id` key, whose Audience is one Audience)."""
+    (a registered, Campaign-scoped model with an `id` key whose Audience
+    needs no parents: stored, always_gm or membership)."""
     if not isinstance(ref_kind, str) or not ref_kind:
         raise TypeError(f"register_source_kind: ref_kind must be a non-empty str, got {ref_kind!r}")
     if ref_kind in SOURCE_KIND_MODELS:
         raise ValueError(f"register_source_kind: {ref_kind!r} is already registered")
     reg = registration(model)
-    if isinstance(reg, DerivedFromSources) or (
-            isinstance(reg, Derived) and isinstance(reg.derive_from[0], ReachedThrough)):
-        raise ValueError(f"register_source_kind: {model.__name__} has no single-row Audience")
-    if scope_column(model) is None and not isinstance(reg, Derived):
+    if isinstance(reg, (Derived, DerivedFromSources)):
+        raise ValueError(f"register_source_kind: {model.__name__} is derived; its Audience needs its parents")
+    if scope_column(model) is None:
         raise ValueError(f"register_source_kind: {model.__name__} has no Campaign scope")
     if not hasattr(model, "id"):
         raise ValueError(f"register_source_kind: {model.__name__} has no `id` column")
     SOURCE_KIND_MODELS[ref_kind] = model
+
+
+def _source_gm_fields(src: type) -> list[str]:
+    """The ref_field values that make a source GM: the always-GM fields plus
+    the source model's own gm_fields."""
+    return sorted(ALWAYS_GM_FIELDS | set(registration(src).gm_fields))
 
 
 def _derived_types() -> list[DerivedType]:
@@ -500,10 +506,9 @@ def _sources_clause(model: type, reg: DerivedFromSources, ctx: "CampaignContext"
         if scope is not None:
             where.append(scope == ctx.campaign_id)
         where.append(visible_clause(src, ctx))
-        branches.append(sa.and_(ds.ref_kind == ref_kind, kind.in_(allowed), sa.exists().where(*where)))
-    resolved = sa.or_(*branches) if branches else sa.false()
-    field_ok = sa.or_(ds.ref_field.is_(None), ds.ref_field.notin_(_gm_valued_fields()))
-    ok = sa.and_(field_ok, resolved)
+        field_ok = sa.or_(ds.ref_field.is_(None), ds.ref_field.notin_(_source_gm_fields(src)))
+        branches.append(sa.and_(ds.ref_kind == ref_kind, kind.in_(allowed), field_ok, sa.exists().where(*where)))
+    ok = sa.or_(*branches) if branches else sa.false()
 
     link = sa.and_(ds.derived_type == kind, ds.derived_id == _col(model, reg.id_field))
     return sa.and_(
@@ -529,7 +534,9 @@ def _source_row_audience(obj: Any, entry: DerivedType, source: Any, ref: Any) ->
     aud = audience_of(ref)
     if isinstance(aud, AnyOf):
         return None
-    return most_restrictive(aud, field_audience(source.ref_field))
+    if source.ref_field is not None and str(source.ref_field) in _source_gm_fields(src):
+        return GM_AUDIENCE
+    return aud
 
 
 def _sources_audience(obj: Any, reg: DerivedFromSources, parents: Any) -> Audience:

@@ -42,6 +42,7 @@ source_modules =
     app.domain
 forbidden_modules =
     app.api
+    app.jobs
     app.services
     app.access
     app.schemas
@@ -58,6 +59,7 @@ source_modules =
     app.clients
 forbidden_modules =
     app.api
+    app.jobs
     app.services
     app.access
     app.schemas
