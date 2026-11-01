@@ -316,6 +316,26 @@ async def test_captured_context_passes_and_catches(toy, monkeypatch):
         await assert_captured_context_clean(player, leaky_run)
 
 
+async def test_captured_context_with_real_capture_passes_clean_prompt(toy, fake_llm):
+    from app.services.llm_provider import LLMConfig, complete_messages
+
+    async def clean_run():
+        return await complete_messages([{"role": "user", "content": "who is Barnaby?"}], LLMConfig(provider="fake"))
+    assert (await assert_captured_context_clean(toy.actors["player"], clean_run)).startswith("[fake-llm ")
+
+
+async def test_captured_context_with_real_capture_catches_canary(toy, fake_llm):
+    from app.services.llm_provider import LLMConfig, complete_messages
+
+    async def leaky_run():
+        # The reply carries no canary: only the captured prompt does.
+        fake_llm.script(["Barnaby is the innkeeper."])
+        await complete_messages([{"role": "system", "content": f"GM notes: {toy.canary.token}"},
+                                 {"role": "user", "content": "who is Barnaby?"}], LLMConfig(provider="fake"))
+    with planted():
+        await assert_captured_context_clean(toy.actors["player"], leaky_run)
+
+
 async def test_captured_context_refuses_empty_capture(toy, monkeypatch):
     from contextlib import nullcontext
 
