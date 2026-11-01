@@ -44,8 +44,9 @@ entries:
     images: [backend, ml]
     notes: >-
       Base of src/backend/Dockerfile(.prod) and src/services/ml/Dockerfile.
-      Covers CPython only; the Debian packages inside the image (and apt
-      installs: build-essential, libpq-dev) are scanned by E0-QA.8 (dpkg-query + copyright files).
+      Covers CPython only; the Debian packages inside the image (and the
+      backend's apt installs: build-essential, libpq-dev; the ml image adds
+      none) are scanned by E0-QA.8 (dpkg-query + copyright files).
   - name: pgvector/pgvector
     kind: image
     version: "pg16"

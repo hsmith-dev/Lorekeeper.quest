@@ -52,6 +52,8 @@ services:
   # only from the backend over the internal `models` network, at ML_URL
   # (default http://ml:8000). Nothing calls it yet (E0-Platform.6).
   ml:
+    # Tagged so scripts/sidecar_smoke.sh ml finds it by its default name.
+    image: lorekeeper-ml:latest
     build:
       context: ./src/services/ml
       dockerfile: Dockerfile

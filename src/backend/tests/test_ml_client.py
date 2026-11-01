@@ -12,12 +12,13 @@ import pytest
 
 from app.clients.errors import ModelServiceError, ModelServiceUnavailable, is_retryable
 from app.clients.fakes import FakeMLClient, fake_entities, fake_vector
-from app.clients.ml import MLClient, NamedEntity, get_ml_client
+from app.clients.ml import MAX_EMBED_TEXTS, MLClient, NamedEntity, get_ml_client
 from app.core.config import Settings
 from app.domain.embedding import EMBEDDING_DIM, EMBEDDING_MODEL
 
 BACKEND = Path(__file__).resolve().parents[1]
 SIDECAR_CONFIG = BACKEND.parent / "services" / "ml" / "ml_service" / "config.py"
+SIDECAR_MODELS = SIDECAR_CONFIG.parent / "models.py"
 
 
 def _vec(i: int = 0) -> list[float]:
@@ -50,6 +51,23 @@ async def test_embed_posts_texts_and_returns_vectors():
     assert vectors == [_vec(0), _vec(1)]
     assert seen["url"] == "http://ml:8000/v1/embed"
     assert b'"texts":["a","b"]' in seen["body"].replace(b" ", b"")
+
+
+async def test_embed_splits_large_lists_at_the_sidecar_limit():
+    sizes = []
+
+    def handler(req: httpx.Request):
+        import json
+
+        texts = json.loads(req.content)["texts"]
+        sizes.append(len(texts))
+        return httpx.Response(200, json={"model": EMBEDDING_MODEL, "dim": EMBEDDING_DIM,
+                                         "vectors": [_vec(int(t)) for t in texts]})
+
+    texts = [str(i) for i in range(MAX_EMBED_TEXTS + 44)]
+    vectors = await _client(handler).embed(texts)
+    assert sizes == [MAX_EMBED_TEXTS, 44]
+    assert vectors == [_vec(i) for i in range(len(texts))]  # input order kept across batches
 
 
 async def test_embed_empty_skips_the_network():
@@ -136,6 +154,23 @@ async def test_non_json_is_contract_error():
     _assert_terminal(info)
 
 
+@pytest.mark.parametrize("body", [{}, {"models": [{}], "rss_bytes": 1},
+                                  {"models": [], "rss_bytes": "x"}, []])
+async def test_status_contract_breaks(body):
+    with pytest.raises(ModelServiceError) as info:
+        await _client(lambda req: httpx.Response(200, json=body)).status()
+    _assert_terminal(info)
+
+
+async def test_other_httpx_errors_stay_typed():
+    def handler(req):
+        raise httpx.DecodingError("bad gzip")
+
+    with pytest.raises(ModelServiceError) as info:
+        await _client(handler).ner("x")
+    _assert_terminal(info)
+
+
 @pytest.mark.parametrize("body", [{}, {"ents": [{"text": "x"}]}, {"ents": None}, []])
 async def test_ner_contract_breaks(body):
     with pytest.raises(ModelServiceError) as info:
@@ -198,8 +233,12 @@ async def test_fake_status():
 
 def _module_assignments(path: Path, name: str) -> list[ast.AST]:
     tree = ast.parse(path.read_text())
-    return [n for n in tree.body if isinstance(n, ast.Assign)
-            and any(isinstance(t, ast.Name) and t.id == name for t in n.targets)]
+    out = []
+    for n in tree.body:
+        targets = n.targets if isinstance(n, ast.Assign) else [n.target] if isinstance(n, ast.AnnAssign) else []
+        if any(isinstance(t, ast.Name) and t.id == name for t in targets):
+            out.append(n)
+    return out
 
 
 def test_embedding_constants_defined_once():
@@ -236,3 +275,17 @@ def test_sidecar_agrees_with_contract():
                     values[t.id] = node.value.value
     assert values["EMBED_MODEL_NAME"] == EMBEDDING_MODEL
     assert values["EMBED_DIM"] == EMBEDDING_DIM
+    assert values["MAX_EMBED_TEXTS"] == MAX_EMBED_TEXTS
+
+
+def _literal(path: Path, name: str):
+    (node,) = _module_assignments(path, name)
+    return ast.literal_eval(node.value)
+
+
+@pytest.mark.skipif(not SIDECAR_MODELS.exists(), reason="src/services/ml not in this checkout")
+@pytest.mark.parametrize("name", ["ITEM_PATTERNS", "QUEST_PATTERNS"])
+def test_sidecar_matcher_patterns_match_nlp_service(name):
+    """The sidecar copies these verbatim; tags would drift if either side changed alone."""
+    nlp_service = BACKEND / "app" / "services" / "nlp_service.py"
+    assert _literal(SIDECAR_MODELS, name) == _literal(nlp_service, name)

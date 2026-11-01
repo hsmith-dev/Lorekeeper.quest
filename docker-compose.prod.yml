@@ -205,6 +205,8 @@ services:
   # it yet (E0-Platform.6 switches the callers over). Weights are baked into
   # the image; it runs offline.
   ml:
+    # Tagged so scripts/sidecar_smoke.sh ml finds it by its default name.
+    image: lorekeeper-ml:latest
     build:
       context: ./src/services/ml
       dockerfile: Dockerfile

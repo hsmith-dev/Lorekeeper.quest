@@ -25,6 +25,10 @@ from app.clients.errors import ModelServiceError, ModelServiceUnavailable
 from app.core.config import Settings, get_settings
 from app.domain.embedding import EMBEDDING_DIM, EMBEDDING_MODEL
 
+# The sidecar rejects larger /v1/embed bodies with 422 (ml_service/config.py
+# MAX_EMBED_TEXTS); embed() splits longer lists into batches of this size.
+MAX_EMBED_TEXTS = 256
+
 
 @dataclass(frozen=True)
 class NamedEntity:
@@ -77,6 +81,8 @@ class MLClient:
             raise ModelServiceUnavailable(f"ml sidecar timed out after {self.timeout_s}s on {path}") from exc
         except httpx.TransportError as exc:
             raise ModelServiceUnavailable(f"ml sidecar unreachable at {self.base_url}: {exc!r}") from exc
+        except httpx.HTTPError as exc:  # DecodingError, TooManyRedirects, ...: still typed
+            raise ModelServiceError(f"ml sidecar request to {path} failed: {exc!r}") from exc
 
         if resp.status_code >= 500:
             raise ModelServiceUnavailable(
@@ -94,9 +100,15 @@ class MLClient:
                                     status_code=resp.status_code) from exc
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
-        if not texts:
-            return []
-        body = await self._request("POST", "/v1/embed", {"texts": list(texts)})
+        """Vectors in input order; batches of MAX_EMBED_TEXTS per request."""
+        texts = list(texts)
+        vectors: list[list[float]] = []
+        for i in range(0, len(texts), MAX_EMBED_TEXTS):
+            vectors.extend(await self._embed_batch(texts[i:i + MAX_EMBED_TEXTS]))
+        return vectors
+
+    async def _embed_batch(self, texts: list[str]) -> list[list[float]]:
+        body = await self._request("POST", "/v1/embed", {"texts": texts})
         if not isinstance(body, dict):
             raise ModelServiceError("ml /v1/embed: response is not an object")
         if body.get("model") != EMBEDDING_MODEL:

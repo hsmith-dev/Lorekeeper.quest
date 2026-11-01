@@ -10,7 +10,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from ml_service.app import create_app, rss_bytes
-from ml_service.config import MAX_EMBED_TEXTS, Config, load_config
+from ml_service.config import MAX_EMBED_TEXTS, MAX_NER_CHARS, Config, load_config
 
 PKG = Path(__file__).resolve().parents[1] / "ml_service"
 
@@ -90,6 +90,11 @@ def test_ner_offsets_and_order(client):
 
 def test_ner_bad_body(client):
     assert client.post("/v1/ner", json={}).status_code == 422
+
+
+def test_ner_length_limit(client):
+    assert client.post("/v1/ner", json={"text": "a" * MAX_NER_CHARS}).status_code == 200
+    assert client.post("/v1/ner", json={"text": "a" * (MAX_NER_CHARS + 1)}).status_code == 422
 
 
 def test_status(client):

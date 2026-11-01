@@ -3,7 +3,7 @@
   GET  /healthz    200 once every model is loaded, else 503 (Docker healthcheck)
   GET  /v1/status  {models: [{name, kind, state}], rss_bytes}
   POST /v1/embed   {texts: [str] (<= 256)} -> {model, dim, vectors}
-  POST /v1/ner     {text: str} -> {ents: [{text, label, start, end}]}
+  POST /v1/ner     {text: str (<= 100k chars)} -> {ents: [{text, label, start, end}]}
 
 Models load in the lifespan, before uvicorn accepts connections, so a
 running container is a loaded one. Routes are plain `def`, so FastAPI runs
@@ -23,7 +23,7 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from ml_service.config import MAX_EMBED_TEXTS, Config, load_config
+from ml_service.config import MAX_EMBED_TEXTS, MAX_NER_CHARS, Config, load_config
 from ml_service.models import (
     Embedder,
     ModelSlot,
@@ -44,7 +44,7 @@ class EmbedResponse(BaseModel):
 
 
 class NerRequest(BaseModel):
-    text: str
+    text: str = Field(..., max_length=MAX_NER_CHARS)
 
 
 class EntityOut(BaseModel):

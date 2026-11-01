@@ -21,6 +21,10 @@ NER_MODEL_NAME = "en_core_web_trf"
 
 # Upper bound on texts per /v1/embed request (larger bodies get a 422).
 MAX_EMBED_TEXTS = 256
+# Upper bound on /v1/ner text length (422 above it). Journal entries and NPC
+# notes are far shorter; it keeps one request from holding the NER lock for
+# minutes or tripping spaCy's own max_length as a 500.
+MAX_NER_CHARS = 100_000
 
 
 @dataclass(frozen=True)
