@@ -8,9 +8,9 @@ from app.db.models.user import User
 # user without importing app.api. Re-exported as the same objects:
 # `app.dependency_overrides[get_current_user]` works with either import.
 from app.access.identity import bearer_scheme, get_current_user  # noqa: F401
-from app.access.context import ctx_for
+from app.access.context import ctx_for, role_map
 from app.access.registry import scoped_get
-from app.access.policy import not_found
+from app.access.policy import GM, not_found
 
 
 async def require_active_account(user: User = Depends(get_current_user)) -> User:
@@ -73,14 +73,19 @@ def is_party_read(route) -> bool:
     return bool(extra.get(PARTY_READ_KEY))
 
 
-async def account_gate(request: Request, user: User = Depends(get_current_user)) -> User:
+async def account_gate(request: Request, user: User = Depends(get_current_user),
+                       db: AsyncSession = Depends(get_db)) -> User:
     """Router-level dependency for feature routers: `require_active_account`
     unless the matched route carries `openapi_extra=PARTY_READ` (and is a safe
-    method, so a mis-marked write still pays). Fail-closed: no matched route,
-    or no marker, means gated."""
+    method, so a mis-marked write still pays) AND the user is GM in no
+    Campaign. The exemption is for Players only: an unpaid Owner or Co-GM
+    would otherwise read full GM projections for free. Fail-closed: no
+    matched route, or no marker, means gated."""
     route = request.scope.get("route")
-    if route is not None and is_party_read(route) and request.method.upper() in ("GET", "HEAD", "OPTIONS"):
-        return user
+    if (route is not None and is_party_read(route) and request.method.upper() in ("GET", "HEAD", "OPTIONS")
+            and not user.access_granted):
+        if GM not in (await role_map(db, user)).values():
+            return user
     return await require_active_account(user)
 
 

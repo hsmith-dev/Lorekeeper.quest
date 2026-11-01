@@ -255,6 +255,7 @@ async def create_share_token(
         token=secrets.token_urlsafe(24),
         kind=body.kind,
     )
+    can_write(ctx, token)
     db.add(token)
     await db.commit()
     await db.refresh(token)

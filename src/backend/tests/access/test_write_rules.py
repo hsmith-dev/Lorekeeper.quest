@@ -11,6 +11,7 @@ write rules are enforced.
 """
 from __future__ import annotations
 
+import inspect
 import secrets
 import uuid
 from types import SimpleNamespace
@@ -85,7 +86,8 @@ def _cases():
         ("co_gm: sheet", CO_GM_CTX, _sheet(), True),
         ("co_gm: npc", CO_GM_CTX, _npc(), True),
         ("owner: the Campaign", GM_CTX, Campaign(id=A, user_id=GM_USER, name="A"), True),
-        ("owner: a tag (scoped through its entry)", GM_CTX, Tag(name="Bree"), True),
+        # A global Tag (shared across Campaigns) is unscoped: refused (fail closed).
+        ("owner: a global tag", GM_CTX, Tag(name="Bree"), False),
         ("owner: a journal_tags link", GM_CTX, JournalTag(journal_id=own.id, tag_id=uuid.uuid4()), True),
         ("system", GM_CTX.as_system(SystemReason.ENTRY_DELETED), _entry(author=GM_USER, kind="gm"), True),
         # ... never a row of another Campaign.
@@ -165,8 +167,10 @@ def llm_spy(monkeypatch):
     app.dependency_overrides.pop(get_user_llm_config, None)
 
 
-def _gm_routes(a: str, npc: str, quest: str):
-    """(method, url in A, url or body for a missing Campaign / row, json in A)."""
+def _gm_routes():
+    """(method, url template with {cid} / {npc} / {quest}, payload): payload
+    is a callable taking the Campaign id (a body naming it), a fixed JSON
+    body, or None."""
     def body(**kw):
         return lambda cid: {**kw, "campaign_id": cid}
 
@@ -209,7 +213,7 @@ async def test_player_gm_routes_are_404_before_llm_config_or_meter(client, db, e
                 for m in counted]
 
     before = await counts()
-    for method, url, payload in _gm_routes(a, npc, quest):
+    for method, url, payload in _gm_routes():
         def call(cid, row_npc=npc, row_quest=quest):
             target = url.format(cid=cid, npc=row_npc, quest=row_quest)
             kw = {}
@@ -337,22 +341,23 @@ def _gate_request(method: str, route) -> Request:
     ("GET", None, True),              # not marked: gated (fail-closed)
     ("GET", {"x-other": True}, True),
 ])
-async def test_account_gate_unit(gated, method, extra, gated_through):
-    unpaid = SimpleNamespace(access_granted=False)
+async def test_account_gate_unit(db, gated, method, extra, gated_through):
+    # A user with no Campaign is GM nowhere, so only the route decides.
+    unpaid = SimpleNamespace(id=uuid.uuid4(), access_granted=False)
     route = SimpleNamespace(openapi_extra=extra)
     if gated_through:
         with pytest.raises(HTTPException) as exc:
-            await account_gate(_gate_request(method, route), unpaid)
+            await account_gate(_gate_request(method, route), unpaid, db)
         assert exc.value.status_code == 402 and exc.value.headers == {"X-Gate-Reason": "account-gate"}
     else:
-        assert await account_gate(_gate_request(method, route), unpaid) is unpaid
-    paid = SimpleNamespace(access_granted=True)
-    assert await account_gate(_gate_request(method, route), paid) is paid
+        assert await account_gate(_gate_request(method, route), unpaid, db) is unpaid
+    paid = SimpleNamespace(id=uuid.uuid4(), access_granted=True)
+    assert await account_gate(_gate_request(method, route), paid, db) is paid
 
 
-async def test_account_gate_without_a_matched_route_is_gated(gated):
+async def test_account_gate_without_a_matched_route_is_gated(db, gated):
     with pytest.raises(HTTPException) as exc:
-        await account_gate(_gate_request("GET", None), SimpleNamespace(access_granted=False))
+        await account_gate(_gate_request("GET", None), SimpleNamespace(id=uuid.uuid4(), access_granted=False), db)
     assert exc.value.status_code == 402
 
 
@@ -388,6 +393,9 @@ def test_party_read_routes_are_safe_reads_with_no_hosted_ai():
     for key, route in marked.items():
         assert key.split()[0] in ("GET", "HEAD"), key
         assert get_user_llm_config not in set(_deps(route.dependant)), f"{key} resolves an LLM config"
+        # Several AI routes resolve the config inline, not as a dependency.
+        source = inspect.getsource(inspect.unwrap(route.endpoint))
+        assert "get_user_llm_config" not in source and "llm_config_service" not in source, key
 
 
 async def _unpaid_player(db, ev4):
@@ -411,9 +419,29 @@ async def test_unpaid_player_reads_the_party_but_not_ai_routes(client, db, ev4, 
                       ("/api/journals/generate-draft", {"notes": "n", "campaign_id": str(a)})):
         r = await client.post(url, json=body, headers=headers)
         assert r.status_code == 402 and r.headers.get("X-Gate-Reason") == "account-gate", f"{url}: {r.text}"
-    # A non-Party read stays gated too (export is GM-only, but the gate answers first).
+    # A non-Party read stays gated too (analytics is GM-only, but the gate answers first).
     r = await client.get(f"/api/campaigns/{a}/analytics", headers=headers)
     assert r.status_code == 402
+
+
+async def test_unpaid_gm_is_gated_on_party_reads(client, db, ev4, gated):
+    """The PARTY_READ exemption is for Players only: an unpaid Owner, and an
+    unpaid user who is Player in A but Owner of another Campaign, both get
+    the 402 on a Party read (they would read GM projections for free)."""
+    from app.db.models.campaign import Genre
+    from app.db.models.user import User
+
+    owner = await db.get(User, ev4.a.owner_id)
+    owner.access_granted = False
+    await db.commit()
+    r = await client.get(f"/api/journals/?campaign_id={ev4.a.campaign_id}", headers=bearer(owner))
+    assert r.status_code == 402 and r.headers.get("X-Gate-Reason") == "account-gate", r.text
+
+    mixed = await _unpaid_player(db, ev4)
+    db.add(Campaign(id=uuid.uuid4(), user_id=mixed.id, name="Mine", genre=Genre.fantasy))
+    await db.commit()
+    r = await client.get(f"/api/journals/?campaign_id={ev4.a.campaign_id}", headers=bearer(mixed))
+    assert r.status_code == 402 and r.headers.get("X-Gate-Reason") == "account-gate", r.text
 
 
 # ── Join: a Player link needs no paid account ──────────────────────────────
