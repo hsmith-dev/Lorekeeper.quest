@@ -66,7 +66,8 @@ export function useRoleFor(campaign: Campaign | null | undefined): CampaignRoleS
 /** Force the Player view while previewing. */
 export function effectiveRoleState(real: CampaignRoleState, previewing: boolean): EffectiveRoleState {
   if (!previewing) return { ...real, previewing: false };
-  return { role: "player", isOwner: real.isOwner, isGm: false, isLoading: real.isLoading, previewing: true };
+  // Owner-gated controls must hide too: the preview shows a Player's screen.
+  return { role: "player", isOwner: false, isGm: false, isLoading: real.isLoading, previewing: true };
 }
 
 /**

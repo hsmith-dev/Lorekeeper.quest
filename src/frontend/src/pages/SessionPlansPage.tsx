@@ -256,7 +256,7 @@ export function SessionPlansPage() {
         </div>
       )}
 
-      {selected && <CampaignSessionPlans campaign={selected} />}
+      {selected && <CampaignSessionPlans key={selected.id} campaign={selected} />}
     </div>
   );
 }

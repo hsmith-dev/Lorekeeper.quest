@@ -274,7 +274,7 @@ export function SharingPage() {
             </div>
           )}
 
-          {selected && <CampaignSharing campaign={selected} />}
+          {selected && <CampaignSharing key={selected.id} campaign={selected} />}
         </>
       )}
 

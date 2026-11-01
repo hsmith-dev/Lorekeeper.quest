@@ -61,7 +61,9 @@ export function readStoredCampaignId(
   userId: string | null,
   storage: StorageLike | null = defaultStorage(),
 ): string | null {
-  if (userId === null || storage === null) return memory.get(userId) ?? null;
+  // A value set in this page load wins, also when setItem threw but getItem
+  // still returns an older id.
+  if (memory.has(userId) || userId === null || storage === null) return memory.get(userId) ?? null;
   try {
     const raw = storage.getItem(currentCampaignKey(userId));
     return raw && raw.length > 0 ? raw : null;
@@ -126,6 +128,11 @@ export interface ResolveInput {
   listUpdatedAt: number;
   storedId: string | null;
   picked: PickedCampaign | null;
+  /**
+   * The last campaign resolved as current. Keeps it current while the list is
+   * briefly gone (preview enter/exit resets the query cache).
+   */
+  lastKnown?: Campaign | null;
 }
 
 export interface Resolution {
@@ -152,6 +159,7 @@ export function resolveCurrentCampaign({
   listUpdatedAt,
   storedId,
   picked,
+  lastKnown = null,
 }: ResolveInput): Resolution {
   const list = campaigns ?? [];
   if (storedId !== null) {
@@ -161,13 +169,78 @@ export function resolveCurrentCampaign({
       return { current: picked.campaign, persistId: storedId, lostAccess: false };
     }
   }
-  if (!listReady) return { current: null, persistId: storedId, lostAccess: false };
+  if (!listReady) {
+    const current = lastKnown !== null && lastKnown.id === storedId ? lastKnown : null;
+    return { current, persistId: storedId, lostAccess: false };
+  }
   const fallback = list[0] ?? null;
   return {
     current: fallback,
     persistId: fallback?.id ?? null,
     lostAccess: storedId !== null && fallback !== null,
   };
+}
+
+// ─── Side effects (called by the provider; testable without React) ─────────
+
+/** The slice of usePreview() the helpers need. */
+export interface PreviewHandle {
+  active: boolean;
+  campaignId: string | null;
+  exit: () => void;
+}
+
+/** Leave a preview of any campaign other than `campaignId`. */
+function exitPreviewUnless(preview: PreviewHandle, campaignId: string | null): void {
+  if (preview.active && preview.campaignId !== campaignId) preview.exit();
+}
+
+/**
+ * Apply a resolution that changed the stored id (fallback or clear): persist
+ * it, toast once per lost campaign, and leave a preview of the lost campaign.
+ * Returns false (and does nothing) when the stored id is already right.
+ */
+export function settleResolution({
+  userId,
+  resolution,
+  storedId,
+  toastedFor,
+  preview,
+  storage,
+}: {
+  userId: string | null;
+  resolution: Resolution;
+  storedId: string | null;
+  /** The lost id already toasted (a ref, so StrictMode reruns don't repeat it). */
+  toastedFor: { current: string | null };
+  preview: PreviewHandle;
+  storage?: StorageLike | null;
+}): boolean {
+  const { persistId, lostAccess, current } = resolution;
+  if (persistId === storedId) return false;
+  writeStoredCampaignId(userId, persistId, storage);
+  if (lostAccess && current && storedId !== null && toastedFor.current !== storedId) {
+    toastedFor.current = storedId;
+    toast({ text: lostAccessMessage(current) });
+  }
+  exitPreviewUnless(preview, persistId);
+  return true;
+}
+
+/** A user pick: remember it and leave a preview of any other campaign. */
+export function applyPick({
+  userId,
+  campaign,
+  preview,
+  storage,
+}: {
+  userId: string | null;
+  campaign: Campaign;
+  preview: PreviewHandle;
+  storage?: StorageLike | null;
+}): void {
+  writeStoredCampaignId(userId, campaign.id, storage);
+  exitPreviewUnless(preview, campaign.id);
 }
 
 // ─── Provider ────────────────────────────────────────────────────────────────
@@ -213,9 +286,11 @@ export function CurrentCampaignProvider({ children }: { children: ReactNode }) {
 
   // Another user on this device: read only their key, and don't trust a list
   // cached for the previous user.
+  const lastKnown = useRef<Campaign | null>(null);
   let active = slot;
   if (slot.userId !== userId) {
     active = { userId, storedId: readStoredCampaignId(userId), picked: null, since: Date.now() };
+    lastKnown.current = null;
     setSlot(active);
   }
 
@@ -226,41 +301,44 @@ export function CurrentCampaignProvider({ children }: { children: ReactNode }) {
     if (userId !== null) void queryClient.invalidateQueries({ queryKey: ["campaigns"] });
   }, [userId, queryClient]);
 
-  const listReady = loggedIn && query.isSuccess && query.dataUpdatedAt >= active.since;
+  // A list cached for a previous user is not used, not even to look up the id.
+  const fresh = query.dataUpdatedAt >= active.since;
+  const campaigns = fresh ? query.data : undefined;
+  const listReady = loggedIn && query.isSuccess && fresh;
   const resolution = resolveCurrentCampaign({
-    campaigns: query.data,
+    campaigns,
     listReady,
     listUpdatedAt: query.dataUpdatedAt,
     storedId: active.storedId,
     picked: active.picked,
+    lastKnown: lastKnown.current,
   });
+  if (resolution.current) lastKnown.current = resolution.current;
 
   // Persist fallbacks and clears; toast once per lost campaign.
   const toastedFor = useRef<string | null>(null);
-  const { persistId, lostAccess, current } = resolution;
+  const { persistId } = resolution;
   useEffect(() => {
-    if (persistId === active.storedId) return;
-    const lostId = active.storedId;
-    writeStoredCampaignId(userId, persistId);
-    setSlot((s) => (s.userId === userId ? { ...s, storedId: persistId, picked: null } : s));
-    if (lostAccess && current && lostId !== null && toastedFor.current !== lostId) {
-      toastedFor.current = lostId;
-      toast({ text: lostAccessMessage(current) });
-    }
-  }, [persistId, lostAccess, current, active.storedId, userId]);
+    const changed = settleResolution({
+      userId,
+      resolution,
+      storedId: active.storedId,
+      toastedFor,
+      preview,
+    });
+    if (changed) setSlot((s) => (s.userId === userId ? { ...s, storedId: persistId, picked: null } : s));
+    // `resolution` is rebuilt every render; persistId and storedId decide.
+  }, [persistId, active.storedId, userId, preview]);
 
-  const { active: previewActive, campaignId: previewId, exit: exitPreview } = preview;
   const setCurrent = useCallback(
     (campaign: Campaign) => {
-      writeStoredCampaignId(userId, campaign.id);
+      applyPick({ userId, campaign, preview });
       setSlot((s) => ({ ...s, storedId: campaign.id, picked: { campaign, at: Date.now() } }));
-      // Previewing another campaign as a Player makes no sense once you leave it.
-      if (previewActive && previewId !== campaign.id) exitPreview();
     },
-    [userId, previewActive, previewId, exitPreview],
+    [userId, preview],
   );
 
-  const campaigns = query.data;
+  const { current } = resolution;
   const value = useMemo<CurrentCampaignState>(
     () => ({ current, campaigns: campaigns ?? [], ready: listReady, setCurrent }),
     [current, campaigns, listReady, setCurrent],

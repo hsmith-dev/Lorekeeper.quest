@@ -207,8 +207,12 @@ export function CampaignSwitcher({ className }: { className?: string }) {
           className="absolute right-0 top-full z-50 mt-2 max-h-[75vh] w-[min(18rem,calc(100vw-2rem))] overflow-y-auto rounded-md border border-border bg-popover p-1 text-popover-foreground shadow-xl sm:left-0 sm:right-auto"
         >
           {campaigns.length === 0 && (
-            <p className="px-2 py-2 text-sm text-muted-foreground">You don't have a campaign yet.</p>
+            <p className="px-2 py-2 text-sm text-muted-foreground">
+              {ready ? "You don't have a campaign yet." : "Loading campaigns…"}
+            </p>
           )}
+          {campaigns.length > 0 && (
+          <div role="group" aria-label="Campaigns">
           {campaigns.map((c, index) => {
             const checked = c.id === current?.id;
             return (
@@ -233,8 +237,10 @@ export function CampaignSwitcher({ className }: { className?: string }) {
               </button>
             );
           })}
+          </div>
+          )}
 
-          <div role="separator" className="my-1 h-px bg-border" />
+          {campaigns.length > 0 && <div role="separator" className="my-1 h-px bg-border" />}
 
           {canPreview && current && (
             <button

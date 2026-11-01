@@ -262,7 +262,7 @@ export function TimelinePage() {
         </div>
       )}
 
-      {selected && <CampaignTimeline campaign={selected} />}
+      {selected && <CampaignTimeline key={selected.id} campaign={selected} />}
     </div>
   );
 }

@@ -15,7 +15,7 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { beforeEach, describe, test } from "node:test";
+import { afterEach, beforeEach, describe, test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { build } from "esbuild";
@@ -89,7 +89,7 @@ const { CampaignSwitcher, switcherMenu, CREATE_CAMPAIGN_HREF } = await load("swi
 const { CampaignSelector } = await load("selector");
 const { NavBar } = await load("navbar");
 const store = await load("preview");
-const { getToastState } = await load("toast");
+const { getToastState, dismissToast } = await load("toast");
 
 const decode = (s) =>
   s
@@ -174,6 +174,19 @@ describe("resolveCurrentCampaign (I/O matrix)", () => {
     }
     // Stale data that still lists the stored campaign keeps it current.
     assert.equal(resolveWith({ listReady: false, storedId: "b" }).current, B);
+    // Preview enter/exit resets the cache: the last resolved campaign stays.
+    assert.deepEqual(resolveWith({ campaigns: undefined, listReady: false, storedId: "b", lastKnown: B }), {
+      current: B,
+      persistId: "b",
+      lostAccess: false,
+    });
+    assert.equal(
+      resolveWith({ campaigns: undefined, listReady: false, storedId: "x", lastKnown: B }).current,
+      null,
+      "lastKnown only stands in for the stored id",
+    );
+    // Once the list is back, it decides (no stale lastKnown).
+    assert.equal(resolveWith({ campaigns: [A], storedId: "b", lastKnown: B }).current, A);
     assert.deepEqual(resolveWith({ campaigns: undefined, listReady: false }), {
       current: null,
       persistId: null,
@@ -185,15 +198,15 @@ describe("resolveCurrentCampaign (I/O matrix)", () => {
 describe("per-user storage", () => {
   test("key shape and per-user isolation", () => {
     assert.equal(cc.currentCampaignKey("u1"), "lk-current-campaign:u1");
-    cc.writeStoredCampaignId("u1", "a", local);
-    cc.writeStoredCampaignId("u2", "b", local);
-    assert.equal(local.getItem("lk-current-campaign:u1"), "a");
-    assert.equal(cc.readStoredCampaignId("u1", local), "a");
-    assert.equal(cc.readStoredCampaignId("u2", local), "b");
-    assert.equal(cc.readStoredCampaignId("u3", local), null);
-    cc.writeStoredCampaignId("u1", null, local);
-    assert.equal(local.getItem("lk-current-campaign:u1"), null);
-    assert.equal(cc.readStoredCampaignId("u1", local), null);
+    cc.writeStoredCampaignId("s1", "a", local);
+    cc.writeStoredCampaignId("s2", "b", local);
+    assert.equal(local.getItem("lk-current-campaign:s1"), "a");
+    assert.equal(cc.readStoredCampaignId("s1", local), "a");
+    assert.equal(cc.readStoredCampaignId("s2", local), "b");
+    assert.equal(cc.readStoredCampaignId("s3", local), null);
+    cc.writeStoredCampaignId("s1", null, local);
+    assert.equal(local.getItem("lk-current-campaign:s1"), null);
+    assert.equal(cc.readStoredCampaignId("s1", local), null);
   });
 
   test("storage that throws: memory only, no crash", () => {
@@ -223,6 +236,97 @@ describe("per-user storage", () => {
   });
 });
 
+describe("per-user storage: memory wins in this page load", () => {
+  test("setItem throws but getItem returns an older id -> the new id", () => {
+    const stale = {
+      getItem: (k) => (k === "lk-current-campaign:m1" ? "old" : null),
+      setItem: () => {
+        throw new Error("quota");
+      },
+      removeItem: () => {},
+    };
+    assert.equal(cc.readStoredCampaignId("m1", stale), "old", "nothing set yet: storage");
+    cc.writeStoredCampaignId("m1", "new", stale);
+    assert.equal(cc.readStoredCampaignId("m1", stale), "new");
+  });
+
+  test("a key written elsewhere (earlier page load) is read from storage", () => {
+    local.setItem(cc.currentCampaignKey("m2"), "z");
+    assert.equal(cc.readStoredCampaignId("m2", local), "z");
+  });
+});
+
+describe("settleResolution / applyPick (provider side effects)", () => {
+  // Real toast store and real preview store; a fake storage per test.
+  const toastTexts = () => getToastState().toasts.map((t) => t.text);
+  const clearToasts = () => {
+    for (const t of getToastState().toasts) dismissToast(t.id);
+  };
+  const previewHandle = () => ({
+    active: store.isPreviewActive(),
+    campaignId: store.getPreviewCampaignId(),
+    exit: () => store.setPreviewCampaignId(null),
+  });
+  const settle = (over) => {
+    const storage = over.storage;
+    return cc.settleResolution({ userId: over.userId, storedId: over.storedId, resolution: over.resolution, toastedFor: over.toastedFor ?? { current: null }, preview: previewHandle(), storage });
+  };
+
+  beforeEach(clearToasts);
+  afterEach(clearToasts);
+
+  test("(a) first-load fallback id persisted, no toast", () => {
+    const storage = new FakeStorage();
+    const resolution = resolveWith({});
+    assert.equal(settle({ userId: "e1", storedId: null, resolution, storage }), true);
+    assert.equal(storage.getItem("lk-current-campaign:e1"), "a");
+    assert.deepEqual(toastTexts(), []);
+    assert.equal(settle({ userId: "e1", storedId: "a", resolution, storage }), false, "already settled");
+  });
+
+  test("(b) lost id: exactly one toast, none on a repeat", () => {
+    const storage = new FakeStorage();
+    const toastedFor = { current: null };
+    const resolution = resolveWith({ storedId: "x" });
+    settle({ userId: "e2", storedId: "x", resolution, storage, toastedFor });
+    assert.equal(storage.getItem("lk-current-campaign:e2"), "a");
+    assert.deepEqual(toastTexts(), ["You no longer have access to that campaign. Switched to Ashfall."]);
+    // StrictMode rerun / repeat with the same lost id.
+    settle({ userId: "e2", storedId: "x", resolution, storage, toastedFor });
+    assert.equal(toastTexts().length, 1);
+  });
+
+  test("(c) empty list clears storage", () => {
+    const storage = new FakeStorage();
+    storage.setItem("lk-current-campaign:e3", "x");
+    settle({ userId: "e3", storedId: "x", resolution: resolveWith({ campaigns: [], storedId: "x" }), storage });
+    assert.equal(storage.getItem("lk-current-campaign:e3"), null);
+    assert.deepEqual(toastTexts(), []);
+  });
+
+  test("lost access or none left exits a preview of the lost campaign", () => {
+    store.setPreviewCampaignId("x");
+    settle({ userId: "e4", storedId: "x", resolution: resolveWith({ storedId: "x" }), storage: new FakeStorage() });
+    assert.equal(store.isPreviewActive(), false);
+    store.setPreviewCampaignId("x");
+    settle({ userId: "e5", storedId: "x", resolution: resolveWith({ campaigns: [], storedId: "x" }), storage: new FakeStorage() });
+    assert.equal(store.isPreviewActive(), false);
+  });
+
+  test("(d) a pick writes the key; (e) exits a preview of another campaign only", () => {
+    const storage = new FakeStorage();
+    cc.applyPick({ userId: "e6", campaign: B, preview: previewHandle(), storage });
+    assert.equal(storage.getItem("lk-current-campaign:e6"), "b");
+
+    store.setPreviewCampaignId("a");
+    cc.applyPick({ userId: "e6", campaign: A, preview: previewHandle(), storage });
+    assert.equal(store.getPreviewCampaignId(), "a", "same campaign: preview kept");
+    cc.applyPick({ userId: "e6", campaign: B, preview: previewHandle(), storage });
+    assert.equal(store.isPreviewActive(), false, "another campaign: preview exited");
+    assert.equal(storage.getItem("lk-current-campaign:e6"), "b");
+  });
+});
+
 describe("roles", () => {
   test("stub: is_owner -> gm, else player", () => {
     assert.equal(role.stubRole({ is_owner: true }), "gm");
@@ -247,6 +351,7 @@ describe("roles", () => {
     const forced = role.effectiveRoleState(gm, true);
     assert.equal(forced.role, "player");
     assert.equal(forced.isGm, false);
+    assert.equal(forced.isOwner, false, "owner controls hide in preview");
     assert.equal(forced.previewing, true);
   });
 });
@@ -390,7 +495,7 @@ describe("NavBar", () => {
     const avatar = html.indexOf('aria-label="Profile"');
     assert.ok(menu >= 0 && switcher > menu && avatar > switcher, "order: menu, switcher, avatar");
     const buttons = [...html.matchAll(/<button[^>]*>/g)].map((m) => m[0]);
-    assert.equal(buttons.length, 3);
+    assert.ok(buttons.length >= 3, "menu, switcher, avatar (more may follow, e.g. JobTrayButton)");
     for (const b of buttons) assert.match(b, /min-h-11/, b);
     const links = [...html.matchAll(/<a [^>]*>/g)].map((m) => m[0]);
     assert.ok(links.length >= 1, "wordmark link rendered");

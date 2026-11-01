@@ -180,7 +180,7 @@ export function ShorthandPage() {
         </div>
       )}
 
-      {selected && <CampaignShorthand campaign={selected} />}
+      {selected && <CampaignShorthand key={selected.id} campaign={selected} />}
     </div>
   );
 }

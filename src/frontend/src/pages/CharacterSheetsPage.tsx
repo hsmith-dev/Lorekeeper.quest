@@ -508,7 +508,7 @@ export function CharacterSheetsPage() {
         </div>
       )}
 
-      {selected && <CampaignCharacterSheets campaign={selected} />}
+      {selected && <CampaignCharacterSheets key={selected.id} campaign={selected} />}
     </div>
   );
 }

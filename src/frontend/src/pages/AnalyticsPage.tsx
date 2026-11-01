@@ -155,7 +155,7 @@ export function AnalyticsPage() {
         </div>
       )}
 
-      {selected && <CampaignAnalyticsView campaign={selected} />}
+      {selected && <CampaignAnalyticsView key={selected.id} campaign={selected} />}
     </div>
   );
 }

@@ -137,22 +137,16 @@ export function DashboardPage() {
     const match = campaigns.find((c) => c.id === campaignId);
     if (!match) return;
     if (selectedCampaignId !== campaignId) setSelectedCampaign(match);
-    const next = new URLSearchParams(searchParams);
-    next.delete("campaign");
-    setSearchParams(next, { replace: true });
+    // Functional form: CampaignSelector may be dropping `new` at the same time.
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        next.delete("campaign");
+        return next;
+      },
+      { replace: true },
+    );
   }, [searchParams, campaigns, selectedCampaignId, setSelectedCampaign, setSearchParams]);
-
-  const handleSelect = (c: Campaign) => {
-    setSelectedCampaign(c);
-    setSelectedTagId(undefined);
-    if (searchParams.get("campaign")) {
-      // Clear it once acted on so it doesn't fight subsequent manual picks
-      // (e.g. deep-link into a shared campaign, then switch to another one).
-      const next = new URLSearchParams(searchParams);
-      next.delete("campaign");
-      setSearchParams(next, { replace: true });
-    }
-  };
 
   return (
     <div className="max-w-5xl mx-auto px-4 py-6 md:py-10">
@@ -168,11 +162,8 @@ export function DashboardPage() {
             >
               Campaign
             </h2>
-            <CampaignSelector
-              campaigns={campaigns ?? []}
-              selected={selectedCampaign}
-              onSelect={handleSelect}
-            />
+            {/* Selection defaults to the app-wide current campaign. */}
+            <CampaignSelector campaigns={campaigns ?? []} />
           </div>
 
           {selectedCampaign && (

@@ -130,7 +130,7 @@ export function SourcesPage() {
         </div>
       )}
 
-      {selected && <CampaignSources campaign={selected} />}
+      {selected && <CampaignSources key={selected.id} campaign={selected} />}
     </div>
   );
 }

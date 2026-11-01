@@ -332,7 +332,7 @@ export function RecordSessionPage() {
         </div>
       )}
 
-      {selected && <RecordingPanel campaign={selected} />}
+      {selected && <RecordingPanel key={selected.id} campaign={selected} />}
 
       {!selected && (
         <button onClick={() => navigate(-1)} className="text-xs text-muted-foreground hover:text-foreground self-start">

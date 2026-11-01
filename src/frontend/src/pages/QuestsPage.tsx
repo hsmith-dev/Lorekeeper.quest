@@ -209,7 +209,7 @@ export function QuestsPage() {
         </div>
       )}
 
-      {selected && <CampaignQuests campaign={selected} />}
+      {selected && <CampaignQuests key={selected.id} campaign={selected} />}
     </div>
   );
 }
