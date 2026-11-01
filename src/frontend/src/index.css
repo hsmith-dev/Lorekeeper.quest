@@ -101,3 +101,19 @@
     line-height: 1.45;
   }
 }
+
+/* Reduced motion (NFR-10): collapse every transition/animation to ~0 so
+   panels appear without sliding and pulses/spinners stop. 0.01ms (not 0)
+   keeps transitionend/animationend firing for code that waits on them. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  ::before,
+  ::after {
+    animation-duration: 0.01ms !important;
+    animation-delay: 0s !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    transition-delay: 0s !important;
+    scroll-behavior: auto !important;
+  }
+}
