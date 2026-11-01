@@ -2,7 +2,7 @@
 title: 'E0-Access.6: Players are locked out of GM authoring and AI routes, and write rules are enforced'
 type: 'feature'
 created: '2026-11-01'
-status: 'in-progress'
+status: 'in-review'
 baseline_revision: '0e71df48f047b03fa4f8ad48d76ec76a218ea8c0'
 review_loop_iteration: 0
 followup_review_recommended: false
@@ -102,3 +102,15 @@ The tech note asks for a per-route `require_campaign_paid()` on AI routes. Inste
 - `python scripts/check_scoped_queries.py`; `lint-imports` -- expected: clean.
 - `cd src/frontend && npx tsc --noEmit && npm run build` -- expected: pass.
 - `gh pr checks <n> --repo hsmith-dev/Lorekeeper.quest --watch` -- expected: green.
+
+## Auto Run Result
+
+Status: in-review (implemented and verified; the step-04 review layers have not run yet, because the orchestrator asked for commit, rebase and PR first).
+
+**Summary:** `access.can_write` / `may_write` (`app/access/write.py`) is the single write gate. It refuses reduced (read_only) and anon ctxs and rows from another Campaign. GMs may write any row. Players may write only their own `kind=player` entries; the linked-PC sheet check stays false until F3-world. `check_create` ends with `can_write`. The story's GM-only routes declare `gm` before any LLM config is resolved. Journal delete and tag attach / detach are `player` + `can_write`. Sheet and template writes go through `can_write`. `account_gate` fails closed and exempts only `PARTY_READ` safe-method routes. Join gates only non-Player links. Rebased onto origin/main (E0-Access.9, E0-Jobs.4/5, E0-QA.15, v1.1); the only conflict was the `app/access/__init__.py` exports.
+
+**Verification:** desktop full suite (cached image, isolated pg + valkey, removed afterwards): 1738 passed, 4 skipped; `EV-4: probes=91 exemptions=1 pending=44 leaks=0`. `check_scoped_queries.py` ok, with no baseline lines added and no script edits. Frontend `tsc --noEmit` and `npm run build` pass. CI runs on PR #61.
+
+**Needs desktop verification:** nothing specific (no Ollama, GPU, compose or nginx surface).
+
+**Residual risks / follow-ups:** E0-Access.9's `set_visibility` (bulk route, GM-only) does not call `can_write` itself, so E0-Access.9's owner may want to fold it in. The frontend still sends unpaid users to /subscribe on login, so a Party-read-only Player's UI path needs E7 / billing UX. The UI shows Players no entry write controls, because no route creates `kind=player` entries until E7.
