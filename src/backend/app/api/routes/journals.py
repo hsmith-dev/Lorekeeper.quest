@@ -1,9 +1,10 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from sqlalchemy.orm import selectinload
 import uuid
 
+from app.core.limiter import limiter, user_or_ip
 from app.db.session import get_db
 from app.db.models.user import User
 from app.db.models.journal import JournalEntry
@@ -36,7 +37,9 @@ router = APIRouter()
 
 
 @router.post("/generate-draft", response_model=GenerateDraftResponse)
+@limiter.limit("20/minute", key_func=user_or_ip)
 async def generate_journal_draft(
+    request: Request,
     body: GenerateDraftRequest,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -56,7 +59,9 @@ async def generate_journal_draft(
 
 
 @router.post("/generate", response_model=JournalResponse, status_code=201)
+@limiter.limit("20/minute", key_func=user_or_ip)
 async def generate_journal(
+    request: Request,
     body: GenerateRequest,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -228,7 +233,9 @@ async def detach_tag(
 
 
 @router.post("/autocomplete", response_model=AutocompleteResponse)
+@limiter.limit("20/minute", key_func=user_or_ip)
 async def autocomplete_journal_notes(
+    request: Request,
     body: AutocompleteRequest,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -251,7 +258,9 @@ async def autocomplete_journal_notes(
 
 
 @router.post("/recap", response_model=RecapResponse)
+@limiter.limit("20/minute", key_func=user_or_ip)
 async def recap_campaign_session(
+    request: Request,
     body: RecapRequest,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -277,7 +286,9 @@ async def recap_campaign_session(
 
 
 @router.post("/summarize-session", response_model=SessionSummaryResponse)
+@limiter.limit("20/minute", key_func=user_or_ip)
 async def summarize_session(
+    request: Request,
     body: SessionSummaryRequest,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),

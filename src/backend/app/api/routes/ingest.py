@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File
 from pydantic import BaseModel
 
 from app.api.deps import get_current_user
-from app.core.limiter import limiter
+from app.core.limiter import limiter, user_or_ip
 from app.db.models.user import User
 from app.services.vision_service import extract_notes_from_image
 from app.services.transcription_service import transcribe_audio
@@ -41,7 +41,7 @@ class DiscordIngestResponse(BaseModel):
 
 
 @router.post("/image", response_model=IngestImageResponse)
-@limiter.limit("10/minute")
+@limiter.limit("10/minute", key_func=user_or_ip)
 async def ingest_image(
     request: Request,
     file: UploadFile = File(...),
@@ -65,7 +65,7 @@ async def ingest_image(
 
 
 @router.post("/voice", response_model=IngestVoiceResponse)
-@limiter.limit("10/minute")
+@limiter.limit("10/minute", key_func=user_or_ip)
 async def ingest_voice(
     request: Request,
     file: UploadFile = File(...),
