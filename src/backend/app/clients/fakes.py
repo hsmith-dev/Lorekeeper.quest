@@ -27,6 +27,8 @@ from collections import deque
 from collections.abc import Iterable
 from typing import Any
 
+from pydantic import BaseModel
+
 from app.clients.errors import ModelServiceError
 from app.clients.ml import NLI_LABELS, MLStatus, ModelState, NamedEntity, NliScores
 from app.domain.embedding import EMBEDDING_DIM, EMBEDDING_MODEL
@@ -136,8 +138,10 @@ _FAKE_STRING_FORMATS = {
 def fake_json(json_schema: dict) -> Any:
     """A minimal value for a flat JSON schema (app/schemas/llm inlines every
     $ref, so this walks one tree): enums and consts take their first member,
-    strings are "fake", integers/numbers 0 (or their minimum), booleans
-    false, lists one element, objects every property."""
+    strings are "fake" (padded or cut to minLength/maxLength), integers and
+    numbers 0 (or their lower bound, else clamped to their upper bound),
+    booleans false, lists max(1, minItems) elements ([] if maxItems is 0),
+    objects every property."""
     node = json_schema if isinstance(json_schema, dict) else {}
     if "const" in node:
         return node["const"]
@@ -155,20 +159,33 @@ def fake_json(json_schema: dict) -> Any:
         return {name: fake_json(sub) for name, sub in (node.get("properties") or {}).items()}
     if kind == "array":
         items = node.get("items")
-        return [fake_json(items if isinstance(items, dict) else {})]
+        if node.get("maxItems") == 0:
+            return []
+        n = max(1, int(node.get("minItems") or 0))
+        return [fake_json(items if isinstance(items, dict) else {}) for _ in range(n)]
     if kind in ("integer", "number"):
         if "minimum" in node:
-            low = node["minimum"]
+            value = node["minimum"]
         elif "exclusiveMinimum" in node:
-            low = node["exclusiveMinimum"] + 1
+            value = node["exclusiveMinimum"] + 1
+        elif "maximum" in node and node["maximum"] < 0:
+            value = node["maximum"]
+        elif "exclusiveMaximum" in node and node["exclusiveMaximum"] <= 0:
+            value = node["exclusiveMaximum"] - 1
         else:
-            low = 0
-        return int(low) if kind == "integer" else low
+            value = 0
+        return math.ceil(value) if kind == "integer" else value
     if kind == "boolean":
         return False
     if kind == "null":
         return None
-    return _FAKE_STRING_FORMATS.get(node.get("format"), "fake")
+    text = _FAKE_STRING_FORMATS.get(node.get("format"), "fake")
+    min_len = int(node.get("minLength") or 0)
+    if len(text) < min_len:
+        text += "x" * (min_len - len(text))
+    if "maxLength" in node:
+        text = text[: int(node["maxLength"])]
+    return text
 
 
 def _last_user_text(messages: list[dict]) -> str:
@@ -198,8 +215,10 @@ def fake_chunks(text: str) -> list[str]:
 
 class FakeLLM:
     """Deterministic LLM. `script([...])` queues replies taken one per call
-    (plain, stream or structured attempt); a BaseException instance is
-    raised instead of returned, anything else is returned as str."""
+    (plain, stream or structured attempt). An exception instance or class
+    is raised; a str is returned as is, a dict/list as JSON, a pydantic
+    model as model_dump_json(), anything else as str(). One process-wide
+    queue: it assumes the test makes its calls one at a time."""
 
     def __init__(self) -> None:
         self._script: deque[Any] = deque()
@@ -219,8 +238,14 @@ class FakeLLM:
     def reply(self, messages: list[dict], json_schema: dict | None = None) -> str:
         if self._script:
             item = self._script.popleft()
-            if isinstance(item, BaseException):
+            if isinstance(item, BaseException) or (isinstance(item, type) and issubclass(item, BaseException)):
                 raise item
+            if isinstance(item, str):
+                return item
+            if isinstance(item, BaseModel):
+                return item.model_dump_json()
+            if isinstance(item, (dict, list)):
+                return json.dumps(item)
             return str(item)
         if json_schema is not None:
             return json.dumps(fake_json(json_schema))

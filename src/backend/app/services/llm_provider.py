@@ -26,16 +26,22 @@ repairs; each attempt logs one
 The fake provider (E0-LLM.5): provider="fake", and every config while
 fake_llm_active (ENVIRONMENT=test, no MockTransport on _transport, not an
 `ollama`-marked test), answers from the deterministic fake_llm
-(app/clients/fakes.FakeLLM) in place of the network send. Everything else
-runs as in production: the gate, the model choice, and complete_structured's
-schema prompt, budget, validation, repairs, stats and logs (backend "fake").
-detect_backend answers BACKEND_OLLAMA without a probe while the fake is
-active.
+(app/clients/fakes.FakeLLM) in place of the provider sender. What runs
+around the sender runs as in production: the gate, the model choice, and
+complete_structured's schema prompt, budget, validation, repairs, stats and
+logs (backend "fake"). The senders' own checks do not run: a BYOK config
+without its key is answered, not rejected. detect_backend answers
+BACKEND_OLLAMA without a probe while the fake is active. fake_llm's script
+is one process-wide queue, so a scripted test must make its calls serially.
 
-capture() records every call at the point it is sent (fake or real): the
-exact messages (for complete_structured, each attempt's prompt with the
-schema and repair turns), task, gate class, model, provider. Never a key or
-header. Off by default; with no capture active it costs one contextvar read.
+capture() records each call as it is handed to the sender (fake or real):
+the OpenAI-format messages (for complete_structured, each attempt's prompt
+with the schema and repair turns; ai_service's KoboldCpp-native attempt as
+one user turn holding its prompt), task, gate class, model, provider. The
+anthropic and gemini senders reshape those messages on the wire, and a call
+a sender then rejects (e.g. a missing key) is recorded although nothing was
+sent. Never a key or header. Off by default; with no capture active it
+costs one contextvar read.
 """
 
 import contextvars
@@ -66,7 +72,8 @@ _transport: httpx.AsyncBaseTransport | None = None
 _real_llm_in_test = False
 
 PROVIDER_FAKE = "fake"
-# The process-wide fake; tests script it through the `fake_llm` fixture.
+# The process-wide fake; tests script it through the `fake_llm` fixture. Its
+# script is one queue for the process: scripted calls must run serially.
 fake_llm = FakeLLM()
 
 # Default models of the BYOK branches (also what capture() reports).
@@ -236,7 +243,10 @@ _captures: contextvars.ContextVar[tuple[LLMCapture, ...]] = contextvars.ContextV
 @contextmanager
 def capture() -> Iterator[LLMCapture]:
     """Record every LLM call made in this context (and tasks started from it)
-    while the block runs. Captures nest: each active one gets every call."""
+    while the block runs, as handed to the sender: OpenAI-format messages,
+    before anthropic/gemini reshape them, and before a sender's own checks
+    (a call rejected for a missing key is still recorded). Captures nest:
+    each active one gets every call."""
     cap = LLMCapture()
     token = _captures.set((*_captures.get(), cap))
     try:

@@ -409,3 +409,131 @@ def test_guard_resolves_kobold_url():
     assert ("localhost", 5001) in guard.targets
     assert ("127.0.0.1", 5001) in guard.targets or ("::1", 5001) in guard.targets
     assert KoboldSocketGuard("https://llm.invalid").targets == {("llm.invalid", 443)}
+
+
+# --- scripted item types ----------------------------------------------------------
+
+
+async def test_scripted_items_are_serialised_by_type(fake_llm):
+    cfg = LLMConfig(provider="fake")
+    fake_llm.script([
+        {"a": 1},
+        [1, "x"],
+        Report.model_validate_json(VALID),
+        "plain",
+    ])
+    assert json.loads(await complete_messages(MESSAGES, cfg)) == {"a": 1}
+    assert json.loads(await complete_messages(MESSAGES, cfg)) == [1, "x"]
+    assert Report.model_validate_json(await complete_messages(MESSAGES, cfg)).title == "Mill"
+    assert await complete_messages(MESSAGES, cfg) == "plain"
+
+
+async def test_scripted_dict_validates_in_structured(fake_llm):
+    fake_llm.script([json.loads(VALID)])
+    out = await complete_structured(MESSAGES, Report, LLMConfig(provider="fake"))
+    assert out.title == "Mill"
+
+
+async def test_scripted_exception_class_is_raised(fake_llm):
+    fake_llm.script([RuntimeError])
+    with pytest.raises(RuntimeError):
+        await complete_messages(MESSAGES, LLMConfig(provider="fake"))
+
+
+# --- fake_json against real schemas and constraints ----------------------------------
+
+
+def _all_flat_models():
+    import importlib
+    import inspect
+    import pkgutil
+
+    import app.schemas.llm as llm_schemas
+
+    modules = [llm_schemas] + [
+        importlib.import_module(info.name)
+        for info in pkgutil.walk_packages(llm_schemas.__path__, prefix=f"{llm_schemas.__name__}.")
+    ]
+    found = {}
+    for module in modules:
+        for _, obj in inspect.getmembers(module, inspect.isclass):
+            if issubclass(obj, FlatModel) and obj is not FlatModel and obj.__module__ == module.__name__:
+                found[f"{obj.__module__}.{obj.__qualname__}"] = obj
+    return [found[k] for k in sorted(found)]
+
+
+@pytest.mark.parametrize(
+    "model", _all_flat_models() or [pytest.param(None, marks=pytest.mark.skip("no feature schemas yet"))]
+)
+def test_fake_json_validates_every_llm_schema(model):
+    model.model_validate(fake_json(flat_json_schema(model)))
+
+
+def test_fake_json_honours_constraint_keywords():
+    from typing import Annotated
+
+    from pydantic import Field
+
+    class Constrained(FlatModel):
+        score: Annotated[int, Field(ge=2, le=9)]
+        negative: Annotated[int, Field(le=-3)]
+        below: Annotated[float, Field(lt=-1)]
+        ratio: Annotated[float, Field(gt=0.25)]
+        code: Annotated[str, Field(min_length=6, max_length=8)]
+        short: Annotated[str, Field(max_length=2)]
+        tags: Annotated[list[str], Field(min_length=3)]
+        none: Annotated[list[str], Field(max_length=0)]
+
+    value = fake_json(flat_json_schema(Constrained))
+    assert value["score"] == 2 and value["negative"] == -3 and value["below"] < -1
+    assert len(value["code"]) == 6 and value["short"] == "fa"
+    assert len(value["tags"]) == 3 and value["none"] == []
+    Constrained.model_validate(value)
+    assert fake_json({"type": "integer", "minimum": 2.1}) == 3
+
+
+# --- streams and the KoboldCpp-native attempt are captured ------------------------------
+
+
+async def test_fake_stream_is_captured():
+    with capture() as cap:
+        [c async for c in stream_messages(MESSAGES, LLMConfig(provider="fake"), task="chat")]
+    (call,) = cap.calls
+    assert call.messages == MESSAGES and call.task == "chat" and call.fake is True
+
+
+async def test_mock_transport_stream_is_captured_as_sent(monkeypatch):
+    payloads: list[dict] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        payloads.append(json.loads(await request.aread()))
+        body = ('data: {"choices": [{"delta": {"content": "hi "}}]}\n\n'
+                'data: {"choices": [{"delta": {"content": "there"}}]}\n\ndata: [DONE]\n\n')
+        return httpx.Response(200, text=body, headers={"content-type": "text/event-stream"})
+
+    monkeypatch.setattr(llm_provider, "_transport", httpx.MockTransport(handler))
+    cfg = LLMConfig(provider="custom", api_url="http://byok.test", model="m")
+    with capture() as cap:
+        chunks = [c async for c in stream_messages(MESSAGES, cfg)]
+    assert "".join(chunks) == "hi there"
+    (call,) = cap.calls
+    assert call.messages == payloads[0]["messages"] and call.fake is False and call.model == "m"
+
+
+async def test_kobold_native_narrative_prompt_is_captured(gate, monkeypatch):
+    sent: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/version":
+            return httpx.Response(404, text="not found")
+        assert request.url.path == "/api/v1/generate"
+        sent.append(json.loads(await request.aread())["prompt"])
+        return httpx.Response(200, json={"results": [{"text": "native text"}]})
+
+    monkeypatch.setattr(llm_provider, "_transport", httpx.MockTransport(handler))
+    with capture() as cap:
+        assert await ai_service.generate_narrative("party fought goblins") == "native text"
+    (call,) = cap.calls
+    assert call.messages == [{"role": "user", "content": sent[0]}]
+    assert call.task == "narrative" and call.fake is False and call.provider == "kobold"
+    assert call.gate_class == llm_gate.current_class.get().value

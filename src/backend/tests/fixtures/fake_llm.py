@@ -17,6 +17,7 @@ from __future__ import annotations
 import errno
 import functools
 import socket
+from collections.abc import Iterator
 from urllib.parse import urlsplit
 
 import pytest
@@ -27,7 +28,7 @@ from app.services import llm_provider
 
 
 @pytest.fixture
-def fake_llm() -> FakeLLM:
+def fake_llm() -> Iterator[FakeLLM]:
     llm_provider.fake_llm.reset()
     yield llm_provider.fake_llm
     llm_provider.fake_llm.reset()

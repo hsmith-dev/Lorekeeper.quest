@@ -168,6 +168,8 @@ async def _generate_kobold_native(
         "rep_pen": 1.1,
     }
 
+    # Recorded for llm_provider.capture() (EV-4) like any other send.
+    llm_provider._record([{"role": "user", "content": prompt}], cfg, task="narrative", gate_class=None, fake=False)
     # llm_provider's client, so tests' MockTransport covers this path too.
     async with llm_provider._client(settings.kobold_timeout_seconds) as client:
         for attempt in range(3):

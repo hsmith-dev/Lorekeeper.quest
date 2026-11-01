@@ -111,6 +111,40 @@ deferred: []
 - Given the PR's backend CI with no Ollama, when the suite runs, then all existing tests and the new ones pass, the guard records no KOBOLD_URL socket, and the `ollama` suite is skipped.
 - Given the licence workflow, when it runs, then it passes unchanged (no new dependency).
 
+## Spec Change Log
+
+## Review Triage Log
+
+### 2026-11-01 — Review pass
+- verdicts: 26 findings — high 0, medium 2, low 17, false 3, maybe-false 0
+- findings:
+  - `[low]` `[reject]` (blind) `provider="fake"` can be saved through settings in production (`llm_provider: str`). It only affects the user who picks it: they get canned replies, with no metering and no access to anyone else's data. No UI offers "fake", and blocking it would need a new guard or config flag. The eval scripts rely on `provider="fake"` outside the test environment.
+  - `[low]` `[patch]` (blind) The docstring said "everything else runs as in production", but the senders' own checks (such as a missing BYOK key) don't run under the fake. Docstring reworded. Answering any config under test is the story AC ("with any config").
+  - `[low]` `[reject]` (blind) The fixture doesn't fail on unused scripted replies. That would be a new strictness rule and could break tests that script spare replies on purpose; no harm was shown.
+  - `[low]` `[patch]` (blind) A scripted dict became a Python repr. `FakeLLM.reply` now returns str as is, dict/list as `json.dumps`, and BaseModel via `model_dump_json`. Tests added.
+  - `[medium]` `[patch]` (blind) `fake_json` ignored maximum, min/maxLength and min/maxItems, and an integer with a float minimum didn't round up, so an unscripted structured fake could fail validation. These are now handled minimally, with a test over every `app/schemas/llm` FlatModel (it skips until feature schemas exist) and a constraint test.
+  - `[low]` `[reject]` (blind) The eval `--fake-llm` digest now hashes all messages, not just the last user turn. Reports only record reply length, which is unchanged because the digest has a fixed width. "Ungated" follows from `uses_platform_llm` being False for "fake".
+  - `[low]` `[patch]` (blind) For anthropic/gemini, capture records the OpenAI-format messages, which those senders then reshape. Docstrings now say so. Over-capture is the safe direction for a leak gate.
+  - `[low]` `[patch]` (blind) One process-wide script queue misroutes replies when calls run concurrently. Documented in the docstrings: scripted calls must run serially.
+  - `[false]` `[reject]` (blind) "The `ollama`-marked opt-out test never runs in CI". The marker doesn't auto-skip: only the integration test has its own `OLLAMA_TEST_URL` skip, and this test ran green in CI run 41319716914. The `Iterator` annotation part was patched. The `.invalid` DNS lookup is a reserved TLD (RFC 6761), so it was left as is.
+  - `[false]` `[reject]` (blind) "Guard targets are cached across a changed KOBOLD_URL". `lru_cache` is keyed on the URL, so a new URL resolves new targets. uvloop isn't used in the suite.
+  - `[low]` `[reject]` (intent) No end-to-end test sends a Player route through `capture()`. Those probes are E0-QA.14's consumer work. Here the harness is proven against the real `capture()` (`tests/ev4/test_families.py`).
+  - `[low]` `[patch]` (intent) Real streams weren't checked under capture. Grouped with the verification-gap stream row and patched there.
+  - `[low]` `[reject]` (intent) The fake is reachable in production via a provider string. Same as the first blind row.
+  - `[false]` `[reject]` (intent) `gate_class` is None for BYOK. That is by design: BYOK never takes a gate slot, and the spec says so.
+  - `[medium]` `[patch]` (verification-gap) `stream_messages` capture was untested. Added a fake-stream capture test and a MockTransport SSE test asserting the captured messages equal the wire payload.
+  - `[medium]` `[patch]` (verification-gap) The KoboldCpp-native narrative send (`ai_service._generate_kobold_native`) bypassed capture. It now records `[{"role":"user","content":prompt}]` before the request loop. A test covers it (`/api/version` returns 404 and `/api/v1/generate` answers).
+  - `[low]` `[reject]` (edge) Fake reachable in production. Same as the first blind row.
+  - `[low]` `[reject]` (edge) A non-pytest script run with `ENVIRONMENT=test` gets the fake. That environment value is only set by the test conftest, and eval scripts run under development/production. Unlikely in practice.
+  - `[low]` `[patch]` (edge) A scripted dict gives a repr. Grouped with the blind row; patched.
+  - `[low]` `[patch]` (edge) A scripted exception class was returned as text. It is now raised. An empty scripted string stays "" on purpose, so a test can script it.
+  - `[low]` `[patch]` (edge) `fake_json` constraints. Grouped with the blind medium row; patched.
+  - `[low]` `[patch]` (edge) Concurrent use of the global script. Grouped with the blind row; documented.
+  - `[low]` `[reject]` (edge) A KOBOLD_URL with no scheme. The config default and every deployment use a full URL, and the guard keeps the literal pair anyway.
+  - `[low]` `[patch]` (edge) A call is recorded before the sender rejects a missing key. Documented in the capture docstring (over-capture is safe for EV-4).
+  - `[low]` `[patch]` (edge, claim) Gemini drops all but the last system message, so capture may hold text that was never sent. Same root cause as the anthropic/gemini docstring row; documented.
+  - `[low]` `[patch]` (edge, claim) "Recorded at the point it is sent" overcounts on config errors. Same docstring fix.
+
 ## Design Notes
 
 - An installed `_transport` disables the fake because those tests deliberately drive the real senders against a MockTransport. Faking them would void E0-LLM.2–.4's coverage.
