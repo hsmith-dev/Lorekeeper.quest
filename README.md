@@ -133,7 +133,7 @@ Running Lorekeeper as a **paid service** (Stripe subscriptions — the integrati
 
 ## Architecture
 
-FastAPI backend · React frontend · PostgreSQL + pgvector (embeddings & retrieval) · Redis (caching) · Ollama (LLM serving) · nginx — one Docker Compose stack. See `docs/` for deployment, backups, and email setup.
+FastAPI backend · React frontend · PostgreSQL + pgvector (embeddings & retrieval) · Redis (caching) · Ollama (LLM serving) · nginx — one Docker Compose stack. See `docs/` for deployment, backups, and email setup, and [docs/RELEASE_NOTES.md](./docs/RELEASE_NOTES.md) for what changed in each release.
 
 ## License
 

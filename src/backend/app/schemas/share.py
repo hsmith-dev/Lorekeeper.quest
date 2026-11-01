@@ -4,7 +4,7 @@ from pydantic import BaseModel, field_validator
 from app.db.models.campaign import Genre
 from app.db.models.npc import NpcRole, NpcStatus
 from app.db.models.quest import QuestStatus
-from app.schemas.tag import TagResponse
+from app.db.models.tag import TagType
 
 _VALID_KINDS = {"read_only", "collaborate"}
 
@@ -54,12 +54,33 @@ class PublicCampaignResponse(BaseModel):
 # only stops the existing share link leaking GM prep.
 
 
+class PublicTagCategoryRef(BaseModel):
+    id: uuid.UUID
+    name: str
+    campaign_id: uuid.UUID
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class PublicTagResponse(BaseModel):
+    # Same fields as the owner TagResponse, but declared here so nested tags
+    # are allow-listed too: a field added to the owner tag schema later does
+    # not reach share viewers unless it is also named here.
+    id: uuid.UUID
+    name: str
+    tag_type: TagType | None = None
+    custom_category: PublicTagCategoryRef | None = None
+
+    model_config = {"from_attributes": True}
+
+
 class PublicJournalResponse(BaseModel):
     id: uuid.UUID
     campaign_id: uuid.UUID
     narrative: str
     session_date: date | None
-    tags: list[TagResponse]
+    tags: list[PublicTagResponse]
     created_at: datetime
 
     model_config = {"from_attributes": True}
