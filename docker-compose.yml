@@ -83,6 +83,10 @@ services:
     volumes:
       - ./src/backend:/app
     command: python -m app.jobs.worker
+    # `docker stop` sends SIGTERM: RQ stops taking Jobs and lets the running
+    # ones finish for up to this long, then SIGKILL. A Job killed here stays
+    # `running` until the reaper (E0-Jobs.4) requeues it, ~60-90 s later.
+    stop_grace_period: 60s
     networks:
       - default
       - models

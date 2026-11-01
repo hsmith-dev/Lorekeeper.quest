@@ -103,3 +103,8 @@ Stories were merged on green GitHub CI while the desktop was offline (owner deci
 ## E0-Jobs.3 — Worker, retries, worker service (PR #54)
 - [ ] `docker compose up -d backend worker` → `docker compose logs worker` shows "starting 2 job workers"; dev `backend` reports healthy
 - [ ] Release blocker until E0-Jobs.4: retried Jobs stay `queued` (no reaper); killed work horses leave rows `running`
+
+## E0-Jobs.4 — Reaper and restart recovery (PR #55)
+- [x] ~~Crash recovery~~ — proved on the desktop with a real worker container: kill -9 mid-Job, expired retry, deleted dependency, raw-SQL-cancelled dependency, `docker stop` mid-run, Valkey FLUSHALL — all ended correctly, nothing stuck
+- [ ] Soak test: thousands of short Jobs to rule out a fork-while-threaded deadlock (reaper thread lives in the process that forks work horses); none seen in ~12 Jobs
+- [ ] Known timings: a retry waits its backoff + up to 30 s; a container killed outright takes ~60–90 s extra to recover (RQ's dead-worker record must expire)

@@ -23,8 +23,10 @@ run (app/jobs/outbox.py). For one `queued` row it:
    (`_failure`). Codes in TERMINAL_CODES fail at once; others go back to
    `queued` with `next_run_at` = now + RETRY_DELAYS_S[attempts - 1] while
    attempts < max_attempts, then `failed`. A requeued row is not pushed again
-   here (RQ's current job has the same id): the reaper (E0-Jobs.4) re-pushes
-   rows whose `next_run_at` has passed.
+   here (RQ's current job has the same id): the reaper re-pushes rows whose
+   `next_run_at` has passed. Every outcome is written only while this
+   attempt still owns the row (`running`, same `worker_id`, locked), so an
+   attempt the reaper already took back cannot write a second outcome.
 
 The stored message is always readable fixed text or an LLMError's `detail`,
 never an exception's own text. Logs carry job_id, kind and campaign_id (also
@@ -35,7 +37,16 @@ The timeout is cooperative: it cancels the handler at its next await, so a
 handler that blocks the event loop is not interrupted (sync CPU work belongs
 in `asyncio.to_thread`). RQ's `job_timeout` (timeout_s + 60 s) is the
 backstop: it kills the work horse and leaves the row `running` for the
-E0-Jobs.4 reaper.
+reaper.
+
+The reaper (E0-Jobs.4, `reap` / `Reaper`) runs every 30 s in every
+LorekeeperWorker, one pass at a time across workers (a Valkey lock). It
+requeues (or fails, `interrupted`) `running` rows whose heartbeat is over
+60 s old and that no live RQ worker is running, and re-pushes `queued` rows
+RQ does not hold once they are runnable: `next_run_at` passed (retries;
+so a retry really waits its delay plus up to one interval),
+older than 60 s with no `next_run_at` (a lost push, a Valkey flush), or a
+dependent whose dependency ended by raw SQL or was deleted.
 
 `_perform` swaps the process-wide Valkey client (app.core.valkey_client) for
 its own; that is safe only because RQ runs one Job per work horse.
@@ -52,14 +63,17 @@ import socket
 import threading
 import time
 import uuid
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable
 
 import redis.asyncio as aioredis
 import sqlalchemy as sa
+from rq import Queue as RQQueue
 from rq import Worker
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.orm import aliased
 from sqlalchemy.orm.attributes import set_committed_value
 from sqlalchemy.pool import NullPool
 
@@ -144,12 +158,34 @@ async def _claim(db: AsyncSession, job_id: uuid.UUID, worker_id: str) -> tuple[J
     return job, dependency_status
 
 
-async def _finish(db: AsyncSession, job_id: uuid.UUID, status: JobStatus,
+async def _owned(db: AsyncSession, job_id: uuid.UUID, worker_id: str) -> Job | JobStatus | None:
+    """The Job row, locked, while this worker still owns the attempt
+    (`running` with this `worker_id`). Otherwise the attempt's writes roll
+    back and the row's current status comes back: the reaper (E0-Jobs.4)
+    already took the Job back from an attempt it judged dead, so this late
+    outcome must not overwrite the row (no second `done`)."""
+    job = await db.get(Job, job_id, populate_existing=True, with_for_update=True)
+    if job is None:
+        await db.rollback()
+        return None
+    if job.status != JobStatus.RUNNING or job.worker_id != worker_id:
+        current, extra = JobStatus(job.status), _log_extra(job)
+        await db.rollback()
+        logger.warning("job outcome dropped: this attempt no longer owns the job (now %s)", current.value,
+                       extra=extra)
+        return current
+    return job
+
+
+async def _finish(db: AsyncSession, job_id: uuid.UUID, status: JobStatus, worker_id: str,
                   code: JobErrorCode | None = None, message: str | None = None) -> JobStatus:
-    """Write a terminal status (with the handler's writes, for `done`)."""
-    job = await db.get(Job, job_id, populate_existing=True)
+    """Write a terminal status (with the handler's writes, for `done`), only
+    while this worker still owns the attempt (`_owned`)."""
+    job = await _owned(db, job_id, worker_id)
     if job is None:
         return status
+    if isinstance(job, JobStatus):
+        return job
     job.status = status
     job.finished_at = _now()
     job.next_run_at = None
@@ -162,15 +198,18 @@ async def _finish(db: AsyncSession, job_id: uuid.UUID, status: JobStatus,
 
 
 async def _record_failure(db: AsyncSession, job_id: uuid.UUID, code: JobErrorCode, message: str,
-                          extra: dict[str, str]) -> JobStatus:
+                          extra: dict[str, str], worker_id: str) -> JobStatus:
     """`failed` for a terminal code or the last attempt; otherwise back to
-    `queued` with the next retry delay, keeping this attempt's code."""
-    job = await db.get(Job, job_id, populate_existing=True)
+    `queued` with the next retry delay, keeping this attempt's code. Only
+    while this worker still owns the attempt (`_owned`)."""
+    job = await _owned(db, job_id, worker_id)
     if job is None:
         return JobStatus.FAILED
+    if isinstance(job, JobStatus):
+        return job
     if code in TERMINAL_CODES or job.attempts >= job.max_attempts:
         logger.warning("job failed: %s", code.value, extra=extra)
-        return await _finish(db, job_id, JobStatus.FAILED, code, message)
+        return await _finish(db, job_id, JobStatus.FAILED, worker_id, code, message)
     delay = RETRY_DELAYS_S[min(max(job.attempts - 1, 0), len(RETRY_DELAYS_S) - 1)]
     job.status = JobStatus.QUEUED
     job.next_run_at = _now() + timedelta(seconds=delay)
@@ -344,7 +383,7 @@ async def run_job(job_id: uuid.UUID | str, session_factory: async_sessionmaker[A
 
 
 async def _fail_attempt(db: AsyncSession, session_factory: async_sessionmaker[AsyncSession], job_id: uuid.UUID,
-                        code: JobErrorCode, message: str, extra: dict[str, str]) -> JobStatus:
+                        code: JobErrorCode, message: str, extra: dict[str, str], worker_id: str) -> JobStatus:
     """Roll the attempt's writes back and record the failure (`_record_failure`)."""
     try:
         await db.rollback()
@@ -357,11 +396,11 @@ async def _fail_attempt(db: AsyncSession, session_factory: async_sessionmaker[As
         except Exception:
             logger.warning("job session invalidate failed", exc_info=True, extra=extra)
         async with session_factory() as fresh:
-            return await _record_failure(fresh, job_id, code, message, extra)
-    return await _record_failure(db, job_id, code, message, extra)
+            return await _record_failure(fresh, job_id, code, message, extra, worker_id)
+    return await _record_failure(db, job_id, code, message, extra, worker_id)
 
 
-async def _prepare(db: AsyncSession, job: Job, kind: JobKind,
+async def _prepare(db: AsyncSession, job: Job, kind: JobKind, worker_id: str,
                    extra: dict[str, str]) -> tuple[CampaignContext, llm_gate.GateClass] | JobStatus:
     """Rights check, starter, LLM config and gate class. Returns the JobStatus
     when the Job ends here (permission_changed, llm_config)."""
@@ -371,7 +410,7 @@ async def _prepare(db: AsyncSession, job: Job, kind: JobKind,
     if ctx is None or starter is None:
         await db.rollback()
         logger.info("job starter lost access", extra=extra)
-        return await _finish(db, job_id, JobStatus.FAILED, JobErrorCode.PERMISSION_CHANGED, PERMISSION_MESSAGE)
+        return await _finish(db, job_id, JobStatus.FAILED, worker_id, JobErrorCode.PERMISSION_CHANGED, PERMISSION_MESSAGE)
     job.starter = starter
     job.llm_config = None
     if "llm" in kind.resources:
@@ -380,7 +419,7 @@ async def _prepare(db: AsyncSession, job: Job, kind: JobKind,
         except LLMConfigError:
             await db.rollback()
             logger.info("job has no LLM config", extra=extra)
-            return await _finish(db, job_id, JobStatus.FAILED, JobErrorCode.LLM_CONFIG, LLM_CONFIG_MESSAGE)
+            return await _finish(db, job_id, JobStatus.FAILED, worker_id, JobErrorCode.LLM_CONFIG, LLM_CONFIG_MESSAGE)
     return ctx, kind.gate_class or llm_gate.class_for_queue(job.queue)
 
 
@@ -392,14 +431,14 @@ async def _run_claimed(db: AsyncSession, session_factory: async_sessionmaker[Asy
         handler = kind.load_handler()
     except Exception:
         logger.exception("job kind cannot be loaded", extra=extra)
-        return await _finish(db, job_id, JobStatus.FAILED, JobErrorCode.INTERNAL, UNKNOWN_KIND_MESSAGE)
+        return await _finish(db, job_id, JobStatus.FAILED, worker_id, JobErrorCode.INTERNAL, UNKNOWN_KIND_MESSAGE)
 
     try:
-        prepared = await _prepare(db, job, kind, extra)
+        prepared = await _prepare(db, job, kind, worker_id, extra)
     except Exception:
         logger.exception("job setup failed", extra=extra)
         job.starter = job.llm_config = None
-        return await _fail_attempt(db, session_factory, job_id, JobErrorCode.INTERNAL, INTERNAL_MESSAGE, extra)
+        return await _fail_attempt(db, session_factory, job_id, JobErrorCode.INTERNAL, INTERNAL_MESSAGE, extra, worker_id)
     if isinstance(prepared, JobStatus):
         job.starter = job.llm_config = None
         return prepared
@@ -433,17 +472,222 @@ async def _run_claimed(db: AsyncSession, session_factory: async_sessionmaker[Asy
     if error is None:
         try:
             # The handler's writes and `done` commit together.
-            status = await _finish(db, job_id, JobStatus.DONE)
+            status = await _finish(db, job_id, JobStatus.DONE, worker_id)
         except Exception:
             logger.exception("job done commit failed", extra=extra)
-            return await _fail_attempt(db, session_factory, job_id, JobErrorCode.INTERNAL, INTERNAL_MESSAGE, extra)
+            return await _fail_attempt(db, session_factory, job_id, JobErrorCode.INTERNAL, INTERNAL_MESSAGE, extra, worker_id)
         logger.info("job done", extra=extra)
         return status
 
     code, message = _failure(error, timed_out)
     if code == JobErrorCode.INTERNAL:
         logger.error("job handler raised %s", type(error).__name__, exc_info=error, extra=extra)
-    return await _fail_attempt(db, session_factory, job_id, code, message, extra)
+    return await _fail_attempt(db, session_factory, job_id, code, message, extra, worker_id)
+
+
+# ── The reaper (E0-Jobs.4) ─────────────────────────────────────────────────
+#
+# Postgres is the authority; RQ only carries `job_id`s. The reaper puts the
+# two back in step after anything that loses a message or kills an attempt:
+# a Valkey flush, a failed after-commit push, a retry whose `next_run_at` has
+# passed, a dependency finished by raw SQL or deleted, a work horse killed by
+# RQ's timeout backstop, a deploy or the OOM killer.
+
+REAPER_INTERVAL_S: float = 30
+# A `running` row is dead when its heartbeat is older than this and no live
+# RQ worker is running it.
+STALE_AFTER_S: float = 60
+# A `queued` row with no `next_run_at` that RQ does not hold is re-pushed
+# once it is older than this (the after-commit push had its chance).
+QUEUED_GRACE_S: float = 60
+REAPER_BATCH = 500
+REAPER_LOCK_KEY = "lorekeeper:jobs:reaper"
+INTERRUPTED_MESSAGE = "Interrupted by a restart"
+
+
+@dataclass
+class ReapResult:
+    requeued: list[uuid.UUID] = field(default_factory=list)  # interrupted, attempts left
+    failed: list[uuid.UUID] = field(default_factory=list)    # interrupted, no attempts left
+    pushed: list[uuid.UUID] = field(default_factory=list)    # handed to RQ again
+
+    def __bool__(self) -> bool:
+        return bool(self.requeued or self.failed or self.pushed)
+
+
+def _live_workers(connection: Any) -> dict[str, str | None]:
+    """RQ's worker registry: worker name -> the RQ job id it is running now.
+    A worker that died without deregistering drops out when its key expires
+    (RQ heartbeats a busy worker with a 90 s TTL)."""
+    return {w.name: w.get_current_job_id() for w in Worker.all(connection=connection)}
+
+
+def _rq_queued_ids(connection: Any, queue: str) -> set[str]:
+    """The job ids waiting in one RQ queue's list (read once per pass)."""
+    return set(RQQueue(queue, connection=connection).get_job_ids())
+
+
+async def _recover_running(db: AsyncSession, live: dict[str, str | None], now: datetime,
+                           result: ReapResult) -> None:
+    """Take back `running` rows whose attempt is dead: heartbeat older than
+    STALE_AFTER_S and no live RQ worker running that Job (its worker_id is
+    gone from the registry, or is there but running something else: its work
+    horse was killed). Requeued (due now) while attempts remain, else
+    `failed`, both with `interrupted`. Rows locked by a live attempt are
+    skipped (SKIP LOCKED)."""
+    cutoff = now - timedelta(seconds=STALE_AFTER_S)
+    rows = (await db.execute(
+        sa.select(Job)
+        .where(Job.status == JobStatus.RUNNING,
+               sa.func.coalesce(Job.heartbeat_at, Job.started_at, Job.created_at) < cutoff)
+        .order_by(Job.created_at, Job.id)
+        .limit(REAPER_BATCH)
+        .with_for_update(skip_locked=True)
+        .execution_options(populate_existing=True)
+    )).scalars().all()
+    for job in rows:
+        if job.worker_id is not None and live.get(job.worker_id) == str(job.id):
+            continue  # its worker is still on it: a late heartbeat, not a dead attempt
+        extra = _log_extra(job)
+        job.error_code = JobErrorCode.INTERRUPTED
+        job.error_message = INTERRUPTED_MESSAGE
+        job.progress = job.stage = job.eta_seconds = job.worker_id = job.heartbeat_at = None
+        if job.attempts < job.max_attempts:
+            job.status = JobStatus.QUEUED
+            job.next_run_at = now
+            job.finished_at = None
+            result.requeued.append(job.id)
+            logger.warning("job interrupted; requeued (attempt %d of %d)", job.attempts, job.max_attempts,
+                           extra=extra)
+        else:
+            job.status = JobStatus.FAILED
+            job.next_run_at = None
+            job.finished_at = now
+            result.failed.append(job.id)
+            logger.warning("job interrupted on its last attempt; failed", extra=extra)
+    # An ORM commit: a `failed` row releases its dependents (app/jobs/outbox.py).
+    await db.commit()
+
+
+async def _push_due(db: AsyncSession, connection: Any, live: dict[str, str | None], now: datetime,
+                    result: ReapResult) -> None:
+    """Re-push `queued` rows that are runnable and that RQ does not hold:
+    due (`next_run_at` passed, or none and older than QUEUED_GRACE_S), and
+    not waiting on an active dependency (a terminal one, however it got
+    there, or one deleted: the FK sets `depends_on_job_id` NULL). RQ holds a
+    Job when its id is in its queue's list or a live worker is running it.
+
+    Every candidate is checked (RQ-held rows never use up the batch), and at
+    most REAPER_BATCH are pushed per pass. The pass stops at the first failed
+    push (Valkey trouble): the rest wait for the next pass."""
+    from app.jobs.enqueue import repush  # lazy: app.jobs.enqueue -> outbox -> (lazily) this module
+
+    dep = aliased(Job)
+    rows = (await db.execute(
+        sa.select(Job.id, Job.queue, Job.kind)
+        .outerjoin(dep, dep.id == Job.depends_on_job_id)
+        .where(Job.status == JobStatus.QUEUED,
+               sa.or_(Job.depends_on_job_id.is_(None), dep.id.is_(None),
+                      dep.status.notin_([s.value for s in ACTIVE_STATUSES])),
+               sa.or_(Job.next_run_at <= now,
+                      sa.and_(Job.next_run_at.is_(None),
+                              Job.created_at <= now - timedelta(seconds=QUEUED_GRACE_S))))
+        .order_by(Job.created_at, Job.id)
+    )).all()
+    await db.rollback()  # no transaction held while talking to Valkey
+    held = {job_id for job_id in live.values() if job_id}
+    for queue in {row.queue for row in rows}:
+        held |= _rq_queued_ids(connection, queue)
+    for row in rows:
+        if str(row.id) in held:
+            continue
+        if len(result.pushed) >= REAPER_BATCH or not await repush(row.id, row.queue, row.kind, connection):
+            break
+        result.pushed.append(row.id)
+
+
+async def reap(session_factory: async_sessionmaker[AsyncSession], connection: Any,
+               now: datetime | None = None) -> ReapResult:
+    """One reaper pass: recover dead `running` attempts, then re-push every
+    runnable `queued` Job RQ does not hold (the recovered ones included).
+    `connection` is the sync redis client of RQ's Valkey."""
+    now = now or _now()
+    result = ReapResult()
+    live = _live_workers(connection)
+    async with session_factory() as db:
+        await _recover_running(db, live, now, result)
+        await _push_due(db, connection, live, now, result)
+    if result:
+        logger.info("job reaper: %d requeued, %d failed, %d pushed",
+                    len(result.requeued), len(result.failed), len(result.pushed))
+    return result
+
+
+class Reaper:
+    """Runs `reap` every REAPER_INTERVAL_S from a daemon thread of a
+    LorekeeperWorker (every worker process has one), starting at once so a
+    restart's leftovers are recovered early. A Valkey lock (SET NX with a TTL
+    just under the interval, never released early) starts one pass per
+    interval across all workers and containers. A pass slower than the TTL
+    can overlap the next one; that is safe (running rows are taken with SKIP
+    LOCKED, and a second message for a Job only meets the claim).
+
+    The thread pushes on its own redis client and, per pass, uses its own
+    event loop and NullPool engine. Only the dependents a reaper-failed row
+    releases are pushed by the outbox, on its process-wide client (redis-py
+    resets its pool in a forked work horse)."""
+
+    def __init__(self, name: str, interval_s: float | None = None, connection: Any = None):
+        self._name = name
+        self._interval = REAPER_INTERVAL_S if interval_s is None else interval_s
+        self._connection = connection
+        self._owns_connection = connection is None
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="job-reaper", daemon=True)
+
+    def _redis(self) -> Any:
+        if self._connection is None:
+            from redis import Redis
+
+            self._connection = Redis.from_url(get_settings().valkey_url, socket_timeout=5,
+                                              socket_connect_timeout=2)
+        return self._connection
+
+    def start(self) -> "Reaper":
+        self._thread.start()
+        return self
+
+    def stop(self) -> None:
+        """Stop after the current pass (waiting a few seconds for it)."""
+        self._stop.set()
+        if self._thread.is_alive():
+            self._thread.join(_HEARTBEAT_JOIN_S)
+        if self._owns_connection and self._connection is not None and not self._thread.is_alive():
+            self._connection.close()
+            self._connection = None
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            self.tick()
+            self._stop.wait(self._interval)
+
+    def tick(self) -> ReapResult | None:
+        """One pass if this worker wins the lock, else None. Never raises."""
+        try:
+            ttl = max(1, int(self._interval) - 5)
+            if not self._redis().set(REAPER_LOCK_KEY, self._name, nx=True, ex=ttl):
+                return None
+            return asyncio.run(self._reap())
+        except Exception:
+            logger.exception("job reaper pass failed")
+            return None
+
+    async def _reap(self) -> ReapResult:
+        engine = create_async_engine(get_settings().database_url, poolclass=NullPool)
+        try:
+            return await reap(async_sessionmaker(engine, expire_on_commit=False), self._redis())
+        finally:
+            await engine.dispose()
 
 
 # ── The RQ side ────────────────────────────────────────────────────────────
@@ -490,6 +734,17 @@ class LorekeeperWorker(Worker):
         global _WORKER_ID
         _WORKER_ID = self.name
 
+    def work(self, *args: Any, **kwargs: Any) -> bool:
+        """RQ's loop, plus the reaper thread for a long-running (non-burst)
+        worker."""
+        burst = kwargs.get("burst", args[0] if args else False)
+        reaper = None if burst else Reaper(self.name).start()
+        try:
+            return super().work(*args, **kwargs)
+        finally:
+            if reaper is not None:
+                reaper.stop()
+
 
 def main() -> None:
     """`python -m app.jobs.worker`: settings.worker_processes LorekeeperWorkers
@@ -509,7 +764,8 @@ def main() -> None:
     pool.start(burst=False, logging_level=settings.log_level.upper())
 
 
-__all__ = ["HEARTBEAT_INTERVAL_S", "RETRY_DELAYS_S", "LorekeeperWorker", "main", "perform", "run_job"]
+__all__ = ["HEARTBEAT_INTERVAL_S", "REAPER_INTERVAL_S", "RETRY_DELAYS_S", "LorekeeperWorker", "ReapResult", "Reaper",
+           "main", "perform", "reap", "run_job"]
 
 
 if __name__ == "__main__":

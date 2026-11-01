@@ -14,7 +14,9 @@ anything is written.
 """
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import re
 import uuid
 from typing import Any
@@ -26,9 +28,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.access.context import CampaignContext
 from app.db.models.job import ACTIVE_STATUSES, Job
-from app.domain.enums import JobStatus
+from app.domain.enums import JobQueue, JobStatus
 from app.jobs import outbox
 from app.jobs.registry import get_kind
+
+logger = logging.getLogger(__name__)
 
 # Words that mark a payload key as a secret (raw API keys are never queued,
 # AD-3). Matched per word, so `max_tokens` (word "tokens") is allowed.
@@ -184,9 +188,24 @@ async def enqueue(
     raise RuntimeError("enqueue: could not insert or find the Job for this idempotency_key")
 
 
+async def repush(job_id: uuid.UUID, queue: JobQueue | str, kind: str, connection: Any = None) -> bool:
+    """Push an existing `queued` Job to RQ again (the reaper's re-push,
+    E0-Jobs.4): same message as the after-commit push (only `job_id`), off the
+    event loop. False, logged, when the push fails; the row stays `queued`
+    and the next reaper tick tries again. A second message for a Job is
+    harmless: the claim (`status = queued`) lets only one attempt run."""
+    try:
+        await asyncio.to_thread(outbox.push, job_id, queue, kind, connection)
+    except Exception:
+        logger.warning("job re-push failed; the reaper retries next tick", exc_info=True,
+                       extra={"job_id": str(job_id), "kind": kind, "queue": str(queue)})
+        return False
+    return True
+
+
 def job_accepted(job_id: uuid.UUID) -> JSONResponse:
     """The route response for a started Job: `202 {"job_id": "..."}`."""
     return JSONResponse(status_code=202, content={"job_id": str(job_id)})
 
 
-__all__ = ["enqueue", "is_secret_key", "job_accepted"]
+__all__ = ["enqueue", "is_secret_key", "job_accepted", "repush"]
