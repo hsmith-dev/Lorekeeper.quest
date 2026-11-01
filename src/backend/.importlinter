@@ -1,0 +1,116 @@
+# import-linter contracts for the backend (AD-1, ARCHITECTURE-SPINE.md layer
+# table). Run from src/backend:  lint-imports
+# CI: .github/workflows/gates.yml (static job, "AD-1 import contracts").
+#
+# Packages the spine adds later (access, hooks, jobs) join these contracts in
+# the PR that creates them: a contract cannot name a package that does not
+# exist yet.
+#
+# Exceptions go in a contract's ignore_imports, each under a "# ratchet:" line
+# saying why it is there and which story removes it. The list only shrinks:
+# scripts/test_import_ratchet.py holds a frozen ceiling, and import-linter
+# fails on an ignore_imports line that no longer matches an import (remove it).
+
+[importlinter]
+root_package = app
+include_external_packages = True
+
+# Transport > services > schemas > persistence > cross-cutting > pure domain.
+# A higher layer may import a lower one, never the reverse (direct or
+# indirect). app.clients sits beside services/db and has its own contract.
+[importlinter:contract:layers]
+name = AD-1 layers: api > services > schemas > db > core > domain
+type = layers
+layers =
+    app.api
+    app.services
+    app.schemas
+    app.db
+    app.core
+    (app.domain)
+
+# app/domain is pure data: enums, entity types, the embedding contract.
+[importlinter:contract:domain]
+name = AD-1 app.domain imports no other app package
+type = forbidden
+source_modules =
+    app.domain
+forbidden_modules =
+    app.api
+    app.services
+    app.schemas
+    app.db
+    app.core
+    app.clients
+    app.main
+
+# Model clients (app/clients/*) may import only domain and core.
+[importlinter:contract:clients]
+name = AD-1 app.clients imports only app.core and app.domain
+type = forbidden
+source_modules =
+    app.clients
+forbidden_modules =
+    app.api
+    app.services
+    app.schemas
+    app.db
+    app.main
+
+# Only services (and transport above them) use the model clients; the layers
+# below services never reach a sidecar.
+[importlinter:contract:clients_callers]
+name = AD-1 only services and above import app.clients
+type = forbidden
+source_modules =
+    app.schemas
+    app.db
+    app.core
+    app.domain
+forbidden_modules =
+    app.clients
+
+# All inference goes through app/clients, which talk to the sidecars over
+# HTTP. No app code, app/clients included, imports a model package directly.
+# Indirect imports are allowed: only the direct import loads the model in the
+# web or worker process.
+[importlinter:contract:models]
+name = AD-1 no model packages imported in the web/worker process
+type = forbidden
+source_modules =
+    app.api
+    app.clients
+    app.services
+    app.schemas
+    app.db
+    app.core
+    app.domain
+    app.main
+forbidden_modules =
+    torch
+    torchaudio
+    torchvision
+    transformers
+    sentence_transformers
+    spacy
+    whisper
+    faster_whisper
+    ctranslate2
+    easyocr
+    onnxruntime
+    kokoro
+    kokoro_onnx
+    misaki
+    phonemizer
+    espeakng_loader
+allow_indirect_imports = True
+unmatched_ignore_imports_alerting = error
+ignore_imports =
+    # ratchet: in-process spaCy NER; E0-Platform.6 turns nlp_service into an ml-client wrapper (AD-1 Wrappers)
+    app.services.nlp_service -> spacy
+    # ratchet: in-process MiniLM embeddings; E0-Platform.6 routes embed() through app.clients.ml
+    app.services.embedding_service -> sentence_transformers
+    # ratchet: in-process Whisper; E0-Platform.6 routes transcription to the stt sidecar
+    app.services.transcription_service -> whisper
+    # ratchet: in-process EasyOCR; E0-Platform.6 routes OCR through ml /v1/ocr
+    app.services.vision_service -> easyocr

@@ -570,6 +570,7 @@ entries:
   - {name: "fpdf2", kind: python, version: "2.8.7", license: "LGPL-3.0-only", source_url: "https://pypi.org/project/fpdf2/", editions: [agpl, commercial], images: [backend], notes: "Direct dep (PDF export). LGPL-3.0, imported unmodified; owner-approved [[exception]] (OWNER TO CONFIRM, E0-QA.9). E8 replaces it with WeasyPrint."}
   - {name: "fsspec", kind: python, version: "2026.9.0", license: "BSD-3-Clause", source_url: "https://pypi.org/project/fsspec/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
   - {name: "greenlet", kind: python, version: "3.5.6", license: "MIT AND PSF-2.0", source_url: "https://pypi.org/project/greenlet/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "grimp", kind: python, version: "3.18", license: "BSD-2-Clause", scanned_license: "BSD License", source_url: "https://pypi.org/project/grimp/", editions: [agpl, commercial], notes: "dev/CI only (requirements-dev.txt; import-linter's graph engine, E0-QA.10); not shipped"}
   - {name: "gunicorn", kind: python, version: "23.0.0", license: "MIT", source_url: "https://pypi.org/project/gunicorn/", editions: [agpl, commercial], images: [backend], notes: ""}
   - {name: "h11", kind: python, version: "0.16.0", license: "MIT", source_url: "https://pypi.org/project/h11/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
   - {name: "hf-xet", kind: python, version: "1.8.0", license: "Apache-2.0", source_url: "https://pypi.org/project/hf-xet/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
@@ -582,6 +583,7 @@ entries:
   - {name: "huggingface_hub", kind: python, version: "2.4.0", license: "Apache-2.0", source_url: "https://pypi.org/project/huggingface_hub/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
   - {name: "idna", kind: python, version: "3.20", license: "BSD-3-Clause", source_url: "https://pypi.org/project/idna/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
   - {name: "ImageIO", kind: python, version: "2.38.1", license: "BSD-2-Clause", source_url: "https://pypi.org/project/ImageIO/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "import-linter", kind: python, version: "2.15", license: "BSD-2-Clause", scanned_license: "BSD License", source_url: "https://pypi.org/project/import-linter/", editions: [agpl, commercial], notes: "dev/CI only (requirements-dev.txt; AD-1 contracts in gates.yml, E0-QA.10); not shipped"}
   - {name: "Jinja2", kind: python, version: "3.1.6", license: "BSD-3-Clause", source_url: "https://pypi.org/project/Jinja2/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
   - {name: "joblib", kind: python, version: "1.6.0", license: "BSD-3-Clause", source_url: "https://pypi.org/project/joblib/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
   - {name: "langcodes", kind: python, version: "3.5.1", license: "MIT", source_url: "https://pypi.org/project/langcodes/", editions: [agpl, commercial], images: [backend], notes: ""}
