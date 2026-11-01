@@ -25,7 +25,10 @@ the cache key scheme (`cache_key`, `cache_generation`, `cached_json`,
 app/core/sse.py's close watch (app.core may not import app.access), so every
 `sse_response` stream ends when its ctx's grant changes. E0-WorldCore.3 adds
 `register_writer` (world_service registers the Canon tables' writer) and the
-registry's `gm_when` (deleted or merged Entities are GM only).
+registry's `gm_when` (deleted or merged Entities are GM only). E0-Access.11 adds
+Campaign events (`campaign_event_stream`, `deliverable`, `stream_ctx`,
+`register_event_domain`, `event_domains`, `BROADCAST_DOMAINS`): who receives
+which `campaign:{id}:events` invalidation.
 """
 from app.access.audience import (
     ALWAYS_GM_FIELDS, GM_AUDIENCE, MEMBERS, PUBLIC, AnyOf, Audience, AudienceLevel, covers, ctx_audience,
@@ -66,12 +69,23 @@ from app.access.visibility import (
     register_visibility_listener, set_visibility, set_visibility_many, visibility_exception_handler,
     visibility_kinds,
 )
+from app.access.events import (
+    BROADCAST_DOMAINS, EventCheckFailed, campaign_event_stream, deliverable, event_domains, register_event_domain,
+    stream_ctx,
+)
 from app.access.grants import _check_watchable
 from app.core import sse as _sse
 
 _sse.register_close_watch(grant_watch, check=_check_watchable)
 
 __all__ = [
+    "BROADCAST_DOMAINS",
+    "EventCheckFailed",
+    "campaign_event_stream",
+    "deliverable",
+    "event_domains",
+    "register_event_domain",
+    "stream_ctx",
     "CACHE_TTL_S",
     "GRANT_POLL_S",
     "cache_generation",

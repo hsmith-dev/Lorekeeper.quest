@@ -216,6 +216,40 @@ async def test_keyed_campaign_events_are_not_throttled(valkey, fast_windows):
     await got.close()
 
 
+async def test_announce_yields_subscribed_first_then_every_later_message(valkey):
+    """The resync point (E0-Access.11): `subscribed` once the SUBSCRIBE is
+    confirmed; a message published right after it is delivered."""
+    cid, ref = uuid.uuid4(), uuid.uuid4()
+    for listen, channel, publish in (
+        (listen_campaign_events, campaign_events_channel(cid), lambda: publish_campaign_event(cid, "entities", ref)),
+        (listen_jobs, jobs_channel(cid), lambda: publish_job(cid, job_data(ref))),
+        (listen_live, live_channel(cid), lambda: publish_live(cid, {"t": 1})),
+    ):
+        got = Collector(listen(cid, announce=True))
+        await wait_until(lambda: got.items)
+        assert got.items == [(pubsub.SUBSCRIBED_EVENT, {})]
+        assert await numsub(valkey, channel) == 1  # live before it said so
+        await publish()
+        await wait_until(lambda: len(got.items) == 2)
+        assert got.items[1][0] in ("invalidate", "job", "live")
+        await got.close()
+
+
+async def test_without_announce_there_is_no_subscribed(valkey):
+    cid = uuid.uuid4()
+    got = Collector(listen_campaign_events(cid))
+    await got.subscribed(valkey, campaign_events_channel(cid))
+    await publish_campaign_event(cid, "entities", uuid.uuid4())
+    await wait_until(lambda: got.items)
+    assert [e for e, _d in got.items] == ["invalidate"]
+    await got.close()
+
+
+async def test_announce_without_valkey_yields_nothing(no_valkey):
+    items = [item async for item in listen_campaign_events(uuid.uuid4(), announce=True)]
+    assert items == []
+
+
 async def test_bad_json_is_skipped_and_logged(valkey, caplog):
     cid = uuid.uuid4()
     got = Collector(listen_jobs(cid))

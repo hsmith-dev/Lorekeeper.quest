@@ -26,7 +26,7 @@ from app.services.chat_service import check_kobold_health
 from app.db.session import get_db
 from app.api.routes import (
     auth, campaigns, journals, tags, chat, ingest, npcs, quests, sources, share, billing, session_plans, feedback,
-    admin, shorthand, character_sheets, members, visibility, files,
+    admin, shorthand, character_sheets, members, visibility, files, events,
 )
 from app.api.routes import settings as settings_routes
 from app.api.deps import require_active_account, require_admin
@@ -149,6 +149,8 @@ def create_app() -> FastAPI:
     app.include_router(members.router,   prefix="/api/campaigns", tags=["members"],   dependencies=gate)
     # E0-Access.9: POST /{campaign_id}/visibility (bulk set_visibility), same prefix.
     app.include_router(visibility.router, prefix="/api/campaigns", tags=["visibility"], dependencies=gate)
+    # E0-Access.11: GET /{campaign_id}/events (SSE invalidations), same prefix.
+    app.include_router(events.router,    prefix="/api/campaigns", tags=["events"],    dependencies=gate)
     app.include_router(journals.router,  prefix="/api/journals",  tags=["journals"],  dependencies=gate)
     app.include_router(tags.router,      prefix="/api/tags",      tags=["tags"],      dependencies=gate)
     app.include_router(chat.router,      prefix="/api/chat",      tags=["chat"],      dependencies=gate)

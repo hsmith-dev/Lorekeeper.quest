@@ -14,6 +14,7 @@ import { RouteAnnouncer } from "./components/shell/RouteAnnouncer";
 import { ShortcutHelp } from "./components/shell/ShortcutHelp";
 import { LegacyRedirect, RouteLoading, RoutePage } from "./components/shell/RouteGate";
 import { CurrentCampaignProvider } from "./hooks/useCurrentCampaign";
+import { CampaignEventsSubscriber } from "./hooks/useCampaignEvents";
 import { PAGE_ROUTES, activeRedirects } from "./lib/routes";
 import { NotFoundPage } from "./pages/NotFoundPage";
 
@@ -55,6 +56,7 @@ export default function App() {
       <QueryClientProvider client={queryClient}>
         <BrowserRouter>
           <CurrentCampaignProvider>
+          <CampaignEventsSubscriber />
           <TourProvider>
           <RouteAnnouncer />
           <div className="min-h-screen flex flex-col">

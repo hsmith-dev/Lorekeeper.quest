@@ -36,6 +36,16 @@ A process whose event loop is about to end (the RQ work horse's
 `asyncio.run`) calls `await flush_pending()` first: the trailing publishes
 go out now instead of being lost with the loop.
 
+**Resync** (E0-Access.11; E0-Jobs.7 and E0-Jobs.9 follow it). There are no
+event ids and no replay. A listener started with `announce=True` yields
+`("subscribed", {})` once, right after SUBSCRIBE succeeded; every message
+published after that point is yielded. A stream route sends it as its first
+frame (`event: subscribed`), and a client treats everything it read before
+that frame as possibly stale: on every `subscribed` it refetches. Any gap
+(reconnect, slow-client cutoff, `access_changed`, a Valkey restart) is
+closed the same way: reconnect, `subscribed`, refetch. Without Valkey (or
+when SUBSCRIBE fails) no `subscribed` is yielded and the listener ends.
+
 **Failure.** No Valkey client: every publish is a no-op (logged at debug) and
 every listener ends at once (logged). A Valkey error, or a publish slower than
 PUBLISH_TIMEOUT_S, is logged, never raised. Delivery filtering (who may see
@@ -73,6 +83,9 @@ THROTTLE_PREFIX = "pubsub_throttle"
 JOB_EVENT = "job"
 INVALIDATE_EVENT = "invalidate"
 LIVE_EVENT = "live"
+# Yielded by a listener started with `announce=True`, once, right after its
+# SUBSCRIBE succeeded: the resync point (see "Resync" in the docstring).
+SUBSCRIBED_EVENT = "subscribed"
 
 # The fields of a `job` event (AD-5).
 JOB_EVENT_FIELDS = ("job_id", "kind", "status", "progress", "stage", "eta_seconds", "error_code",
@@ -317,11 +330,31 @@ def _decode(channel: str, raw: Any) -> tuple[str, Any] | None:
         return None
 
 
-async def _listen(channel: str) -> AsyncIterator[tuple[str, Any]]:
+async def _confirmed(pubsub: Any, channel: str) -> bool:
+    """Wait (at most PUBLISH_TIMEOUT_S) for the server's `subscribe` reply."""
+    deadline = asyncio.get_running_loop().time() + PUBLISH_TIMEOUT_S
+    while True:
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            logger.warning(json.dumps({"event": "pubsub_subscribe_unconfirmed", "channel": channel}))
+            return False
+        try:
+            message = await pubsub.get_message(ignore_subscribe_messages=False, timeout=min(remaining, LISTEN_READ_S))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning(json.dumps({"event": "pubsub_subscribe_failed", "channel": channel}), exc_info=True)
+            return False
+        if message is not None and message.get("type") == "subscribe":
+            return True
+
+
+async def _listen(channel: str, announce: bool = False) -> AsyncIterator[tuple[str, Any]]:
     """Yield `(event, data)` for each message on `channel`. Subscribes on the
     first iteration; unsubscribes and closes when the generator is closed or
-    cancelled. Ends (logged) without Valkey or on a Valkey error; a message
-    that is not our JSON is skipped (logged)."""
+    cancelled. With `announce`, first yields `(SUBSCRIBED_EVENT, {})` once the
+    subscription is live. Ends (logged) without Valkey or on a Valkey error; a
+    message that is not our JSON is skipped (logged)."""
     client = _client()
     if client is None:
         logger.warning(json.dumps({"event": "pubsub_listen_skipped", "channel": channel, "reason": "no_valkey"}))
@@ -334,6 +367,13 @@ async def _listen(channel: str) -> AsyncIterator[tuple[str, Any]]:
         except Exception:
             logger.warning(json.dumps({"event": "pubsub_subscribe_failed", "channel": channel}), exc_info=True)
             return
+        if announce:
+            # Only once the server confirmed the SUBSCRIBE: a message published
+            # after the confirmation is delivered, so a refetch started after
+            # `subscribed` misses nothing.
+            if not await _confirmed(pubsub, channel):
+                return
+            yield SUBSCRIBED_EVENT, {}
         while True:
             try:
                 message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=LISTEN_READ_S)
@@ -351,24 +391,24 @@ async def _listen(channel: str) -> AsyncIterator[tuple[str, Any]]:
         await _close(pubsub)
 
 
-def listen_jobs(campaign_id: uuid.UUID | str) -> AsyncIterator[tuple[str, Any]]:
+def listen_jobs(campaign_id: uuid.UUID | str, *, announce: bool = False) -> AsyncIterator[tuple[str, Any]]:
     """The `job` events of one Campaign (unfiltered: the route filters)."""
-    return _listen(jobs_channel(campaign_id))
+    return _listen(jobs_channel(campaign_id), announce)
 
 
-def listen_campaign_events(campaign_id: uuid.UUID | str) -> AsyncIterator[tuple[str, Any]]:
+def listen_campaign_events(campaign_id: uuid.UUID | str, *, announce: bool = False) -> AsyncIterator[tuple[str, Any]]:
     """The `invalidate` events of one Campaign (unfiltered: the route filters)."""
-    return _listen(campaign_events_channel(campaign_id))
+    return _listen(campaign_events_channel(campaign_id), announce)
 
 
-def listen_live(live_session_id: uuid.UUID | str) -> AsyncIterator[tuple[str, Any]]:
+def listen_live(live_session_id: uuid.UUID | str, *, announce: bool = False) -> AsyncIterator[tuple[str, Any]]:
     """The `live` messages of one Live Session."""
-    return _listen(live_channel(live_session_id))
+    return _listen(live_channel(live_session_id), announce)
 
 
 __all__ = [
     "CAMPAIGN_EVENT_WINDOW_S", "CHANNELS", "INVALIDATE_EVENT", "JOB_EVENT", "JOB_EVENT_FIELDS",
-    "JOB_PROGRESS_WINDOW_S", "LIVE_EVENT", "PUBLISH_TIMEOUT_S", "campaign_events_channel", "flush_pending",
+    "JOB_PROGRESS_WINDOW_S", "LIVE_EVENT", "PUBLISH_TIMEOUT_S", "SUBSCRIBED_EVENT", "campaign_events_channel", "flush_pending",
     "jobs_channel", "listen_campaign_events", "listen_jobs", "listen_live", "live_channel", "publish_campaign_event",
     "publish_job", "publish_live",
 ]

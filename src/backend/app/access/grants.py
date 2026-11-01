@@ -16,7 +16,9 @@ bump in `share.resolve_share_token`); a removal deletes the row, and a
 missing grant counts as changed. Every change queues
 `publish_grant_change(campaign_id, grant_id)`, which runs after the root
 transaction commits. A rollback (of the root, or of the savepoint the change
-was made in) discards it. The Owner has no grant row: their channel is
+was made in) discards it. After the grant publishes, one unkeyed `role`
+invalidation per Campaign goes out on `campaign:{campaign_id}:events`
+(E0-Access.11). The Owner has no grant row: their channel is
 `access:{campaign_id}:owner`, published when the Campaign is deleted.
 
 Only app/access/ publishes on `access:` channels (tests/access/test_grants.py
@@ -112,12 +114,24 @@ def _within(txn: SessionTransaction | None, ancestor: SessionTransaction) -> boo
 
 async def _dispatch(pending: Sequence[_Pending]) -> None:
     seen: set[tuple[uuid.UUID, uuid.UUID | None]] = set()
+    campaigns: list[uuid.UUID] = []
     for p in pending:
         key = (p.campaign_id, p.grant_id)
         if key in seen:
             continue
         seen.add(key)
         await publish_grant_change(p.campaign_id, p.grant_id)
+        if p.campaign_id not in campaigns:
+            campaigns.append(p.campaign_id)
+    # E0-Access.11: one unkeyed `role` invalidation per Campaign, so every
+    # open screen refetches Roles and Members (no id: it names nobody).
+    from app.core.pubsub import publish_campaign_event
+
+    for campaign_id in campaigns:
+        try:
+            await publish_campaign_event(campaign_id, "role", None)
+        except Exception:
+            logger.warning(json.dumps({"event": "role_invalidation_failed"}), exc_info=True)
 
 
 @event.listens_for(Session, "after_soft_rollback")
