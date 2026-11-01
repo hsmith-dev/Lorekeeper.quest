@@ -12,10 +12,13 @@ from fastapi import FastAPI, WebSocket
 from starlette.routing import Mount, Route
 
 from app.main import app
-from tests.ev4 import nginx
-from tests.ev4.registry import Exemption, check_coverage, load_exemptions, load_pending, load_probes
+from tests.ev4 import nginx, report
+from tests.ev4.registry import (
+    _PROBES, Exemption, check_coverage, ev4_probe, load_exemptions, load_pending, load_probes,
+)
 from tests.ev4.routes import (
-    DOCS_PATHS, UnknownRouteKind, api_routes, is_api_location, nginx_locations, resolve_route, sample_path,
+    DOCS_PATHS, SAMPLE_TOKEN, UnknownRouteKind, api_routes, is_api_location, nginx_locations, resolve_route,
+    sample_path,
 )
 
 FROZEN_PENDING = frozenset({
@@ -184,6 +187,80 @@ def test_every_exact_api_location_matches_a_route():
     assert not orphans, "nginx exact locations with no app route (stale rate-limit block?):\n" + "\n".join(orphans)
 
 
+def test_every_noregex_and_regex_api_location_is_chosen_by_a_route():
+    """A `^~` or regex location under /api that no route's sample path lands
+    in is dead config (a typo'd AI rate-limit block, say)."""
+    chosen = {id(resolve_route(r)) for r in api_routes(app)}
+    candidates = [loc for loc in nginx_locations().walk()
+                  if loc.modifier in (nginx.NOREGEX, nginx.REGEX, nginx.REGEX_CI) and is_api_location(loc)]
+    orphans = [f"{loc.label} ({loc.where})" for loc in candidates if id(loc) not in chosen]
+    assert not orphans, "nginx /api locations no route resolves to:\n" + "\n".join(orphans)
+
+
+def test_is_api_location():
+    root = nginx_locations()
+    assert not is_api_location(root.resolve("/campaigns/123"))
+    assert not is_api_location(root.resolve("/assets/app.js"))
+    assert not is_api_location(None)
+    assert is_api_location(root.resolve("/api/x"))
+    assert is_api_location(root.resolve("/api/auth/login"))
+
+
+def test_is_api_location_rejects_lookalike_prefixes():
+    def loc(mod, uri):
+        return nginx.Location(mod, uri, "t.conf", 1)
+    assert is_api_location(loc(nginx.PREFIX, "/api"))
+    assert is_api_location(loc(nginx.EXACT, "/api/chat/"))
+    assert is_api_location(loc(nginx.REGEX, "^/api/x/[0-9a-f-]{36}$"))
+    assert is_api_location(loc(nginx.REGEX, "^/api$"))
+    assert not is_api_location(loc(nginx.PREFIX, "/apifoo"))
+    assert not is_api_location(loc(nginx.NOREGEX, "/apifoo/"))
+    assert not is_api_location(loc(nginx.REGEX, "^/apifoo"))
+    assert not is_api_location(loc(nginx.REGEX_CI, "\\.(js|css)$"))
+
+
+# ── The CI-12 summary line (AC 1) ──────────────────────────────────────────
+
+def test_summary_counts_cover_every_route():
+    keys = _keys()
+    probed = {p.key for p in load_probes()}
+    exempt = {e.route for e in load_exemptions()}
+    pending = load_pending()
+    assert len(pending) + len(probed) + len(exempt) == len(keys)
+    line = report.summary_line(probes=len(load_probes()), exemptions=len(exempt), pending=len(pending), leaks=0)
+    if not probed and not exempt:
+        assert line == f"EV-4: probes=0 exemptions=0 pending={len(keys)} leaks=0"
+
+
+# ── Probe registration ─────────────────────────────────────────────────────
+
+async def _probe(ev4, actor):
+    pass
+
+
+@pytest.mark.parametrize("kwargs, match", [
+    (dict(method="FETCH", path="/api/a"), "unknown method"),
+    (dict(method="GET", path="api/a"), "full route template"),
+    (dict(method="GET", path="/api/a", actors=()), "at least one actor"),
+    (dict(method="GET", path="/api/a", actors=("player", "gm_ownr")), r"unknown actor\(s\) \['gm_ownr'\]"),
+])
+def test_ev4_probe_rejects_bad_registration(kwargs, match):
+    before = list(_PROBES)
+    with pytest.raises(ValueError, match=match):
+        ev4_probe(**kwargs)(_probe)
+    assert _PROBES == before
+
+
+def test_ev4_probe_rejects_sync_function():
+    before = list(_PROBES)
+
+    def sync_probe(ev4, actor):
+        pass
+    with pytest.raises(TypeError, match="async def"):
+        ev4_probe("GET", "/api/a")(sync_probe)
+    assert _PROBES == before
+
+
 # ── check_coverage rules (I/O matrix) ──────────────────────────────────────
 
 ROUTES = {"GET /api/a", "GET /api/b/{id}", "POST /api/c"}
@@ -247,6 +324,11 @@ def test_exemptions_file_loader(tmp_path):
     f.write_text("- route: GET /api/a\n  why: nope\n")
     with pytest.raises(ValueError):
         load_exemptions(f)
+    f.write_text("- route: get /api/health\n  reason: static\n")
+    assert load_exemptions(f) == [Exemption("GET /api/health", "static")]
+    f.write_text("- route: /api/health\n  reason: static\n")
+    with pytest.raises(ValueError, match="METHOD PATH"):
+        load_exemptions(f)
 
 
 def test_unknown_route_kind_fails_loudly():
@@ -280,3 +362,9 @@ def test_sample_path():
     assert sample_path("/api/npcs/{npc_id}") == "/api/npcs/00000000-0000-4000-8000-000000000000"
     assert sample_path("/api/x/{n:int}") == "/api/x/1"
     assert sample_path("/api/health") == "/api/health"
+    assert sample_path("/api/share/{token}/journals/{journal_id}") == (
+        f"/api/share/{SAMPLE_TOKEN}/journals/00000000-0000-4000-8000-000000000000"
+    )
+    assert len(SAMPLE_TOKEN) == 32
+    assert any(c.isupper() for c in SAMPLE_TOKEN) and any(c.islower() for c in SAMPLE_TOKEN)
+    assert "_" in SAMPLE_TOKEN and "-" in SAMPLE_TOKEN

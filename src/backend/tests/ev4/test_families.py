@@ -20,7 +20,9 @@ from tests.ev4.families import (
     assert_hidden_equals_missing, assert_hidden_field_equals_unset, assert_no_canary, downgrade_suite,
 )
 from tests.ev4.fixtures import GM, PLAYER, Actor, mint_canary
+from tests.ev4.registry import Probe
 from tests.ev4.report import EV4Leak
+from tests.ev4.test_probes import run_probe
 
 CAMPAIGN = uuid.uuid4()
 OTHER_CAMPAIGN = uuid.uuid4()
@@ -49,6 +51,8 @@ def _toy_app(state: dict) -> FastAPI:
             return JSONResponse({"detail": "Forbidden"}, status_code=403)
         if thing_id == "hidden-header":
             return JSONResponse({"detail": "Not found"}, status_code=404, headers={"X-Exists": "1"})
+        if thing_id == "hidden-body":
+            return JSONResponse({"detail": "Not Found"}, status_code=404)  # same length: same headers
         return JSONResponse({"detail": "Not found"}, status_code=404)
 
     @app.get("/npc/{variant}")
@@ -63,6 +67,18 @@ def _toy_app(state: dict) -> FastAPI:
     @app.get("/list")
     async def listing():
         return {"items": state["items"], "total": len(state["items"])}
+
+    @app.get("/counted")
+    async def counted():
+        return JSONResponse([{"id": "1"}], headers={"X-Total-Count": str(state["total"])})
+
+    @app.get("/empty")
+    async def empty():
+        return []
+
+    @app.get("/gm")
+    async def gm_view():
+        return [{"id": i} for i in state["gm"]]
 
     @app.get("/public")
     async def public():
@@ -86,10 +102,12 @@ class ToyEV4:
 @pytest_asyncio.fixture
 async def toy():
     canary = mint_canary("TOYNOTES", CAMPAIGN)
-    state = {"token": canary.token, "items": [{"id": "1", "updated_at": "t0"}], "public": ["1"], "members": ["1", "2"]}
+    state = {"token": canary.token, "items": [{"id": "1", "updated_at": "t0"}], "public": ["1"], "members": ["1", "2"],
+             "gm": ["1", "2", "9"], "total": 1}
     async with AsyncClient(transport=ASGITransport(app=_toy_app(state)), base_url="http://toy") as client:
         actors = {
             "gm": Actor("gm", client, grants={CAMPAIGN: GM}),
+            "gm_owner": Actor("gm_owner", client, grants={CAMPAIGN: GM}),
             "anon_share": Actor("anon_share", client, share_token="t", grants={CAMPAIGN: "anon"}),
             "player": Actor("player", client, grants={CAMPAIGN: PLAYER}),
             "player_2": Actor("player_2", client, grants={CAMPAIGN: PLAYER}),
@@ -179,6 +197,13 @@ async def test_hidden_equals_missing_catches_header(toy):
     assert "x-exists" in str(p.excinfo.value)
 
 
+async def test_hidden_equals_missing_catches_body(toy):
+    with planted() as p:
+        await assert_hidden_equals_missing(toy.actors["player"], "/thing/hidden-body", "/thing/missing")
+    assert "body" in str(p.excinfo.value)
+    assert "status:" not in str(p.excinfo.value) and "headers:" not in str(p.excinfo.value)
+
+
 # ── hidden field vs unset field ────────────────────────────────────────────
 
 async def test_hidden_field_passes(toy):
@@ -204,6 +229,16 @@ async def test_hidden_field_checks_every_list_item(toy):
         await assert_hidden_field_equals_unset(toy.actors["player"], "/npcs", "status", unset="unknown")
 
 
+async def test_hidden_field_refuses_error_response(toy):
+    with pytest.raises(ValueError, match=r"/thing/missing returned 404"):
+        await assert_hidden_field_equals_unset(toy.actors["player"], "/thing/missing", "status")
+
+
+async def test_hidden_field_refuses_nothing_to_check(toy):
+    with pytest.raises(ValueError, match=r"/empty .*no object"):
+        await assert_hidden_field_equals_unset(toy.actors["player"], "/empty", "status")
+
+
 # ── counts and ranking ─────────────────────────────────────────────────────
 
 async def test_counts_unchanged_passes_ignoring_updated_at(toy):
@@ -227,6 +262,19 @@ async def test_counts_catches_reordering(toy):
         toy.state["items"].reverse()
     with planted():
         await assert_counts_and_ranking_unchanged(toy.actors["player"], "/list", reorder)
+
+
+async def test_counts_catches_a_header_change(toy):
+    def add_hidden():
+        toy.state["total"] = 2
+    with planted() as p:
+        await assert_counts_and_ranking_unchanged(toy.actors["player"], "/counted", add_hidden)
+    assert "x-total-count" in str(p.excinfo.value)
+
+
+async def test_counts_refuses_error_before_snapshot(toy):
+    with pytest.raises(ValueError, match=r"/thing/missing returned 404"):
+        await assert_counts_and_ranking_unchanged(toy.actors["player"], "/thing/missing", lambda: None)
 
 
 # ── captured LLM context ───────────────────────────────────────────────────
@@ -268,6 +316,16 @@ async def test_captured_context_passes_and_catches(toy, monkeypatch):
         await assert_captured_context_clean(player, leaky_run)
 
 
+async def test_captured_context_refuses_empty_capture(toy, monkeypatch):
+    from contextlib import nullcontext
+
+    from app.services import llm_provider
+
+    monkeypatch.setattr(llm_provider, "capture", lambda: nullcontext(None), raising=False)
+    with pytest.raises(TypeError, match="capture\\(\\) yielded nothing to scan"):
+        await assert_captured_context_clean(toy.actors["player"], lambda: None)
+
+
 # ── Public vs Members vs Owner(other) ──────────────────────────────────────
 
 async def test_audience_ladder_passes(toy):
@@ -284,6 +342,24 @@ async def test_audience_ladder_catches_public_superset(toy):
 async def test_audience_ladder_catches_canary(toy):
     with planted():
         await assert_audience_ladder(toy.ev4, "/leak-body")
+
+
+def _ladder_url(actor):
+    return {"anon_share": "/public", "gm_owner": "/gm"}.get(actor.name, "/members")
+
+
+async def test_audience_ladder_requires_members_within_gm(toy):
+    await assert_audience_ladder(toy.ev4, _ladder_url)
+    toy.state["gm"] = ["1"]
+    with planted() as p:
+        await assert_audience_ladder(toy.ev4, _ladder_url)
+    assert "the GM does not" in str(p.excinfo.value) and "'2'" in str(p.excinfo.value)
+
+
+async def test_audience_ladder_refuses_error_response(toy):
+    url = lambda a: "/thing/missing" if a.name == "player_2" else _ladder_url(a)  # noqa: E731
+    with pytest.raises(ValueError, match=r"as player_2: GET /thing/missing returned 404"):
+        await assert_audience_ladder(toy.ev4, url)
 
 
 # ── downgrade suite ────────────────────────────────────────────────────────
@@ -314,6 +390,35 @@ def test_downgrade_suite_reads_registry(monkeypatch):
     assert downgrade_suite("not_registered") == []
 
 
+def _install_registry(monkeypatch, **attrs):
+    access = types.ModuleType("app.access")
+    access.__path__ = []
+    registry = types.ModuleType("app.access.registry")
+    for k, v in attrs.items():
+        setattr(registry, k, v)
+    monkeypatch.setitem(sys.modules, "app.access", access)
+    monkeypatch.setitem(sys.modules, "app.access.registry", registry)
+
+
+def test_downgrade_suite_fails_when_registry_lacks_derived_registry(monkeypatch):
+    _install_registry(monkeypatch)
+    with pytest.raises(ValueError, match="defines no DERIVED_REGISTRY"):
+        downgrade_suite()
+
+
+@pytest.mark.parametrize("derived_registry, missing", [
+    ({"recap": {"source": ["journal_entries"]}}, "derive_from"),
+    ({"recap": types.SimpleNamespace(sources=["journal_entries"])}, "derive_from"),
+    ([{"derive_from": ["journal_entries"]}], "derived_type"),
+    ([{"derived_type": "recap"}], "derive_from"),
+    ([types.SimpleNamespace(derived_type="recap")], "derive_from"),
+])
+def test_downgrade_suite_rejects_incomplete_entries(monkeypatch, derived_registry, missing):
+    _install_registry(monkeypatch, DERIVED_REGISTRY=derived_registry)
+    with pytest.raises(ValueError, match=f"has no '{missing}'"):
+        downgrade_suite()
+
+
 def test_downgrade_suite_reads_list_registry(monkeypatch):
     # RC-8 shape: a list of {derived_type, derive_from} entries.
     access = types.ModuleType("app.access")
@@ -335,3 +440,23 @@ async def test_downgrade_case_passes_and_catches(toy):
     toy.state["downgraded"] = False
     with planted():
         await case.check(player, "/thing/visible", "/thing/missing", lambda: None)
+
+
+async def test_downgrade_case_refuses_derived_not_visible_before(toy):
+    case = DowngradeCase("recap", ("journal_entries",))
+    with pytest.raises(ValueError, match=r"/thing/missing returned 404"):
+        await case.check(toy.actors["player"], "/thing/missing", "/thing/missing", lambda: None)
+
+
+# ── probe runner ───────────────────────────────────────────────────────────
+
+async def test_runner_fails_a_probe_that_runs_no_family_check(toy):
+    async def probe_nothing(ev4, actor):
+        await actor.get("/clean")
+
+    async def probe_checks(ev4, actor):
+        assert_no_canary(actor, await actor.get("/clean"))
+
+    await run_probe(Probe("GET", "/clean", probe_checks), toy.ev4, toy.actors["player"])
+    with pytest.raises(pytest.fail.Exception, match="probe test_families.probe_nothing ran no EV-4 family check"):
+        await run_probe(Probe("GET", "/clean", probe_nothing), toy.ev4, toy.actors["player"])

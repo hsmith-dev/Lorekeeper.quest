@@ -12,6 +12,7 @@ from tests.ev4 import report
 from tests.ev4.families import assert_no_canary
 from tests.ev4.fixtures import (
     CANARIES, CANARY_RE, create_user, find_canaries, load_seed, roles_available, seed_canary_campaign,
+    validate_seed,
 )
 from tests.ev4.report import EV4Leak
 
@@ -46,12 +47,28 @@ def test_seed_party_fields_hold_no_placeholder():
                 assert "{canary:" not in json.dumps(row.get(f)), f"{key}.{f} is Party-visible"
 
 
+@pytest.mark.parametrize("mutate, match", [
+    (lambda s: s["npcs"][0].update(secret="{canary:NPCSECRET}"), r"npcs: unknown keys \['secret'\]"),
+    (lambda s: s["campaign"].update(motto="x"), r"campaign: unknown keys \['motto'\]"),
+    (lambda s: s["source_documents"][0]["chunks"][0].update(page=1), r"source_documents.chunks: unknown keys"),
+    (lambda s: s["character_sheet_templates"][0]["sheets"][0].update(gm_notes="x"),
+     r"character_sheet_templates.sheets: unknown keys"),
+])
+def test_seed_keys_the_seeder_does_not_map_fail(mutate, match):
+    seed = load_seed()
+    validate_seed(seed)
+    mutate(seed)
+    with pytest.raises(ValueError, match=match):
+        validate_seed(seed)
+
+
 # ── Seeding ────────────────────────────────────────────────────────────────
 
 async def test_seed_replaces_every_placeholder(ev4, db):
     a = ev4.a
     assert {c.kind for c in a.canaries} == GM_ONLY_KINDS
     assert all(CANARIES[c.token] == c and c.campaign_id == a.campaign_id for c in a.canaries)
+    found: set[str] = set()
     for table in ("journal_entries", "npcs", "quests", "shorthand_terms", "session_plans", "chat_sessions",
                   "source_documents", "source_chunks", "character_sheets"):
         rows = (await db.execute(
@@ -62,6 +79,8 @@ async def test_seed_replaces_every_placeholder(ev4, db):
         assert "{canary:" not in text
         assert set(find_canaries(text)) <= a.tokens
         assert find_canaries(text), f"{table} holds no canary"
+        found |= set(find_canaries(text))
+    assert a.tokens <= found, f"minted but never stored: {sorted(a.tokens - found)}"
 
 
 async def test_canaries_are_unique_per_seeding(ev4, db):
@@ -152,3 +171,19 @@ async def test_role_actors_resolve_lazily(ev4, db, name):
     if name == "cross_gm_player":
         assert actor.may_see(ev4.b.canary("NPCNOTES"))
         assert not actor.may_see(ev4.a.canary("NPCNOTES"))
+
+
+async def test_module_level_make_member(ev4, db):
+    # E0-Access.13 calls tests.ev4.fixtures.make_member(db, role=..., campaign_id=...).
+    from tests.ev4.fixtures import make_member
+
+    if not await roles_available(db):
+        with pytest.raises(pytest.skip.Exception, match="roles not yet available"):
+            await make_member(db, role="player", campaign_id=ev4.a.campaign_id)
+        return
+    user = await make_member(db, role="gm", campaign_id=ev4.a.campaign_id)
+    row = (await db.execute(sa.text(
+        "SELECT role::text, created_at IS NOT NULL, updated_at IS NOT NULL FROM campaign_members "
+        "WHERE campaign_id = :c AND user_id = :u"
+    ), {"c": ev4.a.campaign_id, "u": user.id})).one()
+    assert row[0] in ("co_gm", "gm") and row[1] and row[2]

@@ -27,6 +27,10 @@ SAMPLE_ID = "00000000-0000-4000-8000-000000000000"
 _PARAM_RE = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)(?::([A-Za-z_]+))?\}")
 _SAMPLES = {None: SAMPLE_ID, "str": SAMPLE_ID, "uuid": SAMPLE_ID, "int": "1", "float": "1.0",
             "path": f"{SAMPLE_ID}/{SAMPLE_ID}"}
+# Name-based samples for params that are not UUIDs. Share tokens are
+# secrets.token_urlsafe(24): 32 urlsafe characters, mixed case, `_` and `-`.
+SAMPLE_TOKEN = "Ab3_dE-f9GhIjK2LmN_oPq-RsT4uVwXy"
+_NAMED_SAMPLES = {"token": SAMPLE_TOKEN}
 
 
 class UnknownRouteKind(Exception):
@@ -71,9 +75,12 @@ def api_routes(app) -> list[ApiRoute]:
 
 
 def sample_path(path: str) -> str:
-    """A concrete request path for a route template (``{x}`` -> a UUID)."""
+    """A concrete request path for a route template (``{token}`` -> a
+    share-token-shaped string, any other ``{x}`` -> a UUID)."""
     def sub(m: re.Match) -> str:
-        conv = m.group(2)
+        name, conv = m.group(1), m.group(2)
+        if conv in (None, "str") and name in _NAMED_SAMPLES:
+            return _NAMED_SAMPLES[name]
         if conv not in _SAMPLES:
             raise ValueError(f"no sample for path converter {conv!r} in {path!r}")
         return _SAMPLES[conv]
@@ -97,5 +104,5 @@ def is_api_location(loc: nginx.Location | None) -> bool:
     if loc is None:
         return False
     if loc.modifier in (nginx.REGEX, nginx.REGEX_CI):
-        return loc.uri.startswith("^/api")
-    return loc.uri.startswith("/api")
+        return loc.uri.startswith("^/api/") or loc.uri.startswith("^/api$")
+    return loc.uri == "/api" or loc.uri.startswith("/api/")

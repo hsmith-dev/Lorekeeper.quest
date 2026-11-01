@@ -148,6 +148,50 @@ async def create_user(db: AsyncSession, label: str):
     return user
 
 
+# The keys seed_canary_campaign maps for each record type. A key outside
+# these would be dropped silently (and a canary in it minted but never
+# stored), so validate_seed rejects it.
+SEED_FIELDS: dict[str, set[str]] = {
+    "campaign": {"name", "genre", "description"},
+    "journal_entries": {"narrative", "shorthand", "session_date"},
+    "npcs": {"name", "role", "status", "description", "notes"},
+    "quests": {"title", "description", "status", "notes"},
+    "shorthand_terms": {"term", "meaning", "usage"},
+    "session_plans": {"title", "content"},
+    "chat_sessions": {"title", "messages"},
+    "source_documents": {"title", "filename", "chunks"},
+    "source_documents.chunks": {"content"},
+    "character_sheet_templates": {"name", "fields", "sheets"},
+    "character_sheet_templates.sheets": {"name", "data"},
+}
+
+
+def validate_seed(data: dict) -> None:
+    """ValueError naming any key the seeder would not store."""
+    def check(record_type: str, row: Any) -> None:
+        if not isinstance(row, dict):
+            raise ValueError(f"seed {record_type}: expected an object, got {row!r}")
+        unknown = set(row) - SEED_FIELDS[record_type]
+        if unknown:
+            raise ValueError(f"seed {record_type}: unknown keys {sorted(unknown)} (tests/ev4/fixtures.py "
+                             f"maps only {sorted(SEED_FIELDS[record_type])})")
+
+    unknown_top = set(data) - SEED_KEYS
+    if unknown_top:
+        raise ValueError(f"seed: unknown top-level keys {sorted(unknown_top)}")
+    check("campaign", data["campaign"])
+    for record_type in SEED_FIELDS:
+        if record_type == "campaign" or "." in record_type:
+            continue
+        for row in data.get(record_type, []):
+            check(record_type, row)
+            for child_key in ("chunks", "sheets"):
+                child_type = f"{record_type}.{child_key}"
+                if child_type in SEED_FIELDS:
+                    for child in row.get(child_key, []):
+                        check(child_type, child)
+
+
 @dataclass
 class SeededCampaign:
     campaign_id: uuid.UUID
@@ -182,7 +226,10 @@ async def seed_canary_campaign(db: AsyncSession, owner, seed: dict | None = None
 
     campaign_id = uuid.uuid4()
     minted: list[Canary] = []
-    data = render_seed(seed if seed is not None else load_seed(), campaign_id, minted)
+    raw = seed if seed is not None else load_seed()
+    validate_seed(raw)
+    raw = {k: v for k, v in raw.items() if k != "_doc"}
+    data = render_seed(raw, campaign_id, minted)
     ids: dict[str, list[uuid.UUID]] = {}
 
     def add(kind: str, row) -> None:
@@ -292,6 +339,24 @@ async def _role_value(db: AsyncSession, role: str) -> str:
     return candidates[0]
 
 
+async def make_member(db: AsyncSession, *, role: str = "player", campaign_id: uuid.UUID, user=None,
+                      label: str | None = None):
+    """Add ``user`` (a new committed User when None) to ``campaign_id`` as a
+    CampaignMember with ``role`` ("player", or "gm"/"co_gm" for a co-GM).
+    Skips the test with "roles not yet available" until
+    ``campaign_members.role`` exists. Returns the user."""
+    if not await roles_available(db):
+        pytest.skip("roles not yet available")
+    value = await _role_value(db, role)
+    user = user or await create_user(db, label or role)
+    await db.execute(sa.text(
+        "INSERT INTO campaign_members (id, campaign_id, user_id, role, created_at, updated_at) "
+        "VALUES (:id, :c, :u, :r, now(), now())"
+    ), {"id": uuid.uuid4(), "c": campaign_id, "u": user.id, "r": value})
+    await db.commit()
+    return user
+
+
 # ── Actors ─────────────────────────────────────────────────────────────────
 
 @dataclass
@@ -368,15 +433,10 @@ class EV4:
 
     async def make_member(self, role: str = "player", campaign_id: uuid.UUID | None = None, user=None,
                           label: str | None = None):
-        """Add a CampaignMember with ``role``; skips while roles do not exist."""
-        await self.require_roles()
-        value = await _role_value(self.db, role)
-        user = user or await create_user(self.db, label or role)
-        await self.db.execute(sa.text(
-            "INSERT INTO campaign_members (id, campaign_id, user_id, role) VALUES (:id, :c, :u, :r)"
-        ), {"id": uuid.uuid4(), "c": campaign_id or self.a.campaign_id, "u": user.id, "r": value})
-        await self.db.commit()
-        return user
+        """Add a CampaignMember with ``role`` (Campaign A by default); skips
+        while roles do not exist. See the module-level make_member."""
+        return await make_member(self.db, role=role, campaign_id=campaign_id or self.a.campaign_id,
+                                 user=user, label=label)
 
     async def actor(self, name: str) -> Actor:
         if name in self._actors:

@@ -314,16 +314,18 @@ def _location_args(d: Directive) -> tuple[str, str, re.Pattern | None]:
             raise NginxParseError(f"{d.where}: unknown location modifier {mod!r}")
     elif len(args) == 1:
         raw = args[0]
+        if raw in _MODIFIERS:
+            raise NginxParseError(f"{d.where}: location modifier {raw!r} with no URI")
         if raw.startswith("@"):
             mod, uri = NAMED, raw
         elif raw.startswith("~*"):
             mod, uri = REGEX_CI, raw[2:]
+        elif raw.startswith("^~"):
+            mod, uri = NOREGEX, raw[2:]
         elif raw.startswith("~"):
             mod, uri = REGEX, raw[1:]
-        elif raw.startswith("=") and len(raw) > 1:
+        elif raw.startswith("="):
             mod, uri = EXACT, raw[1:]
-        elif raw in _MODIFIERS:
-            raise NginxParseError(f"{d.where}: location modifier {raw!r} with no URI")
         else:
             mod, uri = PREFIX, raw
     else:

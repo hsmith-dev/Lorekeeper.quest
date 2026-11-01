@@ -84,6 +84,14 @@ def test_case_sensitive_vs_insensitive_regex():
     assert pick("location ~* ^/A$ { }", "/a") == "location ~* ^/A$"
 
 
+def test_glued_modifiers_parse_like_spaced_ones():
+    root = tree("location ^~/a/ { } location =/b { } location ~*\\.png$ { } location ~^/c { }")
+    assert [loc.label for loc in root.children] == [
+        "location ^~ /a/", "location = /b", "location ~* \\.png$", "location ~ ^/c",
+    ]
+    assert pick("location ^~/a/ { } location ~ /a/b { }", "/a/b") == "location ^~ /a/"
+
+
 def test_named_locations_never_match():
     assert pick("location @fallback { } location / { }", "/@fallback") == "location /"
 

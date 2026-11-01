@@ -19,6 +19,7 @@ from typing import Awaitable, Callable, Iterable
 import yaml
 
 from tests.ev4 import EV4_DIR
+from tests.ev4.fixtures import ACTOR_NAMES
 from tests.ev4.routes import WS, route_key
 
 EXEMPTIONS_PATH = EV4_DIR / "exemptions.yaml"
@@ -57,6 +58,10 @@ def ev4_probe(method: str, path: str, actors: Iterable[str] = DEFAULT_ACTORS):
     actors = tuple(actors)
     if not actors:
         raise ValueError(f"ev4_probe({method} {path}): needs at least one actor")
+    unknown = [a for a in actors if a not in ACTOR_NAMES]
+    if unknown:
+        raise ValueError(f"ev4_probe({method} {path}): unknown actor(s) {unknown}; actors are "
+                         f"{', '.join(ACTOR_NAMES)}")
 
     def register(fn):
         if not inspect.iscoroutinefunction(fn):
@@ -91,7 +96,10 @@ def load_exemptions(path: Path = EXEMPTIONS_PATH) -> list[Exemption]:
     for i, item in enumerate(data):
         if not isinstance(item, dict) or set(item) - {"route", "reason"} or "route" not in item:
             raise ValueError(f"{path}: entry {i} must be a mapping with `route` and `reason`, got {item!r}")
-        route = " ".join(str(item["route"]).split())
+        parts = str(item["route"]).split()
+        if len(parts) != 2:
+            raise ValueError(f"{path}: entry {i} route must be 'METHOD PATH', got {item['route']!r}")
+        route = route_key(*parts)
         reason = item.get("reason")
         out.append(Exemption(route, "" if reason is None else str(reason).strip()))
     return out

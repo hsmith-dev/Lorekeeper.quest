@@ -20,6 +20,8 @@ class EV4Leak(AssertionError):
 class Report:
     leaks: int = 0
     details: list[str] = field(default_factory=list)
+    # Family helper calls; the probe runner requires each probe to make one.
+    family_calls: int = 0
 
 
 _current = Report()
@@ -31,6 +33,15 @@ def current() -> Report:
 
 def leak_count() -> int:
     return _current.leaks
+
+
+def family_calls() -> int:
+    return _current.family_calls
+
+
+def note_family_call() -> None:
+    """Called by every family helper, so a probe that checks nothing fails."""
+    _current.family_calls += 1
 
 
 def record_leak(message: str, hits=(), *, count: int = 1) -> None:
