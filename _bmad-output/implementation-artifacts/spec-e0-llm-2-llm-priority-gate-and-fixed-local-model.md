@@ -2,14 +2,28 @@
 title: 'E0-LLM.2: One priority gate for the local LLM, and one fixed local model'
 type: 'feature'
 created: '2026-10-31'
-status: 'in-review'
+status: 'done'
 baseline_revision: 'fc1806a9a15f2da98765b946e20d733d46fb2114'
 review_loop_iteration: 0
-followup_review_recommended: false
+followup_review_recommended: true
 context:
   - '{project-root}/_bmad-output/implementation-artifacts/epic-6-context.md'
 warnings: [oversized]
-deferred: []
+deferred:
+  - summary: >-
+      A Slot that is never released renews forever, so a leaked slot would hold capacity until the process restarts.
+    evidence: |-
+      _renew_loop has no maximum hold time and stops only on release(). No current path is shown to leak (the chat route also releases in a BackgroundTask), but a middleware failure before the response starts was not ruled out.
+    location: >-
+      src/backend/app/core/llm_gate.py (_renew_loop)
+    severity: medium (unverified)
+  - summary: >-
+      Auxiliary request-path calls with short timeouts (search-query rewrite, autocomplete, quest suggestions) wait up to the full 60 s gate budget, and their except Exception turns LLMBusy into an empty result. The chat stream route can therefore wait twice (in _prepare_chat, then in reserve_slot).
+    evidence: |-
+      chat_service calls complete_messages with timeout 8-20 s inside except Exception; the gate's budget is llm_gate_wait_s unless wait_s is passed. The intent fixes the request wait at LLM_GATE_WAIT_S, so changing it needs an owner decision; E0-LLM.6 (gate contention) is the natural place.
+    location: >-
+      src/backend/app/services/chat_service.py; src/backend/app/api/routes/chat.py (_prepare_chat)
+    severity: medium
 ---
 
 <intent-contract>
@@ -120,3 +134,76 @@ deferred: []
 ## Spec Change Log
 
 ## Review Triage Log
+
+### 2026-11-01 — Review pass
+- verdicts: 38 findings — high 0, medium 13, low 18, false 4, maybe-false 3
+- findings:
+  - `[medium]` `[patch]` (blind) A cancelled release() leaves the holder in place for 30 s — the Redis removal now runs under asyncio.shield.
+  - `[medium]` `[patch]` (blind) A cancel or Redis error after the server-side grant leaves an orphan holder — cleanup now removes the token from all three keys, shielded.
+  - `[maybe-false]` `[defer]` (blind) A leaked Slot renews forever — no leaking path was shown; deferred as medium (unverified).
+  - `[medium]` `[patch]` (blind) The _held flag set inside the stream_messages generator leaks into the consumer's context — stream_messages now uses reserve_slot and releases in finally, without held(); test added.
+  - `[low]` `[reject]` (blind) Wall-clock skew between hosts — a single-box deployment shares one clock, and switching to Redis TIME rewrites the script for no demonstrated case.
+  - `[medium]` `[patch]` (blind) narrative forces a reload when LOCAL_LLM_MODEL != KOBOLD_MODEL — model_for now returns kobold_base_model only for the base variant, else local_llm_model.
+  - `[false]` `[reject]` (blind) Eval runs at interactive priority — eval is a GM's synchronous Settings request awaiting its answer, so gm_interactive is the right class.
+  - `[low]` `[reject]` (blind) The frontend fallback waits again after llm_busy — fixing it needs a frontend branch; it is rare (the gate busy for 60 s) and outside the gate.
+  - `[low]` `[reject]` (blind) The SSE route is silent while waiting, and a disconnect doesn't stop the wait — the story requires raising before the stream starts; disconnect polling adds complexity.
+  - `[low]` `[patch]` (blind) The local_llm_model default test's assertion never runs — the test now builds Settings with an empty value and asserts unconditionally.
+  - `[medium]` `[patch]` (blind) Missing tests (narrative single slot, narrative call sites, SSE error path, cancel at grant) — tests added (see the verification-gap rows).
+  - `[low]` `[patch]` (blind) .env.example doesn't mention LLM_GATE_CAPACITY, and wait_s has no lower bound — comment line added; ge=0.
+  - `[low]` `[reject]` (blind) snapshot() counts stale waiters and has no caller — the admin System tab consumes it later, and the stale window is 5 s.
+  - `[false]` `[reject]` (blind) Spec loose ends — the Auto Run Result is written at finalize, and the triage logs fill in during review.
+  - `[medium]` `[patch]` (edge) release() cancelled under an anyio scope — same root as blind row 1; shielded.
+  - `[medium]` `[patch]` (edge) The BackgroundTask backstop is a no-op after a cancelled release — same root; with the shield, the first release completes.
+  - `[medium]` `[patch]` (edge) Orphan holder after a server-side grant — same root as blind row 2.
+  - `[low]` `[patch]` (edge) A RedisError in cleanup after the budget turns LLMBusy into fail-open — the timeout path now uses the quiet cleanup, so it always raises LLMBusy.
+  - `[low]` `[patch]` (edge) A cancelled cleanup await leaves the waiter behind — shielded by the same fix.
+  - `[medium]` `[patch]` (edge) _held leaks between yields — same root as blind row 4.
+  - `[low]` `[reject]` (edge) A consumer that breaks without aclose holds the slot until GC — with held() removed, only the slot's lifetime remains, and CPython finalises the async generator promptly.
+  - `[medium]` `[patch]` (edge) narrative reload with a distinct LOCAL_LLM_MODEL — same root as blind row 6.
+  - `[maybe-false]` `[defer]` (edge) Short-timeout callers wait 60 s at the gate — the intent fixes the wait at LLM_GATE_WAIT_S; deferred to the owner / E0-LLM.6.
+  - `[low]` `[patch]` (edge) OLLAMA_NUM_PARALLEL=0 crashes startup — a before-validator now maps 0 to 1; test added.
+  - `[low]` `[reject]` (edge) snapshot() is unguarded when Redis is down — no caller yet; the admin tab story will handle it.
+  - `[low]` `[patch]` (edge) options with stream=True breaks the non-streaming call — stream False is now pinned after **options.
+  - `[low]` `[reject]` (edge) Clock skew — same as blind row 5.
+  - `[medium]` `[patch]` (edge claim) Release isn't guaranteed on disconnect — covered by the shield patch.
+  - `[medium]` `[patch]` (edge claim) Cancel-while-waiting leaves a granted holder — covered by the all-keys cleanup.
+  - `[medium]` `[patch]` (edge claim) The narrative fallback is never reached — covered by the model_for patch.
+  - `[low]` `[patch]` (verification-gap) The task="narrative" call sites are untested — tests added for generate_narrative, test_provider_connection and run_evaluation.
+  - `[low]` `[patch]` (verification-gap) The single slot around generate_narrative is untested — test added (the native call 404s, the fallback runs, one acquisition). ai_service's native client is now llm_provider._client, so the MockTransport covers it.
+  - `[low]` `[patch]` (verification-gap) The SSE mid-stream error path is untested — route test added.
+  - `[low]` `[patch]` (verification-gap) A LOCAL_LLM_MODEL override is never exercised — test added with a distinct model.
+  - `[low]` `[patch]` (verification-gap, filed defer) The OLLAMA_NUM_PARALLEL alias is untested — added alongside the 0-to-1 validator test.
+  - `[false]` `[reject]` (verification-gap other) The redundant release paths can't be tested separately — this is intentional belt and braces, and release is idempotent.
+  - `[maybe-false]` `[defer]` (intent) _prepare_chat's gated rewrite call doubles the wait and swallows LLMBusy — grouped with the short-timeout deferral.
+  - `[false]` `[reject]` (intent) The dev Redis image (redis:7) differs from CI (Valkey 8) — the orchestrator directed Valkey (BSD; the owner is still deciding), and both speak the same Lua/ZSET API.
+
+## Auto Run Result
+
+Status: done
+
+**Summary:** Added `app/core/llm_gate.py`, a Redis priority semaphore. It serves the five gate classes in priority order, first in first out within a class. Acquire is atomic in Lua. Holders have a 30 s TTL and renew every 10 s, and dead waiters are purged. The gate is reentrant, fails open without Redis, and raises `LLMBusy` on timeout. For the Jobs wrapper it adds `current_class` and `current_deadline`, plus `class_for_queue` and `snapshot()`. `complete_messages` and `stream_messages` gate platform-LLM calls only (BYOK bypasses the gate) and take `task`, `gate_class` and `options`. `model_for` pins `LOCAL_LLM_MODEL`, except the base variant on `narrative`. `num_ctx`, `num_gpu` and `keep_alive` are stripped. `/api/chat/stream` reserves its slot before streaming, so a busy gate returns a normal 503 `llm_busy`.
+
+**Files changed:**
+- `src/backend/app/core/llm_gate.py` -- new: the gate.
+- `src/backend/app/core/config.py` -- `local_llm_model`, `llm_gate_wait_s`, `llm_gate_capacity` (LLM_GATE_CAPACITY / OLLAMA_NUM_PARALLEL; 0 maps to 1).
+- `src/backend/app/services/llm_provider.py` -- `uses_platform_llm`, `model_for`, `strip_local_options`, `gated`, `reserve_slot`, `_transport`/`_client`; calls are gated.
+- `src/backend/app/services/ai_service.py` -- one slot across the native attempt and the fallback; `task="narrative"`.
+- `src/backend/app/services/eval_service.py` -- `task="narrative"`.
+- `src/backend/app/api/routes/chat.py` -- the SSE stream reserves its slot first and releases it in finally, plus a BackgroundTask.
+- `src/backend/tests/test_llm_gate.py`, `src/backend/tests/test_llm_provider_gate.py` -- new tests (fake and real Valkey).
+- `src/backend/requirements-dev.txt` -- fakeredis[lua] 2.26.2, lupa 2.8.
+- `licenses/register.yaml` -- fakeredis (BSD-3-Clause), lupa (MIT), sortedcontainers (Apache-2.0), dev-only.
+- `.github/workflows/backend-tests.yml` -- `valkey/valkey:8-alpine` service and `REDIS_TEST_URL`.
+- `.env.example` -- the new settings.
+
+**Review:** 1 pass, 38 findings. Patched 5 medium root causes: shielded release, all-keys cleanup, the stream held-flag leak, the narrative model reload, and missing tests. Also patched the low items: settings bounds, OLLAMA_NUM_PARALLEL=0, the stream False pin, docs and tests. Deferred 2: a renewal cap for leaked slots (unverified), and short-timeout auxiliary callers waiting the full gate budget, including the double wait in chat stream prep. Rejected: clock skew (single box), the eval class (false), the frontend fallback re-wait, SSE disconnect polling, snapshot gaps (no caller yet), early break without aclose, redundant release paths (false), spec loose ends (false), and dev vs CI Redis image (false; the orchestrator directed Valkey).
+Follow-up review: true. More than one medium entry was patched, and one specific risk remains unverified: the shielded release under a real Starlette/anyio client disconnect is covered only by a fakeredis test, which may pass without the shield.
+
+**Verification:** PR #23 CI is all green. Backend tests: 184 passed, 0 skipped, including 16 `[real]` gate cases against Valkey 8; none of the 99 baseline tests regressed. Dependency licences pass for backend and frontend in both editions, and the register check passes. Frontend build passes. `py_compile` is clean.
+
+**Needs desktop verification:**
+- Priority order under real contention: on the desktop, with Redis and Ollama up, run a scratch script that holds a `job_backfill` `complete_messages` call while `gm_interactive` and `live_recap` calls queue. Expect `live_recap` to be served before `gm_interactive`. Watch `llm_gate.snapshot()` and the `llm_gate_granted` log lines.
+- Wait time for an interactive call behind a running background Job, read from the `llm_gate_granted` `waited_ms` field. SPIKE-6 measurement belongs to E0-Platform.10.
+- A mid-stream SSE client disconnect frees the slot at once: `ZCARD llm_gate:holders` returns 0 within about 1 s, not 30 s.
+
+**Residual risks:** fail-open means no ordering while Redis is down. The two deferred items above. Sprint-status sync was skipped per the orchestrator brief.
