@@ -21,7 +21,9 @@ map (`register_visibility_kind`), the extension points
 `remove_member`, `revoke_share_token`, `campaign_grants_removed`,
 `publish_grant_change`, `grant_channel`, `grant_changed`, `grant_watch`, `GRANT_POLL_S`) and
 the cache key scheme (`cache_key`, `cache_generation`, `cached_json`,
-`invalidate_campaign_cache`, `CACHE_TTL_S`).
+`invalidate_campaign_cache`, `CACHE_TTL_S`). E0-Jobs.6 registers `grant_watch` as
+app/core/sse.py's close watch (app.core may not import app.access), so every
+`sse_response` stream ends when its ctx's grant changes.
 """
 from app.access.audience import (
     ALWAYS_GM_FIELDS, GM_AUDIENCE, MEMBERS, PUBLIC, AnyOf, Audience, AudienceLevel, covers, ctx_audience,
@@ -61,6 +63,10 @@ from app.access.visibility import (
     register_visibility_listener, set_visibility, set_visibility_many, visibility_exception_handler,
     visibility_kinds,
 )
+from app.access.grants import _check_watchable
+from app.core import sse as _sse
+
+_sse.register_close_watch(grant_watch, check=_check_watchable)
 
 __all__ = [
     "CACHE_TTL_S",

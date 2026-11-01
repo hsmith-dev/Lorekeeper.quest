@@ -13,9 +13,11 @@ LorekeeperWorker process (`python -m app.jobs.worker`). E0-Jobs.4 adds the
 reaper. E0-Jobs.5 adds admission (`admission`: heavy-model resource leases,
 the Live Session hold `hold`/`renew`/`release`, the delayed set) and cursor
 Jobs plus the data_backfills runner (`backfill`: `run_cursor`, `CursorStep`,
-`register_backfill`).
+`register_backfill`). E0-Jobs.6 adds the `job` events (`events`: published
+on `jobs:{campaign_id}` after every commit that changes a Job row; importing
+this package installs its listener).
 """
-from app.jobs import outbox  # noqa: F401  (installs the session listeners)
+from app.jobs import events, outbox  # noqa: F401  (install the session listeners)
 from app.jobs.admission import hold, release, renew
 from app.jobs.backfill import CursorStep, register_backfill, run_cursor
 from app.jobs.enqueue import enqueue, job_accepted

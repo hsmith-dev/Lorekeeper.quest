@@ -97,7 +97,7 @@ from sqlalchemy.pool import NullPool
 from app.access.context import CampaignContext, ctx_for
 from app.access.policy import ANON, GM, PLAYER, NotFound
 from app.clients.errors import ModelServiceUnavailable
-from app.core import hooks, llm_gate
+from app.core import hooks, llm_gate, pubsub
 from app.core.config import get_settings
 from app.core.errors import LLMConfigError, LLMError, StructuredOutputError
 from app.core.logging import job_log_context
@@ -105,7 +105,7 @@ from app.core.valkey_client import set_valkey
 from app.db.models.job import ACTIVE_STATUSES, Job
 from app.db.models.user import User
 from app.domain.enums import JobErrorCode, JobQueue, JobStatus
-from app.jobs import admission, backfill, files_gc, outbox
+from app.jobs import admission, backfill, events, files_gc, outbox
 from app.jobs.errors import TERMINAL_CODES
 from app.jobs.registry import JobKind, get_kind, load_kind_modules
 from app.services import llm_config_service
@@ -179,6 +179,8 @@ async def _claim(db: AsyncSession, job_id: uuid.UUID, worker_id: str) -> tuple[J
     if claimed is None:
         await db.rollback()
         return None
+    # A raw UPDATE: the after_flush listener cannot see it (E0-Jobs.6).
+    events.queue_job_event(db, job_id, status_changed=True)
     await db.commit()
     job = await db.get(Job, job_id, populate_existing=True)
     return job, dependency_status
@@ -376,6 +378,7 @@ def _reporter(session_factory: async_sessionmaker[AsyncSession], job: Job, worke
                     .values(**values)
                     .execution_options(synchronize_session=False)
                 )
+                events.queue_job_event(s, job.id, status_changed=False)  # raw UPDATE (E0-Jobs.6)
                 await s.commit()
         except DBAPIError as exc:
             if getattr(exc.orig, "sqlstate", None) != _LOCK_NOT_AVAILABLE:
@@ -842,7 +845,12 @@ class Reaper:
             return None
 
     async def _reap(self) -> ReapResult:
-        engine = create_async_engine(get_settings().database_url, poolclass=NullPool)
+        settings = get_settings()
+        engine = create_async_engine(settings.database_url, poolclass=NullPool)
+        # This pass's own asyncio client (it belongs to this asyncio.run): the
+        # rows the reaper requeues or fails publish their `job` events (E0-Jobs.6).
+        valkey = aioredis.from_url(settings.valkey_url, decode_responses=True)
+        previous = set_valkey(valkey)
         try:
             factory = async_sessionmaker(engine, expire_on_commit=False)
             result = await reap(factory, self._redis())
@@ -861,6 +869,9 @@ class Reaper:
             try:
                 await _drain_hooks()
             finally:
+                await pubsub.flush_pending()
+                set_valkey(previous)
+                await valkey.aclose()
                 await engine.dispose()
 
 
@@ -898,6 +909,7 @@ async def _perform(job_id: str) -> JobStatus | None:
         try:
             await _drain_hooks()
         finally:
+            await pubsub.flush_pending()  # trailing publishes, before this loop's client goes
             set_valkey(previous)
             await valkey.aclose()
             await engine.dispose()
