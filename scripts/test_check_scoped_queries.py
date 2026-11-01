@@ -95,6 +95,13 @@ def test_allowed_sites_pass(tmp_path):
     ("api/routes/x.py", "from app.access.context import as_system\n", 1),
     ("api/routes/y.py", "def r(ctx):\n    return getattr(ctx, 'as_system')('merge')\n", 2),
     ("services/z.py", "def r(as_system):\n    return as_system\n", 2),
+    # A system ctx built by hand, without as_system.
+    ("services/q.py", "def r(ctx):\n    return CampaignContext(actor='system', system_reason=None)\n", 2),
+    ("services/q.py", "import dataclasses\ndef r(ctx):\n    return dataclasses.replace(ctx, actor=ACTOR_SYSTEM)\n", 3),
+    ("services/q.py", "def r(ctx, why):\n    return dataclasses.replace(ctx, system_reason=why)\n", 2),
+    # An allowed name as a method, or nested in another function.
+    ("services/world_service.py", "class W:\n    def merge_entities(self, ctx):\n        return ctx.as_system('merge')\n", 3),
+    ("services/journal_service.py", "def outer(ctx):\n    def delete_journal_entry():\n        return ctx.as_system('entry_deleted')\n", 3),
     # A second definition elsewhere (a look-alike system ctx).
     ("access/other.py", "class Ctx:\n    def as_system(self, reason):\n        return self\n", 2),
 ])

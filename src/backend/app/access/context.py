@@ -34,7 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.access.audience import Audience, ctx_audience
 from app.access.identity import get_current_user
 from app.access.policy import (
-    ACTOR_SYSTEM, ACTOR_USER, GM, ROLES, Role, SystemReason, check_min_role, ctx_role, meets, not_found,
+    ACTOR_SYSTEM, ACTOR_USER, ANON, GM, ROLES, Role, SystemReason, check_min_role, ctx_role, meets, not_found,
 )
 from app.db.models.campaign import Campaign
 from app.db.models.campaign_member import CampaignMember
@@ -67,6 +67,12 @@ class CampaignContext:
             raise ValueError(f"CampaignContext: unknown role {self.role!r}")
         if self.is_owner and self.role != GM:
             raise ValueError("CampaignContext: the Owner's role is gm")
+        if self.actor not in (ACTOR_USER, ACTOR_SYSTEM):
+            raise ValueError(f"CampaignContext: unknown actor {self.actor!r}")
+        if (self.actor == ACTOR_SYSTEM) != (self.system_reason is not None):
+            raise ValueError("CampaignContext: a system ctx needs a system_reason, and only a system ctx has one")
+        if self.actor == ACTOR_SYSTEM and (self.role != GM or self.user_id is None):
+            raise ValueError("CampaignContext: a system ctx is a GM ctx of a real user")
 
     @property
     def is_gm(self) -> bool:
@@ -81,6 +87,8 @@ class CampaignContext:
         writes that must see every row (RC-6). `reason` must be a
         SystemReason; anything else raises ValueError. Allowed call sites are
         fixed by scripts/check_scoped_queries.py."""
+        if self.actor != ACTOR_USER or self.user_id is None or self.role == ANON:
+            raise ValueError("as_system: needs a user's request ctx (not anon, not already system)")
         try:
             why = SystemReason(reason)
         except ValueError:
@@ -110,7 +118,9 @@ def _parse_uuid(value: Any) -> uuid.UUID | None:
 async def _resolve(db: AsyncSession, user_id: uuid.UUID, campaign_id: uuid.UUID) -> CampaignContext | None:
     """The user's ctx in `campaign_id` now, or None (no such Campaign, or the
     user is neither its Owner nor a Member)."""
-    campaign = await db.get(Campaign, campaign_id)
+    # populate_existing: a long-lived (worker) session must see the grant as
+    # it is now, not as its identity map last loaded it.
+    campaign = await db.get(Campaign, campaign_id, populate_existing=True)
     if campaign is None:
         return None
     if campaign.user_id == user_id:
@@ -121,7 +131,7 @@ async def _resolve(db: AsyncSession, user_id: uuid.UUID, campaign_id: uuid.UUID)
     member = (await db.execute(
         sa.select(CampaignMember).where(
             CampaignMember.campaign_id == campaign_id, CampaignMember.user_id == user_id,
-        )
+        ).execution_options(populate_existing=True)
     )).scalar_one_or_none()
     if member is None:
         return None
@@ -194,7 +204,10 @@ def require_campaign_for(model: type, id_param: str, min_role: str = "player"):
         user: User = Depends(get_current_user),
         db: AsyncSession = Depends(get_db),
     ) -> CampaignContext:
-        row_id = _parse_uuid(request.path_params.get(id_param))
+        if id_param not in request.path_params:
+            # A wiring bug (typo or a non-path id), not a denial: fail loudly.
+            raise RuntimeError(f"require_campaign_for: route {request.url.path!r} has no path parameter {id_param!r}")
+        row_id = _parse_uuid(request.path_params[id_param])
         if row_id is None:
             not_found()
         row = await db.get(model, row_id)

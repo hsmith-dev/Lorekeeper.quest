@@ -111,6 +111,23 @@ def test_as_system_rejects_other_reasons(reason):
         _ctx().as_system(reason)
 
 
+def test_system_ctx_only_via_as_system_shape():
+    """A system ctx can't be assembled by hand with a missing reason, a
+    non-GM role or no user, and as_system refuses anon and system ctxs."""
+    with pytest.raises(ValueError):
+        _ctx("gm", actor="system")  # no system_reason
+    with pytest.raises(ValueError):
+        _ctx("gm", system_reason=SystemReason.MERGE)  # reason on a user ctx
+    with pytest.raises(ValueError):
+        _ctx("player", actor="system", system_reason=SystemReason.MERGE)
+    with pytest.raises(ValueError):
+        _ctx("gm", actor="robot")
+    with pytest.raises(ValueError):
+        _ctx("anon", user_id=None).as_system("merge")
+    with pytest.raises(ValueError):
+        _ctx("gm").as_system("merge").as_system("merge")
+
+
 def test_dependencies_are_memoized():
     assert require_campaign("gm") is require_campaign("gm")
     assert require_campaign("gm") is not require_campaign("owner")
@@ -223,6 +240,16 @@ async def test_ctx_for_after_removal(db, world):
         await ctx_for(db, world.co_gm.id, world.a)
 
 
+async def test_ctx_for_sees_a_grant_change_in_the_same_session(db, world):
+    """A long-lived (worker) session gets the grant as it is now."""
+    before = await ctx_for(db, world.co_gm.id, world.a)
+    assert before.role == "gm" and before.access_epoch == 3
+    await db.execute(sa.text("UPDATE campaign_members SET role = 'player', access_epoch = 9 WHERE id = :id"),
+                     {"id": world.co_gm_grant})
+    after = await ctx_for(db, world.co_gm.id, world.a)
+    assert after.role == "player" and after.access_epoch == 9 and after.grant_id == world.co_gm_grant
+
+
 # ── role_map / scoped_select_multi ─────────────────────────────────────────
 
 async def test_role_map_and_scoped_select_multi(db, world):
@@ -281,6 +308,8 @@ def _toy_app(db) -> FastAPI:
         return _ctx_json(ctx)
 
     toy.add_api_route("/journals/{journal_id}", journal)
+    # Wiring bug: the route has no {journal_id}.
+    toy.add_api_route("/miswired/{entry_id}", journal)
     toy.add_api_route("/journals/{journal_id}/gm", journal_gm)
     toy.dependency_overrides[get_db] = lambda: db
     return toy
@@ -358,3 +387,9 @@ async def test_require_campaign_for(toy, db, world):
         r = await toy.get(url, headers=bearer(world.player))
         assert r.status_code == 404 and r.content == missing.content, url
     assert missing.json() == NOT_FOUND
+
+
+async def test_require_campaign_for_miswired_route_fails_loudly(toy, db, world):
+    in_a = await _entry(db, world.owner, world.a)
+    with pytest.raises(RuntimeError, match="journal_id"):
+        await toy.get(f"/miswired/{in_a}", headers=bearer(world.player))

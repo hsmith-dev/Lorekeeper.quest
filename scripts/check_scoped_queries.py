@@ -10,7 +10,9 @@ may use it:
 
 Any other reference to `as_system` (a call, an attribute read, a bare name,
 an import, or `getattr(x, "as_system")`) under src/backend/app fails. The
-method's own definition in app/access/context.py is exempt. Tests are not
+method's own definition in app/access/context.py is exempt. So does building
+a system ctx by hand outside app/access/ (`ACTOR_SYSTEM`, `actor="system"`,
+or a `system_reason=` other than None). Tests are not
 scanned.
 
 E0-Access.5 adds the scoped-query ratchet here (`select(<registered
@@ -39,6 +41,9 @@ ALLOWED_SYSTEM_SITES = frozenset({
     ("app/services/world_service.py", "merge_entities"),
 })
 DEFINITION_FILE = "app/access/context.py"
+# A system ctx built by hand instead of through as_system.
+ACTOR_SYSTEM_NAME = "ACTOR_SYSTEM"
+ACCESS_PREFIX = "app/access/"
 DEFINITION_CLASS = "CampaignContext"
 
 
@@ -62,7 +67,9 @@ class _SystemVisitor(ast.NodeVisitor):
         self.found: list[Violation] = []
 
     def _allowed(self) -> bool:
-        return any((self.rel, fn) in ALLOWED_SYSTEM_SITES for fn in self.functions)
+        # Only inside the module-level allowed function itself (closures in
+        # it included); not a method or a nested def of the same name.
+        return bool(self.functions) and not self.classes and (self.rel, self.functions[0]) in ALLOWED_SYSTEM_SITES
 
     def _flag(self, node: ast.AST, what: str) -> None:
         if not self._allowed():
@@ -94,6 +101,18 @@ class _SystemVisitor(ast.NodeVisitor):
     def visit_Name(self, node: ast.Name) -> None:
         if node.id == SYSTEM_NAME:
             self._flag(node, f"references `{SYSTEM_NAME}`")
+        if node.id == ACTOR_SYSTEM_NAME and not self.rel.startswith(ACCESS_PREFIX):
+            self.found.append(Violation(self.rel, node.lineno, f"references `{ACTOR_SYSTEM_NAME}` (builds a system "
+                                        "ctx without as_system)"))
+        self.generic_visit(node)
+
+    def visit_keyword(self, node: ast.keyword) -> None:
+        # CampaignContext(..., actor="system") / dataclasses.replace(ctx, actor="system")
+        if not self.rel.startswith(ACCESS_PREFIX):
+            value = node.value.value if isinstance(node.value, ast.Constant) else ...
+            if (node.arg == "actor" and value == "system") or (node.arg == "system_reason" and value is not None):
+                self.found.append(Violation(self.rel, getattr(node, "lineno", 0) or 0,
+                                            f"sets `{node.arg}=` (builds a system ctx without as_system)"))
         self.generic_visit(node)
 
     def visit_alias(self, node: ast.alias) -> None:
