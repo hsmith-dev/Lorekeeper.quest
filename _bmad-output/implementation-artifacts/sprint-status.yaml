@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 10-31-2026 23:30
-last_updated: 11-01-2026 01:37
+last_updated: 11-01-2026 01:45
 project: Lorekeeper.quest
 project_key: NOKEY
 tracking_system: file-system
@@ -149,7 +149,7 @@ development_status:
   8-6-spoiler-safety-components-and-the-preview-shell: done
   8-7-global-current-campaign-and-the-campaignswitcher: done
   8-8-nav-restructure-route-redirects-unified-not-found-and-route: done
-  8-9-shortcut-registry-help-overlay-and-touch-target-audit: backlog
+  8-9-shortcut-registry-help-overlay-and-touch-target-audit: done
   epic-8-retrospective: optional
 
   epic-9: in-progress  # E0-WorldCore
