@@ -62,7 +62,17 @@ jobs:
         working-directory: src/backend
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt -r requirements-dev.txt
+          # CPU-only torch, exactly as the shipped image installs it (E0-Platform.2).
+          # The PyPI default is the CUDA build: ~15 nvidia-* wheels, several GB,
+          # which filled the runner's disk and made the job fail before any test ran.
+          pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu \
+            torch==2.15.0+cpu torchvision==0.29.2+cpu
+          pip install --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cpu \
+            -r requirements.txt -r requirements-dev.txt
+          # Guard: fail fast if anything pulled a CUDA build back in.
+          if pip list 2>/dev/null | grep -iE '^(nvidia-|cuda-)'; then
+            echo "::error::CUDA/NVIDIA wheels installed in backend CI; use the CPU index"; exit 1
+          fi
 
       # Two heads would make `alembic upgrade head` fail on every boot.
       # tests/migrations/test_upgrade_snapshot.py checks this too; this step
