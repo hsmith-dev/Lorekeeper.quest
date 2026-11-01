@@ -231,6 +231,38 @@ async def test_cancel_while_waiting_removes_waiter(make_gate):
         await holder.release()
 
 
+@pytest.mark.parametrize("failure", ["cancel", "redis_error"])
+async def test_failure_after_server_side_grant_leaves_no_holder(make_gate, failure):
+    # The Lua grant has run in Redis, but the caller never sees the reply
+    # (cancelled, or the connection dropped): the token must not stay behind
+    # in holders, where nothing renews or releases it for the 30 s TTL.
+    gate = make_gate()
+    script = gate._acquire_script
+    granted = asyncio.Event()
+
+    async def grant_then_fail(**kwargs):
+        await script(**kwargs)
+        granted.set()
+        if failure == "redis_error":
+            raise RedisConnectionError("connection lost after the reply was sent")
+        await asyncio.Event().wait()  # cancelled here
+
+    gate._acquire_script = grant_then_fail
+    task = asyncio.create_task(gate.acquire(GateClass.gm_interactive))
+    await asyncio.wait_for(granted.wait(), 1)
+    if failure == "cancel":
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    else:
+        with pytest.raises(RedisConnectionError):
+            await task
+    assert await gate.redis.zcard(gate.holders_key) == 0
+    gate._acquire_script = script
+    slot = await gate.acquire(GateClass.live_recap, wait_s=0)
+    await slot.release()
+
+
 async def test_release_is_idempotent_and_stops_renewal(make_gate):
     gate = make_gate(renew_every_s=0.01)
     slot = await gate.acquire(GateClass.gm_interactive)

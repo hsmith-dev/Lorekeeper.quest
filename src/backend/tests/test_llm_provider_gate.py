@@ -452,3 +452,80 @@ async def test_chat_stream_busy_is_plain_503(monkeypatch):
     assert r.status_code == 503
     assert r.json()["code"] == "llm_busy"
     assert not r.headers["content-type"].startswith("text/event-stream")
+
+
+@pytest.mark.parametrize("disconnect_after", [None, b"event: meta", b"event: delta"])
+async def test_chat_stream_client_disconnect_frees_slot(gate, monkeypatch, disconnect_after):
+    # A real client disconnect: the ASGI app is driven directly, the upstream
+    # is slow, and the client goes away before the body starts, after the
+    # meta event (before the first token), or after the first delta. The
+    # slot must be free at once, not after the 30 s holder TTL.
+    import asyncio
+
+    from app.api.deps import get_current_user, get_user_llm_config
+    from app.api.routes import chat as chat_routes
+    from app.core.limiter import limiter
+    from app.db.session import get_db
+    from app.main import app
+
+    async def slow_body():
+        for c in ["Once ", "upon ", "a ", "time"]:
+            yield ("data: " + json.dumps({"choices": [{"delta": {"content": c}}]}) + "\n\n").encode()
+            await asyncio.sleep(0.2)
+        yield b"data: [DONE]\n\n"
+
+    async def handler(request):
+        return httpx.Response(200, content=slow_body())
+
+    async def prepare(body, user, db, config):
+        return fake_prep()
+
+    async def persist(*args, **kwargs):
+        pass
+
+    monkeypatch.setattr(llm_provider, "_transport", httpx.MockTransport(handler))
+    monkeypatch.setattr(chat_routes, "_prepare_chat", prepare)
+    monkeypatch.setattr(chat_routes, "_persist_chat_turn", persist)
+    limiter.reset()
+    user = SimpleNamespace(id=uuid.uuid4(), access_granted=True)
+    app.dependency_overrides[get_current_user] = lambda: user
+    app.dependency_overrides[get_user_llm_config] = lambda: platform_cfg()
+    app.dependency_overrides[get_db] = lambda: None
+
+    body = json.dumps({"message": "Who is the BBEG?"}).encode()
+    got_delta = asyncio.Event()
+    if disconnect_after is None:
+        got_delta.set()
+    sent = []
+
+    async def receive():
+        if not sent:
+            sent.append(True)
+            return {"type": "http.request", "body": body, "more_body": False}
+        await got_delta.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        if (disconnect_after is not None and message["type"] == "http.response.body"
+                and disconnect_after in message.get("body", b"")):
+            got_delta.set()
+
+    scope = {
+        "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
+        "method": "POST", "scheme": "http", "path": "/api/chat/stream",
+        "raw_path": b"/api/chat/stream", "root_path": "", "query_string": b"",
+        "headers": [(b"host", b"test"), (b"content-type", b"application/json"),
+                    (b"content-length", str(len(body)).encode())],
+        "client": ("127.0.0.1", 1234), "server": ("test", 80),
+    }
+    try:
+        await asyncio.wait_for(app(scope, receive, send), timeout=2)
+    finally:
+        app.dependency_overrides.clear()
+    assert got_delta.is_set()
+    assert gate.acquired == [GateClass.gm_interactive]
+    for _ in range(50):
+        if await gate.holder_count() == 0:
+            break
+        await asyncio.sleep(0.01)
+    assert await gate.holder_count() == 0
