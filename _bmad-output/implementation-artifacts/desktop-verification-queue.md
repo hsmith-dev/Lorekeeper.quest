@@ -26,3 +26,9 @@ Stories were merged on green GitHub CI while the desktop was offline (owner deci
 - [ ] Stack: `docker compose -f docker-compose.prod.yml up -d --build`, `/api/health`, spaCy `en_core_web_trf` loads
 - [ ] Dev image `docker build -f src/backend/Dockerfile src/backend` (not shipped, so not in CI)
 - [ ] **Owner action before publishing any built image:** meet the GPL source obligation for OS packages (ship source or a written offer) — see `docs/LICENSING.md`
+
+## E0-LLM.2 — LLM priority gate and one fixed local model (PR #23)
+- [ ] Priority under real load (Redis/Valkey + Ollama up): hold a `job_backfill` call while `gm_interactive` and `live_recap` queue → `live_recap` is served first (watch `llm_gate.snapshot()` and `llm_gate_granted` logs)
+- [ ] Record `waited_ms` from `llm_gate_granted` when a request waits behind a background Job (SPIKE-6 measurement itself is E0-Platform.10)
+- [ ] Disconnect frees the slot: drop an SSE chat client mid-stream → `ZCARD llm_gate:holders` is 0 within ~1 s
+- [ ] Known open items: no hard cap on slot hold time (a leaked Slot renews forever); short helper calls (autocomplete, query rewrite) can wait the full 60 s gate timeout
