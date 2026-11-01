@@ -425,3 +425,216 @@ def test_real_register_is_valid():
         failures, _ = entries_check(reg, edition)
         assert failures == [], (edition, failures)
     assert not any(n.startswith("nvidia-") for _, n in names)
+
+
+# ---- E0-QA.8: expression precedence ------------------------------------------
+
+@pytest.mark.parametrize("lic, ok", [
+    ("(MIT OR GPL-3.0) AND GPL-3.0", False),   # used to split on OR first and pass
+    ("(MIT OR GPL-3.0) AND (BSD-3-Clause)", True),
+    ("(MIT) AND (GPL-3.0)", False),
+    ("MIT OR (GPL-3.0 AND LGPL-2.1)", True),
+    ("MIT/X11", True),
+])
+def test_expression_precedence(lic, ok):
+    assert POLICY.term_ok(lic) is ok
+
+
+# ---- E0-QA.8: OS packages (dpkg + copyright, apk) ------------------------------
+
+DEP5 = """Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: demo
+
+Files: *
+Copyright: someone
+License: GPL-2+
+
+Files: lib/*
+License: LGPL-2.1+ or BSD-3-clause
+ Some licence text.
+
+License: GPL-2+
+ /usr/share/common-licenses/GPL-2
+"""
+
+FREE_TEXT = """This package was debianized by someone.
+It is licensed under the GNU GPL; see /usr/share/common-licenses/GPL-3.
+"""
+
+STATUS = """Package: bash
+Status: install ok installed
+Version: 5.2.37-2
+
+Package: libfoo1
+Status: install ok installed
+Architecture: amd64
+Version: 1.0-1
+
+Package: oldpkg
+Status: deinstall ok config-files
+Version: 0.1
+
+Package: nodoc
+Status: install ok installed
+Version: 2.0
+"""
+
+
+def _dpkg_root(tmp_path: Path) -> Path:
+    root = tmp_path / "rootfs"
+    (root / "var/lib/dpkg").mkdir(parents=True)
+    (root / "var/lib/dpkg/status").write_text(STATUS)
+    (root / "usr/share/doc/bash").mkdir(parents=True)
+    (root / "usr/share/doc/bash/copyright").write_text(DEP5)
+    # libfoo1's doc dir is an absolute symlink, as dpkg leaves them (resolved inside ROOT)
+    (root / "usr/share/doc/foo-common").mkdir(parents=True)
+    (root / "usr/share/doc/foo-common/copyright").write_text(FREE_TEXT)
+    (root / "usr/share/doc/libfoo1").symlink_to("/usr/share/doc/foo-common")
+    return root
+
+
+def test_dpkg_scan_reads_status_and_copyright(tmp_path):
+    rows = cl.load_dpkg(_dpkg_root(tmp_path))
+    assert rows == [
+        ("bash", "5.2.37-2", "(LGPL-2.1+ OR BSD-3-clause) AND GPL-2+"),
+        ("libfoo1", "1.0-1", "GPL-3"),
+        ("nodoc", "2.0", "UNKNOWN (no copyright file)"),
+    ]
+
+
+@pytest.mark.parametrize("short, atoms", [
+    ("GPL-1+ or Artistic, and Expat", ["(GPL-1+ OR Artistic)", "Expat"]),
+    ("BSD-3-clause-Berkeley and DEC", ["BSD-3-clause-Berkeley", "DEC"]),
+    ("GPL-2+ with OpenSSL exception", ["GPL-2+ WITH OpenSSL exception"]),
+    ("LGPL-2.1+, BSD-3-clause,", ["LGPL-2.1+", "BSD-3-clause"]),
+])
+def test_dep5_terms(short, atoms):
+    assert cl.dep5_terms(short) == atoms
+
+
+def test_debian_copyright_dedupes_and_orders_deterministically():
+    text = ("Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/\n\n"
+            "Files: *\nLicense: BSD-2-Clause and GPL-2+\n\nFiles: a\nLicense: BSD-2-clause\n\n"
+            "Files: b\nLicense: GPL-2+, and BSD-2-Clause\n")
+    assert cl.debian_copyright_license(text) == "BSD-2-Clause AND BSD-2-clause AND GPL-2+"
+
+
+def test_debian_copyright_unstructured_without_refs_is_unknown():
+    assert cl.debian_copyright_license("Copyright 2020 someone. Do what you like.").startswith("UNKNOWN")
+
+
+def test_apk_scan(tmp_path):
+    root = tmp_path / "rootfs"
+    (root / "lib/apk/db").mkdir(parents=True)
+    (root / "lib/apk/db/installed").write_text(
+        "C:Q1abc=\nP:busybox\nV:1.37.0-r12\nL:GPL-2.0-only\n\nP:musl\nV:1.2.5-r9\nL:MIT\no:musl\n\n"
+        "P:nolicence\nV:1\n")
+    assert cl.load_apk(root) == [("busybox", "1.37.0-r12", "GPL-2.0-only"),
+                                 ("musl", "1.2.5-r9", "MIT"), ("nolicence", "1", "UNKNOWN")]
+    assert cl.load_os_packages(root) == [("apk", cl.load_apk(root))]
+
+
+def test_os_packages_without_a_database_is_an_error(tmp_path):
+    with pytest.raises(SystemExit, match="no dpkg"):
+        cl.load_os_packages(tmp_path)
+
+
+@pytest.mark.parametrize("edition", cl.EDITIONS)
+def test_os_aggregate_gpl_package_passes_when_registered(tmp_path, edition):
+    reg = make_register(tmp_path, [entry("bash", kind="apt", license="GPL-3+", images=["backend"])])
+    failures, _, _, _ = scan(reg, [("bash", "5.2", "GPL-3+")], edition, eco="apt")
+    assert failures == []
+    failures, _ = entries_check(reg, edition)
+    assert failures == []
+
+
+@pytest.mark.parametrize("edition", cl.EDITIONS)
+def test_gpl_os_package_off_the_aggregate_list_fails(tmp_path, edition):
+    reg = make_register(tmp_path, [entry("libreadline-gpl-thing", kind="apt", license="GPL-3+")])
+    failures, _, _, _ = scan(reg, [("libreadline-gpl-thing", "1", "GPL-3+")], edition, eco="apt")
+    assert len(failures) == 1 and "GPL" in failures[0][3]
+
+
+def test_aggregate_list_never_admits_unknown_or_proprietary(tmp_path):
+    reg = make_register(tmp_path, [entry("bash", kind="apt", license="UNKNOWN (no copyright file)")])
+    failures, _, _, _ = scan(reg, [("bash", "1", "UNKNOWN (no copyright file)")], eco="apt")
+    assert len(failures) == 1 and "unknown" in failures[0][3]
+
+
+def test_aggregate_rule_does_not_apply_to_pip_packages(tmp_path):
+    reg = make_register(tmp_path, [entry("bash", license="GPL-3.0")])
+    failures, _, _, _ = scan(reg, [("bash", "1", "GPL-3.0")])
+    assert len(failures) == 1
+
+
+def test_unregistered_os_package_fails_with_stub(tmp_path):
+    reg = make_register(tmp_path, [])
+    failures, _, _, missing = scan(reg, [("bash", "5.2", "GPL-3+")], eco="apt")
+    assert len(failures) == 1 and "no register entry" in failures[0][3]
+    assert missing == [("bash", "5.2", "GPL-3+")]
+    stub = cl.emit_stub("apt", "bash", "5.2", "GPL-3+", POLICY, "backend")
+    assert 'kind: apt' in stub and 'license: "GPL-3+"' in stub and "images: [backend]" in stub
+
+
+@pytest.mark.parametrize("edition", cl.EDITIONS)
+def test_unregistered_dynamic_system_lib_resolves_to_the_allowlist(tmp_path, edition):
+    reg = make_register(tmp_path, [])
+    failures, _, _, _ = scan(reg, [("libglib2.0-0t64", "2.84", "LGPL-2.1+")], edition, eco="apt")
+    assert failures == []
+    # ...but not when it is GPL, or a pip package of that name
+    failures, _, _, _ = scan(reg, [("libglib2.0-0t64", "2.84", "GPL-3+")], edition, eco="apt")
+    assert len(failures) == 1
+
+
+# ---- E0-QA.8: [[pending]] ------------------------------------------------------
+
+CUDA = [("nvidia-cublas-cu12", "12.4", "LicenseRef-NVIDIA-Proprietary"),
+        ("cuda-bindings", "12.9", "LicenseRef-NVIDIA-SOFTWARE-LICENSE")]
+
+
+@pytest.mark.parametrize("edition", cl.EDITIONS)
+def test_pending_cuda_wheels_warn_in_the_gpu_image(tmp_path, edition):
+    reg = make_register(tmp_path, [])
+    deps = CUDA + [("brand-new-pkg", "1.0", "MIT")]
+    failures, _, _, missing, _, pending = cl.check_register_scan(POLICY, reg, "python", deps, edition, "ml-gpu")
+    assert [p[0] for p in pending] == ["cuda-bindings", "nvidia-cublas-cu12"]
+    assert all("E0-Platform AD-1 / ml CPU image" in p[3] for p in pending)
+    # a new unregistered package still fails
+    assert [f[0] for f in failures] == ["brand-new-pkg"] and missing == [("brand-new-pkg", "1.0", "MIT")]
+
+
+@pytest.mark.parametrize("edition", cl.EDITIONS)
+def test_pending_does_not_cover_the_cpu_backend_image(tmp_path, edition):
+    reg = make_register(tmp_path, [])
+    failures, _, _, _, _, pending = cl.check_register_scan(POLICY, reg, "python", CUDA, edition, "backend")
+    assert pending == [] and sorted(f[0] for f in failures) == ["cuda-bindings", "nvidia-cublas-cu12"]
+
+
+def test_pending_entries_need_tracking(tmp_path):
+    text = cl.DEFAULT_POLICY.read_text() + '\n[[pending]]\necosystem = "python"\npackage = "x"\nreason = "r"\n'
+    path = tmp_path / "policy.toml"
+    path.write_text(text)
+    with pytest.raises(SystemExit, match="tracking"):
+        cl.Policy(path)
+
+
+def test_real_policy_lists_the_cuda_wheels_as_pending():
+    pend = [p for p in POLICY.pending if p["ecosystem"] == "python"]
+    assert {p["package"] for p in pend} >= {"nvidia-*", "cuda-toolkit", "cuda-bindings", "cuda-pathfinder"}
+    assert all(p["tracking"] == "E0-Platform AD-1 / ml CPU image" for p in pend)
+    assert all("backend" not in (p.get("images") or ["backend"]) for p in pend)
+
+
+def test_cli_os_packages_pending_and_exit_codes(tmp_path):
+    root = tmp_path / "rootfs"
+    (root / "lib/apk/db").mkdir(parents=True)
+    (root / "lib/apk/db/installed").write_text("P:musl\nV:1.2.5-r9\nL:MIT\n\nP:busybox\nV:1.37\nL:GPL-2.0-only\n")
+    reg = make_register(tmp_path, [entry("musl", kind="apk", images=["nginx"]),
+                                   entry("busybox", kind="apk", license="GPL-2.0-only", images=["nginx"])])
+    for edition in cl.EDITIONS:
+        r = run_cli("--os-packages", str(root), "--register", str(reg.path), "--artifact", "nginx",
+                    "--edition", edition)
+        assert r.returncode == 0, r.stdout
+        assert "== apk (" in r.stdout
+    r = run_cli("--os-packages", str(tmp_path / "empty"), "--register", str(reg.path))
+    assert r.returncode == 1 and "no dpkg" in r.stderr

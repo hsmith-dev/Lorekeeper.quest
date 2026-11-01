@@ -258,14 +258,22 @@ def parse_deb822(text: str) -> list[dict[str, str]]:
 COMMON_LICENSE_REF = re.compile(r"/usr/share/common-licenses/([A-Za-z0-9][A-Za-z0-9.+_-]*[A-Za-z0-9+])")
 
 
-def dep5_term(short: str) -> str:
-    """A DEP-5 `License:` short name as an SPDX-ish term (connectors upper-cased)."""
-    t = re.sub(r"\s+", " ", short).strip().rstrip(",")
-    t = re.sub(r"\s*,\s*", " AND ", t)
-    t = re.sub(r"\s+or\s+", " OR ", t, flags=re.I)
-    t = re.sub(r"\s+and\s+", " AND ", t, flags=re.I)
-    t = re.sub(r"\s+with\s+", " WITH ", t, flags=re.I)
-    return f"({t})" if " OR " in t else t
+def dep5_terms(short: str) -> list[str]:
+    """A DEP-5 `License:` short name as SPDX-ish AND-atoms (connectors upper-cased).
+
+    DEP-5: a comma (optionally ", and") has the lowest precedence, so
+    "GPL-1+ or Artistic, and Expat" is (GPL-1+ OR Artistic) AND Expat. Each
+    OR group is parenthesised so the atoms can be deduplicated and re-joined."""
+    t = re.sub(r"\s+", " ", short).strip().strip(",").strip()
+    atoms = []
+    for group in re.split(r"\s*,\s*(?:and\s+)?", t, flags=re.I):
+        if not group:
+            continue
+        g = re.sub(r"\s+or\s+", " OR ", group, flags=re.I)
+        g = re.sub(r"\s+and\s+", " AND ", g, flags=re.I)
+        g = re.sub(r"\s+with\s+", " WITH ", g, flags=re.I)
+        atoms += [f"({g})"] if " OR " in g else [a for a in g.split(" AND ") if a]
+    return atoms
 
 
 def debian_copyright_license(text: str | None) -> str:
@@ -285,10 +293,13 @@ def debian_copyright_license(text: str | None) -> str:
             if lic:
                 short = lic.splitlines()[0].strip()
                 if short:
-                    terms.add(dep5_term(short))
+                    terms.update(dep5_terms(short))
     if not terms:
         terms = set(COMMON_LICENSE_REF.findall(text))
-    return " AND ".join(sorted(terms, key=str.lower)) if terms else "UNKNOWN (unstructured copyright file)"
+    if not terms:
+        return "UNKNOWN (unstructured copyright file)"
+    # deterministic order (a plain lower() key leaves "BSD-2-clause"/"BSD-2-Clause" to set order)
+    return " AND ".join(sorted(terms, key=lambda t: (t.lower(), t)))
 
 
 def _under(root: Path, rel: str) -> Path:
@@ -585,10 +596,12 @@ def check_register_scan(policy: Policy, reg: Register, eco: str, deps, edition: 
         if edition not in eds:
             failures.append((name, version, lic, f"register editions {sorted(eds)} exclude {edition}"))
             continue
-        cls = classify(policy, lic)
+        # A `scanned_license` pin means the scan string is not SPDX (or is wrong)
+        # and the register's reviewed `license` is the truth to classify.
+        cls = classify(policy, entry["license"] if entry.get("scanned_license") is not None else lic)
         if cls == "ok" or os_rule_ok(policy, eco, name, cls):
             continue
-        exc = exception_for(policy, eco, name, {lic})
+        exc = exception_for(policy, eco, name, {lic, entry["license"]})
         if exc:
             excepted.append((name, version, lic, exc["reason"]))
             continue
