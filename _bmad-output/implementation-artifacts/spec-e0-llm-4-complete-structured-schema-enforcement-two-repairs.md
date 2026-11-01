@@ -2,10 +2,10 @@
 title: 'E0-LLM.4: complete_structured with schema enforcement and at most two repairs'
 type: 'feature'
 created: '2026-11-01'
-status: 'in-review'
+status: 'done'
 baseline_revision: 'fc1e1c56bab6e0e805fdde4ff4ad87260eb9d39c'
 review_loop_iteration: 0
-followup_review_recommended: false
+followup_review_recommended: true
 context:
   - '{project-root}/_bmad-output/implementation-artifacts/epic-6-context.md'
 warnings: [oversized]
@@ -151,3 +151,91 @@ deferred:
 - Draft PR, then `gh pr checks <n> --repo hsmith-dev/Lorekeeper.quest --watch` -- expected: all green.
 
 **Needs desktop verification:** see the Auto Run Result.
+
+## Auto Run Result
+
+Status: done
+
+**Summary:**
+- `llm_provider.complete_structured(messages, schema, config, *, task, timeout, gate_class, max_tokens)` picks how to enforce the schema from the backend:
+  - Ollama (`detect_backend`): `/api/chat` with `format=<flat schema>`, temperature 0, `stream=false`, model from `model_for`.
+  - KoboldCpp, openai and custom: strict `response_format` json_schema. On a 4xx the attempt is retried once as prompted JSON, and the call stays prompted after that.
+  - anthropic, gemini and anything else: prompted JSON.
+- The schema is restated in the final user turn on every path.
+- All paths share one validation step, `model_validate_json`, after a code fence or chatter around the object is stripped.
+- At most 2 repairs. Each echoes the latest bad output and the errors (cut to 1,000 characters). After that it raises `StructuredOutputError` (`ai_output_unusable`, `attempts=3`).
+- One gate slot covers the whole call. This follows the orchestrator's override of the story's per-attempt acquire (see Design Notes). BYOK calls bypass the gate.
+- Budget checks:
+  - A platform prompt over `ctx - max(max_tokens, reserve)` raises `PromptBudgetError` before any request is sent.
+  - A repair prompt that wouldn't fit is cut down first. If it still can't fit, the call ends with `StructuredOutputError`.
+- Each attempt logs a JSON line `{task, attempt, valid, backend, ms[, errors(loc,type)]}`, and `structured_stats[task]` counts outcomes.
+- `app/schemas/llm`: `FlatModel` (`extra="forbid"`, nested models inlined) and `flatness_problems`, which reports `$ref`, `$defs`, `anyOf`, `oneOf`, `allOf`, `prefixItems`, a missing `additionalProperties:false`, and fields with defaults. The same check runs at runtime and raises `ValueError` before any request.
+
+**Files changed:**
+- `src/backend/app/services/llm_provider.py` -- `complete_structured`, `schema_prompt`, `structured_stats` and private senders/helpers. No existing function changed.
+- `src/backend/app/schemas/llm/__init__.py` -- new: `FlatModel`, `inline_refs`, `flat_json_schema`, `flatness_problems`.
+- `src/backend/pytest.ini` -- registers the `ollama` marker.
+- `src/backend/tests/test_llm_structured.py` -- every matrix row, the log line and stats, gate/slot behaviour, and the sample handler that writes nothing (Postgres).
+- `src/backend/tests/test_llm_schemas_flat.py` -- lints every module under `app/schemas/llm/`, plus positive and negative fixtures.
+- `src/backend/tests/integration/__init__.py`, `src/backend/tests/integration/test_llm_structured_ollama.py` -- the opt-in 50-call desktop run.
+
+**Review:** 1 pass, 34 findings (high 0, medium 5, low 25, false 4).
+- **Patched, 11 rows:**
+  - A repair prompt that won't fit now gives `StructuredOutputError` and a `failed` stat (medium, two rows).
+  - `max_tokens` shrinks the window (medium, two rows).
+  - The prompted sender's null content becomes `LLMUnavailable`.
+  - Invalid attempts log error loc/type.
+  - The lint reports `prefixItems`.
+  - The docstring now says which provider gives which error class.
+  - Tests for strict-path null and empty content, and for sanitising the `json_schema` name.
+  - The budget test uses an unknown task name.
+  - The integration test reports the model it actually sent.
+- **Deferred:**
+  - Truncated (`length`) replies get repaired under the same limit. Medium, for E0-LLM.6.
+  - The BENCHMARKS FR-3 row needs the desktop.
+- **Rejected:**
+  - Narrowing the 4xx fallback (the story says 4xx).
+  - A per-URL fallback cache.
+  - An Ollama 4xx fallback (Ollama 0.40.3 supports schema format, and the flatness check runs first).
+  - The BYOK 401 to `LLMUnavailable` mapping (existing senders, shared with `complete_messages`).
+  - An attempt line for backend failures.
+  - Bounding the stats dict (false).
+  - Constraint keywords in the lint.
+  - The integration run's distinct-input count (`OLLAMA_TEST_PARAGRAPHS` covers it).
+  - "The no-write test can't fail" (false).
+  - Extra timeout and recursive-schema tests.
+  - The spec missing from the diff (false).
+  - Caching the schema.
+  - A validator raising `TypeError`.
+  - Slot hold time (timeout is per request).
+  - A `{` in prose before the object.
+  - An empty reply as `LLMUnavailable` (as the spec says).
+  - The lint being vacuous with no feature schemas yet.
+  - Per-attempt gate vs one slot (false; the intent says one slot).
+
+**Follow-up review:** true. Two medium entries were patched.
+- The unverified risk is the repair-prompt trimming and the window maths against the real tokenizer.
+- The estimate is uncalibrated until E0-LLM.6. A repair prompt that is underestimated could still be front-truncated by Ollama.
+
+**Verification:**
+- `py_compile` is clean.
+- Scratch venv with `--noconftest`: new tests plus the gate, detection and budget suites, 84 passed and 2 skipped on the final patch run. The earlier full set was 191 passed.
+- PR #32 CI is all green. The backend `test` job ran 402 tests, all passed, with 2 skipped: the Ollama suite and the empty-package lint case. The DB-backed sample-handler test passed. The licence, image-licence, database, static and build jobs passed.
+
+**Needs desktop verification:**
+- **Real structured extraction on `lorekeeper`:**
+  ```
+  docker run --rm --network host -v $PWD:/app -w /app -e TEST_DATABASE_URL=... -e DATABASE_URL=... -e SECRET_KEY=x \
+    -e OLLAMA_TEST_URL=http://100.119.62.5:11434 -e OLLAMA_TEST_MODEL=lorekeeper \
+    lorekeeper-backend-test bash -c "pip install -q -r requirements-dev.txt; python -m pytest -m ollama -s tests/integration/test_llm_structured_ollama.py"
+  ```
+  - It reports first-try, after-repair and failed rates plus latency over 50 calls on 3 flat schemas. The E1-shaped one is `entities[{name,type,status}]` plus `relationships[{source,target,kind}]`. It expects at least 95% valid.
+  - Once E0-QA.12 lands, write ~20 paragraphs from `demo_campaign.json` to a JSON list of strings and pass `OLLAMA_TEST_PARAGRAPHS=<file>`.
+  - Record the rates, the Ollama version and latency in `docs/BENCHMARKS.md` as an FR-3 row.
+- **The same run with `OLLAMA_TEST_MODEL=lorekeeper-base`.** Keep `KOBOLD_URL` different from `OLLAMA_TEST_URL`, or set `LOCAL_LLM_MODEL`. Otherwise `model_for` sends the platform model and the test skips.
+- **Ollama silently ignoring schema features.** Check the logs for `structured_attempt` lines with `valid:false`, and look at which error `loc` values recur.
+
+**Residual risks:**
+- One slot across repairs departs from the story text and from E0-LLM.2's note. E0-LLM.6's contention measurement should confirm it.
+- Token estimates are uncalibrated.
+- Sprint-status sync was skipped, per the orchestrator brief.
