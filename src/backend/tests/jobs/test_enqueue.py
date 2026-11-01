@@ -1,5 +1,6 @@
 """E0-Jobs.2: `enqueue`, the after-commit outbox, the kind registry and the
-minimal `run_job` wrapper, against the story's I/O matrix.
+`run_job` wrapper, against the story's I/O matrix. The wrapper's own matrix
+(rights, LLM config, retries, heartbeat, timeout) is tests/jobs/test_worker.py.
 
 Two dispatch modes:
 * eager (the suite default, conftest sets JOBS_EAGER=1): the Job runs inside
@@ -407,7 +408,8 @@ async def test_run_job_fails_an_unregistered_kind(db, campaign):
 
 @pytest.mark.parametrize("kind, final, kept", [
     ("test.write", JobStatus.DONE, True),
-    ("test.write_fail", JobStatus.FAILED, False),
+    # A generic failure is retried (E0-Jobs.3): back to queued, writes rolled back.
+    ("test.write_fail", JobStatus.QUEUED, False),
 ])
 async def test_handler_writes_commit_with_done_and_roll_back_with_failed(db, ctx, kind, final, kept):
     job_id = await enqueue(db, ctx, kind, {}, idempotency_key=_key())
@@ -493,11 +495,12 @@ async def test_eager_row_is_done_after_commit(db, ctx):
     assert row.error_code is None and row.finished_at is not None and row.attempts == 1
 
 
-async def test_eager_failing_handler_is_a_failed_row(db, ctx):
+async def test_eager_failing_handler_is_requeued_for_a_retry(db, ctx):
     job_id = await enqueue(db, ctx, "test.fail", {}, idempotency_key=_key())
     await db.commit()  # must not raise
     row = await _row(db, job_id)
-    assert row.status == JobStatus.FAILED
+    # E0-Jobs.3: a generic failure is retried (the row waits for its next_run_at).
+    assert row.status == JobStatus.QUEUED and row.attempts == 1 and row.next_run_at is not None
     assert row.error_code == JobErrorCode.INTERNAL
     assert row.error_message and "boom" not in row.error_message
 

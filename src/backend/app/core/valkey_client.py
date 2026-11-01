@@ -26,3 +26,12 @@ def get_valkey() -> aioredis.Redis:
     if _valkey is None:
         raise RuntimeError("Valkey not initialized")
     return _valkey
+
+
+def set_valkey(client: aioredis.Redis | None) -> aioredis.Redis | None:
+    """Replace the process-wide client and return the previous one. The RQ
+    work horse (app/jobs/worker.py) installs one per `asyncio.run`: an asyncio
+    redis client belongs to the event loop that opened it."""
+    global _valkey
+    previous, _valkey = _valkey, client
+    return previous

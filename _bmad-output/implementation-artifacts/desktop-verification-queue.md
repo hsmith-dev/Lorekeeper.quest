@@ -99,3 +99,7 @@ Stories were merged on green GitHub CI while the desktop was offline (owner deci
 
 ## E0-Access.8 — Player-safe Chronicler chat with SourceRef citations (PR #53)
 - [ ] Real chat on Ollama `lorekeeper`: as a Player in a seeded Campaign, `POST /api/chat/stream` → the `meta` event has no `shorthand`/`system_prompt` but has `citations`; as the GM, both are present
+
+## E0-Jobs.3 — Worker, retries, worker service (PR #54)
+- [ ] `docker compose up -d backend worker` → `docker compose logs worker` shows "starting 2 job workers"; dev `backend` reports healthy
+- [ ] Release blocker until E0-Jobs.4: retried Jobs stay `queued` (no reaper); killed work horses leave rows `running`
