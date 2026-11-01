@@ -132,7 +132,15 @@ SYSTEM_NOOP = register(JobKind(
     live_safe=True,
 ))
 
+# Built-in (E0-Jobs.8): the daily sweep of the files_data volume, one cursor
+# Job per Campaign (app/jobs/files_gc.py; scheduled by the reaper). Disk and
+# rows only, no model: live_safe, no resource leases.
+FILES_GC = register(JobKind(
+    name="files.gc", queue=JobQueue.BACKFILL, timeout_s=600, handler="app.jobs.files_gc:handle",
+    live_safe=True,
+))
+
 __all__ = [
-    "KINDS", "KIND_MODULES", "RESOURCES", "RESULT_AUDIENCES", "SYSTEM_NOOP", "JobKind", "get_kind",
+    "FILES_GC", "KINDS", "KIND_MODULES", "RESOURCES", "RESULT_AUDIENCES", "SYSTEM_NOOP", "JobKind", "get_kind",
     "load_kind_modules", "register",
 ]

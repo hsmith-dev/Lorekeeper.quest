@@ -42,8 +42,12 @@ COPY . .
 # docker-compose.prod.yml) copies this ownership on first use — without it
 # the volume comes up root-owned and the LOG_FILE handler silently can't
 # write (the admin log viewer then falls back to per-worker memory buffers).
+# /data/files (the files_data volume, E0-Jobs.8) likewise: the backend and the
+# worker write stored files there as appuser. Files are created 0644 and
+# directories 0755 (the default umask) so nginx can serve them read-only.
 RUN useradd -m appuser && chown -R appuser /app \
-    && mkdir -p /var/log/lorekeeper && chown appuser /var/log/lorekeeper
+    && mkdir -p /var/log/lorekeeper && chown appuser /var/log/lorekeeper \
+    && mkdir -p /data/files && chown appuser /data/files
 USER appuser
 
 EXPOSE 8000

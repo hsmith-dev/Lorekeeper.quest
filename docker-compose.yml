@@ -55,6 +55,8 @@ services:
         condition: service_healthy
     volumes:
       - ./src/backend:/app
+      # Stored files (E0-Jobs.8, FILES_ROOT).
+      - files_data:/data/files
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
     # What the `worker` service waits for (service_healthy).
     healthcheck:
@@ -82,6 +84,7 @@ services:
         condition: service_healthy
     volumes:
       - ./src/backend:/app
+      - files_data:/data/files
     command: python -m app.jobs.worker
     # `docker stop` sends SIGTERM: RQ stops taking Jobs and lets the running
     # ones finish for up to this long, then SIGKILL. A Job killed here stays
@@ -135,3 +138,4 @@ networks:
 volumes:
   postgres_data:
   valkey_data:
+  files_data:

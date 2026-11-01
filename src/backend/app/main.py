@@ -22,7 +22,7 @@ from app.services.chat_service import check_kobold_health
 from app.db.session import get_db
 from app.api.routes import (
     auth, campaigns, journals, tags, chat, ingest, npcs, quests, sources, share, billing, session_plans, feedback,
-    admin, shorthand, character_sheets, members, visibility,
+    admin, shorthand, character_sheets, members, visibility, files,
 )
 from app.api.routes import settings as settings_routes
 from app.api.deps import require_active_account, require_admin
@@ -148,6 +148,8 @@ def create_app() -> FastAPI:
     app.include_router(session_plans.router, prefix="/api/session-plans", tags=["session-plans"], dependencies=gate)
     app.include_router(shorthand.router,     prefix="/api/shorthand",     tags=["shorthand"],     dependencies=gate)
     app.include_router(character_sheets.router, prefix="/api/character-sheets", tags=["character-sheets"], dependencies=gate)
+    # E0-Jobs.8: GET /{file_id}, access-checked, served by nginx via X-Accel-Redirect.
+    app.include_router(files.router,     prefix="/api/files",     tags=["files"],     dependencies=gate)
     # POST / only needs require_active_account (covered by `gate` here); the
     # admin-only GET routes layer Depends(require_admin) on top per-route
     # (see feedback.py) since require_admin itself builds on

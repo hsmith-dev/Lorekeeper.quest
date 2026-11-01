@@ -29,14 +29,43 @@ happened. Restoring rolls the whole database back to the most recent nightly
 dump (`scripts/restore-db.sh <dump-file>` — destructive, stops the backend,
 asks for confirmation, restores, restarts).
 
+### Stored files (`files_data`)
+
+Since E0-Jobs.8 the app also keeps derived binaries (recap audio,
+Chronicles, map tiles) on the `files_data` Docker volume, mounted at
+`/data/files` in the backend and the worker (read-write) and in nginx
+(read-only). The database rows (`stored_files`, `derived_sources`) and the
+bytes only make sense together, so they are backed up and restored together:
+
+* **Backup.** `backup-db.sh` writes the database dump first, then
+  `lorekeeper_files_<timestamp>.tar.gz` (a tar of `/data/files`, made inside
+  the backend container) under the same timestamp, and prunes both on the
+  same 14-day window. The order matters: every row in the dump existed
+  before the archive started, so after a restore the only possible gap is a
+  file deleted between the two steps, which answers `404` for everyone like
+  any missing file. Bytes with no row (a file written after the dump) are
+  removed by the daily `files.gc` Job after its 24-hour grace period.
+  Temporary names of writes in flight (`.tmp-*`) are skipped.
+* **Kept raw Live audio is excluded unless the GM opts in.** A Campaign's
+  `live_audio/` directory is left out of the archive unless that Campaign's
+  directory holds the opt-in marker file `.backup-live-audio`, the GM's
+  opt-in (the Live feature's setting writes it; until that ships an operator
+  can create it by hand, see the quick reference). Everything else is
+  included.
+* **Restore.** `scripts/restore-db.sh <dump> [files-archive]` restores the
+  database, then empties the volume and unpacks the archive into it (from a
+  one-off backend container, with the backend and the worker stopped). The
+  archive defaults to the one with the dump's timestamp; with none (a backup
+  from before stored files existed) the volume is left as it is.
+
 **What this does NOT protect against:** losing the instance itself. The
 backups live on the same disk as the live database — if that disk, volume,
 or instance is gone, so are the backups.
 
 ## Tier 2 — offsite copy (planned, not yet active)
 
-Needs a copy of each nightly dump to live somewhere other than this
-instance. Not implemented yet because it requires credentials only the OCI
+Needs a copy of each nightly dump (and its `lorekeeper_files_*.tar.gz`
+archive) to live somewhere other than this instance. Not implemented yet because it requires credentials only the OCI
 account owner can create — nothing here should be guessing at or fabricating
 those. Recommended path, in order of preference:
 
@@ -55,6 +84,8 @@ those. Recommended path, in order of preference:
    ```bash
    oci os object put --bucket-name lorekeeper-db-backups \
      --file "$OUT_FILE" --name "$(basename "$OUT_FILE")"
+   oci os object put --bucket-name lorekeeper-db-backups \
+     --file "$FILES_OUT" --name "$(basename "$FILES_OUT")"
    ```
 5. Set a lifecycle rule on the bucket (Console → bucket → Lifecycle Policy
    Rules) to auto-delete objects after e.g. 90 days, so offsite retention is
@@ -68,7 +99,7 @@ Backblaze B2's free tier (10GB) comfortably covers years of these dumps.
 2. `rclone config` on the instance (select "B2" as the provider type, paste
    the key).
 3. Same idea as Option A: `rclone copy "$OUT_FILE" b2:lorekeeper-db-backups/`
-   appended to the backup script.
+   (and the same for `"$FILES_OUT"`) appended to the backup script.
 
 ### Whichever option: verify it actually works
 
@@ -84,5 +115,6 @@ download → restore) actually round-trips.
 |---|---|
 | Manual backup right now | `ssh ubuntu@<instance> "cd ~/lorekeeper && ./scripts/backup-db.sh"` |
 | List backups | `ssh ubuntu@<instance> "ls -lh ~/lorekeeper/backups"` |
-| Restore from a backup | `ssh ubuntu@<instance> "cd ~/lorekeeper && ./scripts/restore-db.sh backups/<file>.dump"` |
+| Restore from a backup (database + stored files) | `ssh ubuntu@<instance> "cd ~/lorekeeper && ./scripts/restore-db.sh backups/<file>.dump"` |
+| Back up a Campaign's kept Live audio too | `docker compose -f docker-compose.prod.yml exec backend touch /data/files/<campaign_id>/.backup-live-audio` |
 | Check the cron job is installed | `ssh ubuntu@<instance> "crontab -l"` |
