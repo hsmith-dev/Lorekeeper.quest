@@ -128,3 +128,25 @@ def test_strings_and_comments_are_not_references(tmp_path):
 def test_unparseable_file_fails(tmp_path):
     found = violations(tmp_path, {"services/broken.py": "def (:\n"})
     assert found and "cannot be parsed" in found[0].what
+
+
+# ---- read_only= (E0-Access.3: reduced ctxs only via audience_ctx) ------------
+
+@pytest.mark.parametrize("rel, body, line", [
+    ("services/q.py", "def r(ctx):\n    return CampaignContext(role='anon', read_only=True)\n", 2),
+    ("api/routes/r.py", "import dataclasses\ndef r(ctx):\n    return dataclasses.replace(ctx, read_only=True)\n", 3),
+    ("services/q.py", "def r(ctx, flag):\n    return dataclasses.replace(ctx, read_only=flag)\n", 2),
+    ("services/q.py", "def r(ctx):\n    return dataclasses.replace(ctx, read_only=None)\n", 2),
+])
+def test_read_only_outside_access_fails(tmp_path, rel, body, line):
+    found = violations(tmp_path, {rel: body})
+    assert [(v.path, v.line) for v in found] == [(f"app/{rel}", line)]
+    assert "audience_ctx" in str(found[0]) and "read_only=" in str(found[0])
+
+
+def test_read_only_false_and_inside_access_pass(tmp_path):
+    assert violations(tmp_path, {
+        "services/q.py": "def r(ctx):\n    return dataclasses.replace(ctx, read_only=False)\n",
+        "access/reduced.py": "def r(ctx):\n    return dataclasses.replace(ctx, read_only=True)\n",
+        "services/s.py": "KIND = 'read_only'\nx = {'read_only': True}\n",
+    }) == []

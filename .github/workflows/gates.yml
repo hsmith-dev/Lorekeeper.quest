@@ -78,7 +78,8 @@ jobs:
       # CI-8 (AD-13): access scoping. E0-Access.2: `as_system(` (the GM-level
       # system ctx, RC-6) is referenced only in
       # journal_service.delete_journal_entry and world_service.merge_entities.
-      # E0-Access.5 adds the scoped-query ratchet against
+      # E0-Access.3: no `read_only=` outside app/access/ (reduced ctxs come
+      # only from audience_ctx). E0-Access.5 adds the scoped-query ratchet against
       # scripts/scoped_queries_baseline.txt to the same script.
       - name: "CI-8 AD-13 scoped queries"
         run: python scripts/check_scoped_queries.py
@@ -159,18 +160,19 @@ jobs:
         working-directory: src/backend
         run: python -m pytest -v tests/ev4
 
+      # CI-11 (AD-12), E0-Access.3: registry property test (hypothesis, 200
+      # examples per registered model): row in scoped_select(Model, ctx) iff
+      # visible_to(audience_of(row), ctx).
+      - name: "CI-11 AD-12 visibility registry property test"
+        working-directory: src/backend
+        run: python -m pytest -v tests/access/test_registry_property.py
+
       # ---- reserved slots (owning story uncomments its step) ----------------
       #
       # CI-9 (AD-8), E0-LLM.4: flat LLM schemas (no $ref/anyOf, extra="forbid").
       # - name: "CI-9 AD-8 flat LLM schemas"
       #   working-directory: src/backend
       #   run: python -m pytest -v tests/test_llm_schemas_flat.py
-      #
-      # CI-11 (AD-12), E0-Access.3: registry property test,
-      # visible_clause(Model, ctx) agrees with audience_of(row).
-      # - name: "CI-11 AD-12 visibility registry property test"
-      #   working-directory: src/backend
-      #   run: python -m pytest -v tests/test_access_registry_property.py
 
   # ---- reserved jobs (they build images, so they are jobs, not steps) -------
   #

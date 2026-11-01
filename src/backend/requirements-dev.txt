@@ -11,3 +11,7 @@ lupa==2.8
 # import-graph engine; pinned so a grimp release can't change the graph.
 import-linter==2.15
 grimp==3.18
+# CI-11 registry property test (tests/access/test_registry_property.py,
+# E0-Access.3). attrs is its dependency, pinned so it is the registered one.
+hypothesis==6.112.1
+attrs==24.2.0

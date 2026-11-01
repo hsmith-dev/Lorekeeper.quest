@@ -15,6 +15,11 @@ a system ctx by hand outside app/access/ (`ACTOR_SYSTEM`, `actor="system"`,
 or a `system_reason=` other than None). Tests are not
 scanned.
 
+E0-Access.3 part, reduced ctxs: a `read_only=` keyword (anything but a
+literal False) outside app/access/ fails. A read-only ctx is a reduced ctx
+(`audience_ctx`, the only constructor), so building one by hand elsewhere
+would bypass its narrowing rules.
+
 E0-Access.5 adds the scoped-query ratchet here (`select(<registered
 model>)`, `db.get(<registered model>)`, raw SQL on registered tables and
 inline owner checks outside app/access/, against
@@ -45,6 +50,9 @@ DEFINITION_FILE = "app/access/context.py"
 ACTOR_SYSTEM_NAME = "ACTOR_SYSTEM"
 ACCESS_PREFIX = "app/access/"
 DEFINITION_CLASS = "CampaignContext"
+READ_ONLY_KEYWORD = "read_only"
+READ_ONLY_HINT = ("a read-only (reduced) ctx is built only by `app.access.audience_ctx` (anon, member or "
+                  "as_user); call it instead of setting `read_only=`")
 
 
 @dataclass(frozen=True)
@@ -52,8 +60,11 @@ class Violation:
     path: str
     line: int
     what: str
+    hint: str | None = None
 
     def __str__(self) -> str:
+        if self.hint is not None:
+            return f"{self.path}:{self.line}: {self.what}. {self.hint}"
         allowed = ", ".join(f"{p}::{f}" for p, f in sorted(ALLOWED_SYSTEM_SITES))
         return (f"{self.path}:{self.line}: {self.what}. `as_system` (a GM-level system ctx, RC-6) is allowed "
                 f"only in {allowed}; use the request's own ctx (require_campaign / ctx_for) instead")
@@ -113,6 +124,10 @@ class _SystemVisitor(ast.NodeVisitor):
             if (node.arg == "actor" and value == "system") or (node.arg == "system_reason" and value is not None):
                 self.found.append(Violation(self.rel, getattr(node, "lineno", 0) or 0,
                                             f"sets `{node.arg}=` (builds a system ctx without as_system)"))
+            if node.arg == READ_ONLY_KEYWORD and value is not False:
+                self.found.append(Violation(self.rel, getattr(node, "lineno", 0) or 0,
+                                            f"sets `{READ_ONLY_KEYWORD}=` (builds a reduced ctx without "
+                                            "audience_ctx)", READ_ONLY_HINT))
         self.generic_visit(node)
 
     def visit_alias(self, node: ast.alias) -> None:
@@ -162,7 +177,7 @@ def main(argv: list[str] | None = None) -> int:
     if violations:
         print(f"check_scoped_queries: {len(violations)} violation(s)")
         return 1
-    print("check_scoped_queries: ok (as_system used only at its allowed sites)")
+    print("check_scoped_queries: ok (as_system used only at its allowed sites; no read_only= outside app/access/)")
     return 0
 
 

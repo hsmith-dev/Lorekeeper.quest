@@ -36,7 +36,7 @@ import sqlalchemy as sa
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.enums import CampaignRole
+from app.domain.enums import CampaignRole, Visibility
 from tests.ev4 import repo_root
 
 GM, PLAYER, ANON = "gm", "player", "anon"
@@ -161,7 +161,7 @@ SEED_FIELDS: dict[str, set[str]] = {
     "source_documents": {"title", "filename", "chunks"},
     "source_documents.chunks": {"content"},
     "character_sheet_templates": {"name", "fields", "sheets"},
-    "character_sheet_templates.sheets": {"name", "data"},
+    "character_sheet_templates.sheets": {"name", "data", "visibility"},
 }
 
 
@@ -294,6 +294,7 @@ async def seed_canary_campaign(db: AsyncSession, owner, seed: dict | None = None
             add("character_sheets", CharacterSheet(
                 id=uuid.uuid4(), campaign_id=campaign_id, template_id=tpl_id, created_by_user_id=owner.id,
                 name=sh["name"], data=sh.get("data", {}),
+                visibility=Visibility(sh.get("visibility", Visibility.PARTY.value)),
             ))
 
     share_token = secrets.token_urlsafe(24)

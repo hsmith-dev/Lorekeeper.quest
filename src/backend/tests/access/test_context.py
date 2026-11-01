@@ -33,6 +33,8 @@ RANDOM = "00000000-0000-4000-8000-000000000000"
 
 def _ctx(role="gm", is_owner=False, **over) -> CampaignContext:
     uid = over.pop("user_id", uuid.uuid4())
+    if role == "anon":
+        over.setdefault("read_only", True)  # an anon ctx is always a reduced ctx
     return CampaignContext(campaign_id=over.pop("campaign_id", uuid.uuid4()), user_id=uid, role=role,
                            is_owner=is_owner, audience=ctx_audience(role, uid), **over)
 

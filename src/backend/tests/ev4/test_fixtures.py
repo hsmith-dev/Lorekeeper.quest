@@ -16,7 +16,7 @@ from tests.ev4.fixtures import (
 )
 from tests.ev4.report import EV4Leak
 
-# Every GM-only field/record today (AR-26: character sheets have no Visibility).
+# Every GM-only field/record today (the seeded character sheet is `visibility: gm`, E0-Access.3).
 GM_ONLY_KINDS = {
     "SHORTHAND", "NPCNOTES", "QUESTNOTES", "TERM", "TERMMEANING", "TERMUSAGE", "PLANTITLE", "PLAN",
     "CHATTITLE", "CHATMSG", "CHATREPLY", "SOURCETITLE", "SOURCEFILE", "SOURCECHUNK", "SHEET", "SHEETDATA",
