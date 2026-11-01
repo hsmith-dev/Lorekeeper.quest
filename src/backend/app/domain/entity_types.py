@@ -25,7 +25,7 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Any, Final
 
-from app.domain.enums import CharacterKind, EntityType
+from app.domain.enums import CharacterKind, EntityType, LocationKind
 
 
 class StatusCategory(StrEnum):
@@ -41,6 +41,7 @@ class ValueKind(StrEnum):
     TEXT = "text"
     ENTITY_REF = "entity_ref"  # an Entity id in the same Campaign
     DATETIME = "datetime"  # ISO 8601, UTC
+    CHOICE = "choice"  # one of the attribute's `choices` (a closed set)
 
 
 class InvalidStatusError(ValueError):
@@ -67,10 +68,16 @@ class AttributeDef:
     label: str
     # The Entity Types an ENTITY_REF may point at; empty for other kinds.
     target_types: tuple[EntityType, ...] = ()
+    # The allowed values of a CHOICE, in display order; empty for other kinds.
+    choices: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if (self.value_kind is ValueKind.ENTITY_REF) != bool(self.target_types):
             raise ValueError(f"attribute {self.key!r}: target_types is required for, and only for, entity_ref")
+        if (self.value_kind is ValueKind.CHOICE) != bool(self.choices):
+            raise ValueError(f"attribute {self.key!r}: choices is required for, and only for, choice")
+        if len(self.choices) != len(set(self.choices)):
+            raise ValueError(f"attribute {self.key!r}: duplicate choice")
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,6 +138,16 @@ def _ref(key: str, label: str, *targets: EntityType) -> AttributeDef:
     return AttributeDef(key, ValueKind.ENTITY_REF, label, targets)
 
 
+def _text(key: str, label: str) -> AttributeDef:
+    return AttributeDef(key, ValueKind.TEXT, label)
+
+
+# Every attribute, like every other hideable field, can be GM-only: a Party
+# view drops it (party_unset -> ABSENT), so goals or a voice can stay secret.
+# Memberships (an NPC in a Faction, a PC in the party) are not attributes:
+# they are relationship edges (F3, entity_relationships).
+
+
 REGISTRY: Final[Mapping[EntityType, EntityTypeDef]] = MappingProxyType({
     _C: EntityTypeDef(
         type=_C,
@@ -143,9 +160,14 @@ REGISTRY: Final[Mapping[EntityType, EntityTypeDef]] = MappingProxyType({
         ),
         default_status="unknown",
         attributes=(
-            AttributeDef("species", ValueKind.TEXT, "Species"),
-            AttributeDef("occupation", ValueKind.TEXT, "Occupation"),
+            _text("species", "Species"),
+            _text("occupation", "Occupation"),
             _ref("location_entity_id", "Location", _L),
+            # Feeds Talk-to-NPC personas and narration.
+            _text("voice", "Voice & mannerisms"),
+            _text("appearance", "Appearance"),
+            _text("pronouns", "Pronouns"),
+            _text("goals", "Goals & motivation"),
         ),
         kinds=(CharacterKind.PC, CharacterKind.NPC, CharacterKind.CREATURE),
     ),
@@ -159,8 +181,11 @@ REGISTRY: Final[Mapping[EntityType, EntityTypeDef]] = MappingProxyType({
         ),
         default_status="unknown",
         attributes=(
-            AttributeDef("region", ValueKind.TEXT, "Region"),
+            _text("region", "Region"),
             _ref("parent_location_entity_id", "Inside", _L),
+            # attributes.kind, not the entities.kind column (Characters only).
+            AttributeDef("kind", ValueKind.CHOICE, "Kind",
+                         choices=tuple(k.value for k in LocationKind)),
         ),
     ),
     _F: EntityTypeDef(
@@ -175,6 +200,7 @@ REGISTRY: Final[Mapping[EntityType, EntityTypeDef]] = MappingProxyType({
         attributes=(
             _ref("headquarters_entity_id", "Headquarters", _L),
             _ref("leader_entity_id", "Leader", _C),
+            _text("goals", "Goals"),
         ),
     ),
     _I: EntityTypeDef(
@@ -189,6 +215,8 @@ REGISTRY: Final[Mapping[EntityType, EntityTypeDef]] = MappingProxyType({
         attributes=(
             _ref("holder_entity_id", "Held by", _C, _F),
             _ref("location_entity_id", "Location", _L),
+            # Free text: "legendary", "cursed heirloom".
+            _text("rarity", "Rarity"),
         ),
     ),
     _Q: EntityTypeDef(
@@ -204,6 +232,8 @@ REGISTRY: Final[Mapping[EntityType, EntityTypeDef]] = MappingProxyType({
         attributes=(
             _ref("giver_entity_id", "Given by", _C, _F),
             AttributeDef("completed_at", ValueKind.DATETIME, "Completed on"),
+            _text("reward", "Reward"),
+            _ref("location_entity_id", "Where", _L),
         ),
     ),
 })
@@ -289,12 +319,18 @@ def attribute(entity_type: EntityType | str, key: str) -> AttributeDef:
 
 
 def validate_attributes(entity_type: EntityType | str, attrs: Mapping[str, Any]) -> dict[str, Any]:
-    """A copy of `attrs`; ValueError naming any key the type does not define."""
+    """A copy of `attrs`; ValueError naming any key the type does not define,
+    or a CHOICE value (other than None) that is not one of its choices.
+    Other values are not checked here."""
     known = set(attribute_keys(entity_type))
     unknown = sorted(k for k in attrs if k not in known)
     if unknown:
         allowed = ", ".join(attribute_keys(entity_type))
         raise ValueError(f"unknown {_type(entity_type).value} attribute(s) {unknown} (allowed: {allowed})")
+    for a in get(entity_type).attributes:
+        if a.value_kind is ValueKind.CHOICE and attrs.get(a.key) is not None and attrs[a.key] not in a.choices:
+            raise ValueError(f"{attrs[a.key]!r} is not a {_type(entity_type).value} {a.key} "
+                             f"(allowed: {', '.join(a.choices)})")
     return dict(attrs)
 
 

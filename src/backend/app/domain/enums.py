@@ -35,6 +35,11 @@ the `journal_tags.source_field` enum, and `kind`, in app/access/enums.py;
 they are defined here instead, because the models (app.db) import them and
 app.domain is the only layer below app.db (AD-1). Nothing else defines them.
 
+One StrEnum has no CHECK: LocationKind is the closed set of a Location's
+`attributes.kind`, a key inside the entities.attributes JSONB. It is checked
+by app.domain.entity_types.validate_attributes, and CI-10 lists it under
+ATTRIBUTE_ENUMS.
+
 Entity statuses are not an enum: they are plain text, checked per type by
 app.domain.entity_types.validate_status.
 """
@@ -83,6 +88,18 @@ class EntityChangeOp(StrEnum):
     CANON_NOTE = "canon_note"
     # Written only by the F3-world legacy NPC/Quest copy.
     MIGRATED = "migrated"
+
+
+class LocationKind(StrEnum):
+    """A Location's `attributes.kind` (no CHECK: it lives in JSONB)."""
+
+    SETTLEMENT = "settlement"
+    DUNGEON = "dungeon"
+    WILDERNESS = "wilderness"
+    BUILDING = "building"
+    REGION = "region"
+    PLANE = "plane"
+    OTHER = "other"
 
 
 class MentionOrigin(StrEnum):

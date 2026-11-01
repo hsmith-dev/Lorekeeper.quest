@@ -12,8 +12,10 @@ The two PG enums are registered in PG_ENUMS (StrEnum, type name); the test
 compares each StrEnum with the type's pg_enum labels, in order.
 
 Every StrEnum defined in app/domain/enums.py must be accounted for: either
-registered in ENUM_CHECKS or PG_ENUMS, or listed in ENUM_CHECKS_PENDING with
-the story that adds its CHECK column. When that story lands, its author moves the enum
+registered in ENUM_CHECKS or PG_ENUMS, listed in ENUM_CHECKS_PENDING with
+the story that adds its CHECK column, or listed in ATTRIBUTE_ENUMS (a closed
+set for an `entities.attributes` JSONB key, which has no CHECK and is checked
+by entity_types.validate_attributes). When that story lands, its author moves the enum
 from ENUM_CHECKS_PENDING to ENUM_CHECKS and nothing else changes. The reader
 is also exercised by a self-test on a temporary table, and
 tests/domain/test_enums.py round-trips every enum's check_sql through it.
@@ -34,6 +36,7 @@ from app.domain.enums import (
     EntityChangeOp,
     EntityType,
     EntryKind,
+    LocationKind,
     MentionOrigin,
     MentionSourceField,
     TagSourceField,
@@ -61,6 +64,13 @@ ENUM_CHECKS_PENDING: dict[type[StrEnum], str] = {
     EntityChangeOp: "E0-WorldCore.2",      # entity_changes.op
     MentionOrigin: "E0-WorldCore.2",       # entity_mentions.origin
     MentionSourceField: "E0-WorldCore.2",  # entity_mentions.source_field
+}
+
+# StrEnums that are the choices of a CHOICE attribute in an entities.attributes
+# JSONB key: no CHECK, ever; app.domain.entity_types.validate_attributes checks
+# them. The value is the attribute it backs.
+ATTRIBUTE_ENUMS: dict[type[StrEnum], str] = {
+    LocationKind: "location.attributes.kind",  # owner amendment to E0-WorldCore.1
 }
 
 
@@ -154,7 +164,7 @@ def test_every_domain_enum_is_registered():
     defined = domain_strenums()
     assert defined, "found no StrEnum in app.domain.enums"
     unaccounted = [e.__name__ for e in defined
-                   if e not in registered and e not in ENUM_CHECKS_PENDING]
+                   if e not in registered and e not in ENUM_CHECKS_PENDING and e not in ATTRIBUTE_ENUMS]
     assert not unaccounted, (
         f"StrEnums in app/domain/enums.py with no CI-10 entry: {unaccounted}. Register each in "
         "ENUM_CHECKS with the column its CHECK lives on, in PG_ENUMS with its Postgres enum type, "
@@ -163,6 +173,10 @@ def test_every_domain_enum_is_registered():
     assert not both, f"in both ENUM_CHECKS and ENUM_CHECKS_PENDING (remove the pending entry): {both}"
     stray = [e.__name__ for e in ENUM_CHECKS_PENDING if e not in defined]
     assert not stray, f"ENUM_CHECKS_PENDING lists enums not defined in app/domain/enums.py: {stray}"
+    attr_both = [e.__name__ for e in ATTRIBUTE_ENUMS if e in registered or e in ENUM_CHECKS_PENDING]
+    assert not attr_both, f"in ATTRIBUTE_ENUMS and also a CHECK/PG enum entry: {attr_both}"
+    attr_stray = [e.__name__ for e in ATTRIBUTE_ENUMS if e not in defined]
+    assert not attr_stray, f"ATTRIBUTE_ENUMS lists enums not defined in app/domain/enums.py: {attr_stray}"
     for enum_cls, story in ENUM_CHECKS_PENDING.items():
         assert re.fullmatch(r"E\d+(-[A-Za-z]+)?\.\d+", story), (
             f"ENUM_CHECKS_PENDING[{enum_cls.__name__}] = {story!r}: name the story that adds the column")

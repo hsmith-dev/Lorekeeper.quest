@@ -18,7 +18,7 @@ from app.domain.entity_types import (
     StatusCategory,
     ValueKind,
 )
-from app.domain.enums import CharacterKind, EntityType
+from app.domain.enums import CharacterKind, EntityType, LocationKind
 
 DEMO_SEED = Path(__file__).resolve().parents[4] / "seeds" / "demo_campaign.json"
 
@@ -35,12 +35,26 @@ EXPECTED_STATUSES = {
 EXPECTED_DEFAULT = {"character": "unknown", "location": "unknown", "faction": "unknown",
                     "item": "unknown", "quest": "active"}
 EXPECTED_ATTRIBUTES = {
-    "character": ["species", "occupation", "location_entity_id"],
-    "location": ["region", "parent_location_entity_id"],
-    "faction": ["headquarters_entity_id", "leader_entity_id"],
-    "item": ["holder_entity_id", "location_entity_id"],
-    "quest": ["giver_entity_id", "completed_at"],
+    "character": ["species", "occupation", "location_entity_id",
+                  "voice", "appearance", "pronouns", "goals"],
+    "location": ["region", "parent_location_entity_id", "kind"],
+    "faction": ["headquarters_entity_id", "leader_entity_id", "goals"],
+    "item": ["holder_entity_id", "location_entity_id", "rarity"],
+    "quest": ["giver_entity_id", "completed_at", "reward", "location_entity_id"],
 }
+# The owner amendment (2026-11-01): (type, key, value kind, label).
+OWNER_AMENDMENT = [
+    ("character", "voice", "text", "Voice & mannerisms"),
+    ("character", "appearance", "text", "Appearance"),
+    ("character", "pronouns", "text", "Pronouns"),
+    ("character", "goals", "text", "Goals & motivation"),
+    ("location", "kind", "choice", "Kind"),
+    ("faction", "goals", "text", "Goals"),
+    ("item", "rarity", "text", "Rarity"),
+    ("quest", "reward", "text", "Reward"),
+    ("quest", "location_entity_id", "entity_ref", "Where"),
+]
+LOCATION_KINDS = ["settlement", "dungeon", "wilderness", "building", "region", "plane", "other"]
 
 
 # ---- the tables -------------------------------------------------------------
@@ -100,20 +114,67 @@ def test_named_attribute_examples():
 
 
 def test_attribute_value_kinds_and_targets():
-    assert [k.value for k in ValueKind] == ["text", "entity_ref", "datetime"]
+    assert [k.value for k in ValueKind] == ["text", "entity_ref", "datetime", "choice"]
     for definition in REGISTRY.values():
         for a in definition.attributes:
+            assert a.label
             if a.value_kind is ValueKind.ENTITY_REF:
                 assert a.key.endswith("_entity_id")
                 assert a.target_types and all(isinstance(t, EntityType) for t in a.target_types)
             else:
                 assert a.target_types == ()
+            assert bool(a.choices) is (a.value_kind is ValueKind.CHOICE)
     assert et.attribute("location", "parent_location_entity_id").target_types == (EntityType.LOCATION,)
     assert et.attribute("faction", "leader_entity_id").target_types == (EntityType.CHARACTER,)
     with pytest.raises(ValueError):
         AttributeDef("x_entity_id", ValueKind.ENTITY_REF, "X")
     with pytest.raises(ValueError):
         AttributeDef("x", ValueKind.TEXT, "X", (EntityType.ITEM,))
+    with pytest.raises(ValueError):
+        AttributeDef("x", ValueKind.CHOICE, "X")
+    with pytest.raises(ValueError):
+        AttributeDef("x", ValueKind.TEXT, "X", choices=("a",))
+    with pytest.raises(ValueError):
+        AttributeDef("x", ValueKind.CHOICE, "X", choices=("a", "a"))
+
+
+@pytest.mark.parametrize(("type_", "key", "kind", "label"), OWNER_AMENDMENT,
+                         ids=[f"{t}.{k}" for t, k, _, _ in OWNER_AMENDMENT])
+def test_owner_amendment_attributes(type_, key, kind, label):
+    a = et.attribute(type_, key)
+    assert a.value_kind is ValueKind(kind)
+    assert a.label == label
+    assert et.party_unset(type_, f"attributes.{key}") is ABSENT
+
+
+def test_quest_where_points_at_a_location():
+    assert et.attribute("quest", "location_entity_id").target_types == (EntityType.LOCATION,)
+
+
+def test_location_kind_is_the_closed_set():
+    assert [k.value for k in LocationKind] == LOCATION_KINDS
+    assert et.attribute("location", "kind").choices == tuple(LOCATION_KINDS)
+    for kind in LOCATION_KINDS:
+        assert et.validate_attributes("location", {"kind": kind}) == {"kind": kind}
+    assert et.validate_attributes("location", {"kind": None}) == {"kind": None}
+    for bad in ("city", "Settlement", "", 3):
+        with pytest.raises(ValueError, match="settlement"):
+            et.validate_attributes("location", {"kind": bad})
+    # attributes.kind is not the entity kind column, which Locations never have.
+    assert et.validate_kind("location", None) is None
+
+
+def test_location_kind_enum_is_a_ci10_attribute_enum():
+    from tests.test_enum_check_sync import ATTRIBUTE_ENUMS, ENUM_CHECKS_PENDING
+
+    assert ATTRIBUTE_ENUMS[LocationKind] == "location.attributes.kind"
+    assert LocationKind not in ENUM_CHECKS_PENDING
+
+
+def test_memberships_are_not_attributes():
+    for definition in REGISTRY.values():
+        for a in definition.attributes:
+            assert "member" not in a.key and "party" not in a.key and a.key != "faction_entity_id"
 
 
 # ---- validate_status --------------------------------------------------------
@@ -265,6 +326,35 @@ def test_party_view_rejects_bad_attributes_and_str_hidden():
         et.party_view("location", {"name": "T", "attributes": ["region"]}, hidden={"attributes.region"})
     with pytest.raises(TypeError):
         et.party_view("location", {"name": "T", "description": "d"}, hidden="description")
+
+
+def test_party_view_hides_owner_amendment_attributes():
+    # Any attribute can be GM-only: a secret voice or goals are dropped from the
+    # Party view exactly as if they had never been set.
+    npc = {"name": "Aldric", "status": "alive", "description": "Scholar.", "aliases": [],
+           "attributes": {"voice": "Dry, clipped; taps his quill.", "appearance": "Ink-stained",
+                          "pronouns": "he/him", "goals": "Sell the rune notes twice.",
+                          "occupation": "Scholar"}}
+    view = et.party_view("character", npc, hidden={"attributes.voice", "attributes.goals"})
+    assert view["attributes"] == {"appearance": "Ink-stained", "pronouns": "he/him", "occupation": "Scholar"}
+    never_set = {**npc, "attributes": {k: v for k, v in npc["attributes"].items()
+                                       if k not in ("voice", "goals")}}
+    assert view == et.party_view("character", never_set, hidden={"attributes.voice", "attributes.goals"})
+    assert npc["attributes"]["voice"] and npc["attributes"]["goals"]  # not mutated
+
+    cases = [
+        ("location", {"kind": "dungeon", "region": "Vale"}, "attributes.kind", {"region": "Vale"}),
+        ("faction", {"goals": "Wake the Hollow King", "leader_entity_id": "e1"}, "attributes.goals",
+         {"leader_entity_id": "e1"}),
+        ("item", {"rarity": "cursed heirloom", "holder_entity_id": "e2"}, "attributes.rarity",
+         {"holder_entity_id": "e2"}),
+        ("quest", {"reward": "200 gold", "location_entity_id": "e3", "giver_entity_id": "e4"},
+         "attributes.reward", {"location_entity_id": "e3", "giver_entity_id": "e4"}),
+        ("quest", {"reward": "200 gold", "location_entity_id": "e3"}, "attributes.location_entity_id",
+         {"reward": "200 gold"}),
+    ]
+    for type_, attrs, hidden, expected in cases:
+        assert et.party_view(type_, {"name": "X", "attributes": attrs}, hidden={hidden})["attributes"] == expected
 
 
 def test_party_view_rejects_unknown_hidden_field():
