@@ -52,13 +52,13 @@ async def add_entry(ev4, *, visibility: str = "gm", kind: str = "gm", author: uu
 
 
 async def add_tag(ev4, journal_id: uuid.UUID, *, source_field: str | None = None, name: str | None = None,
-                  category_id: uuid.UUID | None = None) -> uuid.UUID:
+                  category_id: uuid.UUID | None = None, campaign_id: uuid.UUID | None = None) -> uuid.UUID:
     """A new tag linked to `journal_id` with `source_field`. With no name, a
-    canary name (for a tag that must stay hidden). Tags are global and unique
+    canary name of `campaign_id` (default A; for a tag that must stay hidden). Tags are global and unique
     by (name, type), so a given name gets a unique suffix ("Bree 1a2b3c4d")."""
     from app.db.models.tag import JournalTag, Tag, TagType
 
-    name = f"{name} {uuid.uuid4().hex[:8]}" if name else mint_canary("XTAG", ev4.a.campaign_id).token
+    name = f"{name} {uuid.uuid4().hex[:8]}" if name else mint_canary("XTAG", campaign_id or ev4.a.campaign_id).token
     tag = Tag(id=uuid.uuid4(), name=name,
               tag_type=None if category_id else TagType.character, custom_category_id=category_id)
     ev4.db.add(tag)
@@ -205,3 +205,60 @@ async def redacted_messages(ev4) -> list[dict]:
         {"role": "user", "content": f"{mint_canary('CHATLEGACY', a).token} who is the lich?"},
         {"role": "assistant", "content": f"{mint_canary('CHATLEGACY', a).token} Barnaby."},
     ]
+
+
+# ── E0-Access.5 ────────────────────────────────────────────────────────────
+
+def previewing(actor: Actor) -> Actor:
+    """`actor` sending `X-Lorekeeper-Preview: member`: it may see only what a
+    Player sees in every Campaign (a canary of its own GM Campaign is a leak
+    now), since preview narrows each GM Campaign to the member view."""
+    import dataclasses
+
+    return dataclasses.replace(
+        actor, name=f"{actor.name}+preview", headers={**actor.headers, "X-Lorekeeper-Preview": "member"},
+        grants={cid: ("player" if grant == "gm" else grant) for cid, grant in actor.grants.items()},
+    )
+
+
+def _text(ev4, kind: str, hidden: bool) -> str:
+    return mint_canary(kind, ev4.a.campaign_id).token if hidden else f"{kind.lower()} {uuid.uuid4().hex[:8]}"
+
+
+async def add_term(ev4, *, visibility: str = "gm") -> uuid.UUID:
+    """A shorthand term in A; a hidden one is all canary."""
+    from app.db.models.shorthand import ShorthandTerm
+
+    hidden = visibility != "party"
+    term = ShorthandTerm(id=uuid.uuid4(), user_id=ev4.a.owner_id, campaign_id=ev4.a.campaign_id,
+                         term=_text(ev4, "XTERM", hidden)[:50], meaning=_text(ev4, "XMEANING", hidden),
+                         visibility=visibility)
+    ev4.db.add(term)
+    await ev4.db.commit()
+    return term.id
+
+
+async def add_plan(ev4, *, visibility: str = "gm") -> uuid.UUID:
+    """A session plan in A; a hidden one is all canary."""
+    from app.db.models.session_plan import SessionPlan
+
+    hidden = visibility != "party"
+    plan = SessionPlan(id=uuid.uuid4(), user_id=ev4.a.owner_id, campaign_id=ev4.a.campaign_id,
+                       title=_text(ev4, "XPLANTITLE", hidden), content=_text(ev4, "XPLAN", hidden),
+                       visibility=visibility)
+    ev4.db.add(plan)
+    await ev4.db.commit()
+    return plan.id
+
+
+async def add_source(ev4, *, visibility: str = "gm") -> uuid.UUID:
+    """A source document in A; a hidden one is all canary."""
+    from app.db.models.source import SourceDocument
+
+    hidden = visibility != "party"
+    name = _text(ev4, "XSRC", hidden)
+    doc = SourceDocument(id=uuid.uuid4(), user_id=ev4.a.owner_id, campaign_id=ev4.a.campaign_id, title=name,
+                         filename=f"{name}.txt", visibility=visibility)
+    ev4.db.add(doc)
+    await ev4.db.commit()
+    return doc.id

@@ -1,5 +1,5 @@
 import secrets
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -21,8 +21,11 @@ from app.schemas.campaign import (
 from app.db.models.campaign_member import CampaignMember
 from app.schemas.share import ShareTokenResponse, ShareTokenCreate, CampaignMemberResponse
 from app.schemas.tag_category import TagCategoryCreate, TagCategoryResponse
-from app.access import CampaignContext, project, project_all, require_campaign, role_map, scoped_get
-from app.api.deps import get_current_user, get_campaign_with_access, get_user_llm_config
+from app.access import (
+    CampaignContext, check_create, project, project_all, require_campaign, role_map_for_request, scoped_get,
+    scoped_select,
+)
+from app.api.deps import get_current_user, get_user_llm_config
 from app.services.export_service import build_campaign_markdown, build_campaign_pdf
 from app.services.chat_service import generate_campaign_concept
 from app.services.llm_provider import LLMConfig
@@ -30,15 +33,14 @@ from app.services import llm_config_service
 
 router = APIRouter()
 
-
-async def _get_owned_campaign(db: AsyncSession, campaign_id: uuid.UUID, user: User) -> Campaign:
-    result = await db.execute(
-        select(Campaign).where(Campaign.id == campaign_id, Campaign.user_id == user.id)
-    )
-    campaign = result.scalar_one_or_none()
-    if not campaign:
-        raise HTTPException(status_code=404, detail="Campaign not found")
-    return campaign
+# E0-Access.5: every Campaign route checks the caller's Role in this Campaign
+# through require_campaign. Management (PATCH / DELETE the Campaign, Share
+# Links, members) is Owner-only; authoring and GM reads (export, analytics,
+# tag-category writes) need `gm` (Owner or Co-GM); Party reads need `player`.
+# Every denial is the one 404 {"detail": "Not found"}.
+_owner = require_campaign("owner")
+_gm = require_campaign("gm")
+_player = require_campaign("player")
 
 
 @router.post("/", response_model=CampaignResponse, status_code=201)
@@ -82,14 +84,18 @@ def _campaign_extra(campaign: Campaign, is_owner: bool) -> dict:
 @router.get("/", response_model=None,
             responses={200: {"model": list[CampaignResponse], "description": _GM_OR_PARTY}})
 async def list_campaigns(
+    request: Request,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Every Campaign the user owns or is a Member of, owned first, each
-    projected for the user's Role in it (E0-Access.4)."""
-    roles = await role_map(db, user)
+    projected for the user's Role in it (E0-Access.4), preview included (a
+    GM previewing gets the Party projection of their GM Campaigns)."""
+    roles = await role_map_for_request(request, db, user)
     if not roles:
         return []
+    # The ids are the caller's own role_map (baselined: Campaign has no
+    # campaign_id column for scoped_select_multi).
     campaigns = (await db.execute(
         select(Campaign).where(Campaign.id.in_(list(roles))).order_by(Campaign.created_at)
         # Eager-load the owner so we can surface "Shared by <name>" without an
@@ -116,17 +122,11 @@ async def get_campaign(
 
 @router.patch("/{campaign_id}", response_model=CampaignResponse)
 async def update_campaign(
-    campaign_id: uuid.UUID,
     body: CampaignUpdate,
-    user: User = Depends(get_current_user),
+    ctx: CampaignContext = Depends(_owner),
     db: AsyncSession = Depends(get_db),
 ) -> CampaignResponse:
-    result = await db.execute(
-        select(Campaign).where(Campaign.id == campaign_id, Campaign.user_id == user.id)
-    )
-    campaign = result.scalar_one_or_none()
-    if not campaign:
-        raise HTTPException(status_code=404, detail="Campaign not found")
+    campaign = await scoped_get(db, Campaign, ctx, ctx.campaign_id)
     for field, value in body.model_dump(exclude_none=True).items():
         setattr(campaign, field, value)
     await db.commit()
@@ -136,22 +136,19 @@ async def update_campaign(
 
 @router.get("/{campaign_id}/export")
 async def export_campaign(
-    campaign_id: uuid.UUID,
     format: str = Query("pdf", pattern="^(pdf|markdown)$"),
-    user: User = Depends(get_current_user),
+    ctx: CampaignContext = Depends(_gm),
     db: AsyncSession = Depends(get_db),
 ) -> Response:
-    result = await db.execute(
-        select(Campaign).where(Campaign.id == campaign_id, Campaign.user_id == user.id)
-    )
-    campaign = result.scalar_one_or_none()
-    if not campaign:
-        raise HTTPException(status_code=404, detail="Campaign not found")
+    """The caller's own entries of the Campaign as PDF or Markdown. GM only
+    (Owner or Co-GM); E0-Access.13 widens it to every Member's entries,
+    scoped by Role."""
+    campaign = await scoped_get(db, Campaign, ctx, ctx.campaign_id)
 
     entries_result = await db.execute(
-        select(JournalEntry)
-        .where(JournalEntry.campaign_id == campaign_id, JournalEntry.user_id == user.id)
-        .order_by(JournalEntry.session_date.asc().nullslast(), JournalEntry.created_at.asc())
+        scoped_select(JournalEntry, ctx)
+        .where(JournalEntry.user_id == ctx.user_id)
+        .order_by(JournalEntry.session_date.asc().nullslast(), JournalEntry.created_at.asc(), JournalEntry.id)
     )
     entries = list(entries_result.scalars().all())
 
@@ -179,30 +176,22 @@ async def export_campaign(
 
 @router.get("/{campaign_id}/analytics", response_model=CampaignAnalytics)
 async def get_campaign_analytics(
-    campaign_id: uuid.UUID,
-    user: User = Depends(get_current_user),
+    ctx: CampaignContext = Depends(_gm),
     db: AsyncSession = Depends(get_db),
 ) -> CampaignAnalytics:
-    result = await db.execute(
-        select(Campaign).where(Campaign.id == campaign_id, Campaign.user_id == user.id)
-    )
-    campaign = result.scalar_one_or_none()
-    if not campaign:
-        raise HTTPException(status_code=404, detail="Campaign not found")
-
-    base_filter = (JournalEntry.campaign_id == campaign_id) & (JournalEntry.user_id == user.id)
+    """Stats over the caller's own entries of the Campaign. GM only (Owner or
+    Co-GM); E0-Access.13 widens it to every Member, scoped by Role."""
+    own = scoped_select(JournalEntry, ctx).where(JournalEntry.user_id == ctx.user_id)
 
     totals_result = await db.execute(
-        select(func.count(JournalEntry.id), func.avg(func.length(JournalEntry.narrative)))
-        .where(base_filter)
+        own.with_only_columns(func.count(JournalEntry.id), func.avg(func.length(JournalEntry.narrative)))
     )
     total_entries, avg_length = totals_result.one()
 
     effective_date = func.coalesce(JournalEntry.session_date, cast(JournalEntry.created_at, Date))
     week_start = func.date_trunc("week", effective_date)
     weekly_result = await db.execute(
-        select(week_start, func.count(JournalEntry.id))
-        .where(base_filter)
+        own.with_only_columns(week_start, func.count(JournalEntry.id))
         .group_by(week_start)
         .order_by(week_start)
     )
@@ -210,14 +199,17 @@ async def get_campaign_analytics(
         WeeklyCount(week_start=w.date().isoformat(), count=c) for w, c in weekly_result.all()
     ]
 
+    own_ids = own.with_only_columns(JournalEntry.id)
+
     async def top_tags(tag_type: TagType, limit: int = 5) -> list[TagCount]:
+        # Links visible to ctx, on the caller's own entries.
         tags_result = await db.execute(
-            select(Tag.name, func.count(JournalTag.journal_id))
-            .join(JournalTag, Tag.id == JournalTag.tag_id)
-            .join(JournalEntry, JournalTag.journal_id == JournalEntry.id)
-            .where(base_filter, Tag.tag_type == tag_type)
-            .group_by(Tag.id)
-            .order_by(func.count(JournalTag.journal_id).desc())
+            scoped_select(JournalTag, ctx)
+            .join(Tag, Tag.id == JournalTag.tag_id)
+            .where(JournalTag.journal_id.in_(own_ids), Tag.tag_type == tag_type)
+            .with_only_columns(Tag.name, func.count(JournalTag.journal_id))
+            .group_by(Tag.id, Tag.name)
+            .order_by(func.count(JournalTag.journal_id).desc(), Tag.name)
             .limit(limit)
         )
         return [TagCount(name=name, count=count) for name, count in tags_result.all()]
@@ -233,30 +225,25 @@ async def get_campaign_analytics(
 
 @router.get("/{campaign_id}/share", response_model=list[ShareTokenResponse])
 async def list_share_tokens(
-    campaign_id: uuid.UUID,
-    user: User = Depends(get_current_user),
+    ctx: CampaignContext = Depends(_owner),
     db: AsyncSession = Depends(get_db),
 ) -> list[ShareTokenResponse]:
-    await _get_owned_campaign(db, campaign_id, user)
     result = await db.execute(
-        select(CampaignShareToken)
-        .where(CampaignShareToken.campaign_id == campaign_id)
-        .order_by(CampaignShareToken.created_at.desc())
+        scoped_select(CampaignShareToken, ctx)
+        .order_by(CampaignShareToken.created_at.desc(), CampaignShareToken.id)
     )
     return list(result.scalars().all())
 
 
 @router.post("/{campaign_id}/share", response_model=ShareTokenResponse, status_code=201)
 async def create_share_token(
-    campaign_id: uuid.UUID,
     body: ShareTokenCreate,
-    user: User = Depends(get_current_user),
+    ctx: CampaignContext = Depends(_owner),
     db: AsyncSession = Depends(get_db),
 ) -> ShareTokenResponse:
-    await _get_owned_campaign(db, campaign_id, user)
     token = CampaignShareToken(
-        campaign_id=campaign_id,
-        created_by_user_id=user.id,
+        campaign_id=ctx.campaign_id,
+        created_by_user_id=ctx.user_id,
         token=secrets.token_urlsafe(24),
         kind=body.kind,
     )
@@ -268,36 +255,25 @@ async def create_share_token(
 
 @router.delete("/{campaign_id}/share/{token_id}", status_code=204)
 async def revoke_share_token(
-    campaign_id: uuid.UUID,
     token_id: uuid.UUID,
-    user: User = Depends(get_current_user),
+    ctx: CampaignContext = Depends(_owner),
     db: AsyncSession = Depends(get_db),
 ) -> None:
-    await _get_owned_campaign(db, campaign_id, user)
-    result = await db.execute(
-        select(CampaignShareToken).where(
-            CampaignShareToken.id == token_id, CampaignShareToken.campaign_id == campaign_id
-        )
-    )
-    token = result.scalar_one_or_none()
-    if not token:
-        raise HTTPException(status_code=404, detail="Share link not found")
+    token = await scoped_get(db, CampaignShareToken, ctx, token_id)
     token.revoked = True
     await db.commit()
 
 
 @router.get("/{campaign_id}/members", response_model=list[CampaignMemberResponse])
 async def list_campaign_members(
-    campaign_id: uuid.UUID,
-    user: User = Depends(get_current_user),
+    ctx: CampaignContext = Depends(_owner),
     db: AsyncSession = Depends(get_db),
 ) -> list[CampaignMemberResponse]:
-    await _get_owned_campaign(db, campaign_id, user)
     result = await db.execute(
-        select(CampaignMember, User)
+        scoped_select(CampaignMember, ctx)
+        .add_columns(User)
         .join(User, CampaignMember.user_id == User.id)
-        .where(CampaignMember.campaign_id == campaign_id)
-        .order_by(CampaignMember.created_at)
+        .order_by(CampaignMember.created_at, CampaignMember.id)
     )
     return [
         CampaignMemberResponse(
@@ -311,7 +287,6 @@ async def list_campaign_members(
 
 @router.delete("/{campaign_id}/members/{member_id}", status_code=204)
 async def remove_campaign_member(
-    campaign_id: uuid.UUID,
     member_id: uuid.UUID,
     delete_entries: bool = Query(
         False,
@@ -322,23 +297,13 @@ async def remove_campaign_member(
             "in this campaign."
         ),
     ),
-    user: User = Depends(get_current_user),
+    ctx: CampaignContext = Depends(_owner),
     db: AsyncSession = Depends(get_db),
 ) -> None:
-    await _get_owned_campaign(db, campaign_id, user)
-    result = await db.execute(
-        select(CampaignMember).where(
-            CampaignMember.id == member_id, CampaignMember.campaign_id == campaign_id
-        )
-    )
-    member = result.scalar_one_or_none()
-    if not member:
-        raise HTTPException(status_code=404, detail="Member not found")
+    member = await scoped_get(db, CampaignMember, ctx, member_id)
     if delete_entries:
         entries_result = await db.execute(
-            select(JournalEntry).where(
-                JournalEntry.campaign_id == campaign_id, JournalEntry.user_id == member.user_id
-            )
+            scoped_select(JournalEntry, ctx).where(JournalEntry.user_id == member.user_id)
         )
         for entry in entries_result.scalars().all():
             await db.delete(entry)
@@ -348,8 +313,7 @@ async def remove_campaign_member(
 
 @router.post("/{campaign_id}/leave", status_code=204)
 async def leave_campaign(
-    campaign_id: uuid.UUID,
-    user: User = Depends(get_current_user),
+    ctx: CampaignContext = Depends(_player),
     db: AsyncSession = Depends(get_db),
 ) -> None:
     """Self-service counterpart to remove_campaign_member above — a
@@ -358,94 +322,70 @@ async def leave_campaign(
     owner-initiated removal); there's no self-service "and delete my entries
     too" option here since that's a much bigger action to expose without a
     confirmation flow, and the owner can already do it via Remove + Delete
-    Entries in Settings → Sharing if it's ever actually wanted."""
-    campaign = await db.get(Campaign, campaign_id)
-    if not campaign:
-        raise HTTPException(status_code=404, detail="Campaign not found")
-    if campaign.user_id == user.id:
+    Entries in Settings → Sharing if it's ever actually wanted. Anyone who
+    is neither the Owner nor a Member gets the one 404."""
+    if ctx.is_owner:
+        # Only the Owner can reach this (they know the Campaign exists).
         raise HTTPException(
             status_code=400,
             detail="You own this campaign — delete it instead of leaving it.",
         )
-    result = await db.execute(
-        select(CampaignMember).where(
-            CampaignMember.campaign_id == campaign_id, CampaignMember.user_id == user.id
-        )
-    )
-    member = result.scalar_one_or_none()
-    if not member:
-        raise HTTPException(status_code=404, detail="You're not a member of this campaign.")
+    member = await scoped_get(db, CampaignMember, ctx, ctx.grant_id)
     await db.delete(member)
     await db.commit()
 
 
 @router.get("/{campaign_id}/tag-categories", response_model=list[TagCategoryResponse])
 async def list_tag_categories(
-    campaign_id: uuid.UUID,
-    user: User = Depends(get_current_user),
+    ctx: CampaignContext = Depends(_player),
     db: AsyncSession = Depends(get_db),
-) -> list[TagCategoryResponse]:
-    await get_campaign_with_access(db, campaign_id, user)
-    result = await db.execute(
-        select(TagCategory).where(TagCategory.campaign_id == campaign_id).order_by(TagCategory.name)
-    )
-    return list(result.scalars().all())
+):
+    """The categories the caller may see (a hidden one is absent)."""
+    result = await db.execute(scoped_select(TagCategory, ctx).order_by(TagCategory.name, TagCategory.id))
+    return await project_all(db, result.scalars().all(), ctx)
 
 
 @router.post("/{campaign_id}/tag-categories", response_model=TagCategoryResponse, status_code=201)
 async def create_tag_category(
-    campaign_id: uuid.UUID,
     body: TagCategoryCreate,
-    user: User = Depends(get_current_user),
+    ctx: CampaignContext = Depends(_gm),
     db: AsyncSession = Depends(get_db),
-) -> TagCategoryResponse:
-    await get_campaign_with_access(db, campaign_id, user)
+):
     name = body.name.strip()[:50]
     if not name:
         raise HTTPException(status_code=422, detail="Category name cannot be empty.")
 
     existing = await db.execute(
-        select(TagCategory).where(TagCategory.campaign_id == campaign_id, TagCategory.name.ilike(name))
+        scoped_select(TagCategory, ctx).where(func.lower(TagCategory.name) == name.lower())
+        .order_by(TagCategory.created_at, TagCategory.id)
     )
-    if found := existing.scalar_one_or_none():
-        return found
+    if found := existing.scalars().first():
+        return project(found, ctx)
 
-    category = TagCategory(campaign_id=campaign_id, created_by_user_id=user.id, name=name)
+    category = TagCategory(campaign_id=ctx.campaign_id, created_by_user_id=ctx.user_id, name=name)
+    check_create(category, ctx)
     db.add(category)
     await db.commit()
     await db.refresh(category)
-    return category
+    return project(category, ctx)
 
 
 @router.delete("/{campaign_id}/tag-categories/{category_id}", status_code=204)
 async def delete_tag_category(
-    campaign_id: uuid.UUID,
     category_id: uuid.UUID,
-    user: User = Depends(get_current_user),
+    ctx: CampaignContext = Depends(_gm),
     db: AsyncSession = Depends(get_db),
 ) -> None:
-    await get_campaign_with_access(db, campaign_id, user)
-    result = await db.execute(
-        select(TagCategory).where(TagCategory.id == category_id, TagCategory.campaign_id == campaign_id)
-    )
-    category = result.scalar_one_or_none()
-    if not category:
-        raise HTTPException(status_code=404, detail="Tag category not found")
+    category = await scoped_get(db, TagCategory, ctx, category_id)
     await db.delete(category)
     await db.commit()
 
 
 @router.delete("/{campaign_id}", status_code=204)
 async def delete_campaign(
-    campaign_id: uuid.UUID,
-    user: User = Depends(get_current_user),
+    ctx: CampaignContext = Depends(_owner),
     db: AsyncSession = Depends(get_db),
 ) -> None:
-    result = await db.execute(
-        select(Campaign).where(Campaign.id == campaign_id, Campaign.user_id == user.id)
-    )
-    campaign = result.scalar_one_or_none()
-    if not campaign:
-        raise HTTPException(status_code=404, detail="Campaign not found")
+    campaign = await scoped_get(db, Campaign, ctx, ctx.campaign_id)
     await db.delete(campaign)
     await db.commit()

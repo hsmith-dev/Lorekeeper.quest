@@ -26,10 +26,10 @@ from app.schemas.journal import (
 )
 from app.schemas.tag import TagAttachRequest, TagGMResponse
 from app.access import (
-    GM, CampaignContext, ctx_for, ctx_for_request, not_found, project, project_all, require_campaign_for, role_ctx, role_map,
-    scoped_get, scoped_select, scoped_select_multi, visible_clause,
+    GM, CampaignContext, ctx_for_request, not_found, project, project_all, require_campaign, require_campaign_for,
+    role_ctx, role_map_for_request, scoped_get, scoped_select, scoped_select_multi,
 )
-from app.api.deps import get_current_user, get_user_llm_config, get_campaign_with_access
+from app.api.deps import get_current_user, get_user_llm_config
 from app.services.journal_service import create_journal_entry, generate_draft_narrative
 from app.services.dedup_service import check_hash
 from app.services.chat_service import autocomplete_notes, generate_session_recap, summarize_session_transcript
@@ -45,6 +45,9 @@ router = APIRouter()
 # schema); `responses=` keeps the GM schema in the OpenAPI docs.
 _GM_OR_PARTY = "GM: the GM schema; Player or member preview: the Party schema (no `shorthand`)."
 _ENTRY_TAGS = selectinload(JournalEntry.tags).selectinload(Tag.custom_category)
+# E0-Access.5: tag attach / detach and delete need `gm` in the entry's own
+# Campaign (Player Journal deletes arrive with E7 through can_write).
+_entry_gm = require_campaign_for(JournalEntry, "journal_id", "gm")
 
 
 @router.post("/generate-draft", response_model=GenerateDraftResponse)
@@ -62,8 +65,10 @@ async def generate_journal_draft(
     store; a user can generate several drafts for the same notes without
     creating duplicate-entry noise, and a draft they never save leaves no
     trace."""
-    await get_campaign_with_access(db, body.campaign_id, user)
-    narrative = await generate_draft_narrative(db, user.id, body.campaign_id, body.notes, config)
+    ctx = await ctx_for_request(request, db, user, body.campaign_id)
+    # A non-GM's draft gets no GM-only context (glossary, source canon).
+    narrative = await generate_draft_narrative(db, user.id, body.campaign_id, body.notes, config,
+                                               gm_context=ctx.is_gm)
     await llm_config_service.meter(db, user, config, body.notes, narrative)
     return GenerateDraftResponse(narrative=narrative)
 
@@ -99,6 +104,7 @@ async def generate_journal(
         session_date=body.session_date,
         config=config,
         narrative=body.narrative,
+        gm_context=ctx.is_gm,
     )
     if body.narrative is None:
         await llm_config_service.meter(db, user, config, body.notes, entry.narrative)
@@ -125,37 +131,40 @@ async def list_journals(
     matches and ranks on `narrative_tsv` (Shorthand + Narrative). Elsewhere
     only entries visible to them are listed and `search` uses `party_tsv`
     (Narrative only), so a Shorthand-only word never changes what they find
-    or its order (E0-Access.7). `total` counts visible rows only."""
+    or its order (E0-Access.7). `total` counts visible rows only. The
+    preview header narrows both forms: a GM previewing reads every GM
+    Campaign as the member view (E0-Access.5)."""
     if campaign_id:
         ctx = await ctx_for_request(request, db, user, campaign_id)
         ctxs = [ctx]
+        query = scoped_select(JournalEntry, ctx)
         links = scoped_select(JournalTag, ctx)
         scope = ctx
     else:
         # No specific campaign: everything across every campaign this user can
         # see (owned or joined), each row by the user's Role in its own
-        # Campaign (no preview: that narrows one Campaign).
-        roles = await role_map(db, user)
+        # Campaign (previewing: GM Campaigns as the member view).
+        roles = await role_map_for_request(request, db, user)
         ctxs = [role_ctx(roles, cid) for cid in roles]
+        query = scoped_select_multi(JournalEntry, roles)
         links = scoped_select_multi(JournalTag, roles)
         scope = roles
     gm_ids = [c.campaign_id for c in ctxs if c.role == GM]
-    party_ctxs = [c for c in ctxs if c.role != GM]
+    has_party = any(c.role != GM for c in ctxs)
 
-    tsq = func.plainto_tsquery("english", search) if search else None
     in_gm = JournalEntry.campaign_id.in_(gm_ids) if gm_ids else false()
-    gm_branch = and_(in_gm, JournalEntry.narrative_tsv.op("@@")(tsq)) if search else in_gm
-    party_branches = []
-    for c in party_ctxs:
-        branch = and_(JournalEntry.campaign_id == c.campaign_id, visible_clause(JournalEntry, c))
-        if search:
-            branch = and_(branch, JournalEntry.party_tsv.op("@@")(tsq))
-        party_branches.append(branch)
-    query = select(JournalEntry).where(or_(gm_branch, *party_branches) if party_branches else gm_branch)
+    if search:
+        tsq = func.plainto_tsquery("english", search)
+        # GM Campaigns match on narrative_tsv (Shorthand + Narrative), the
+        # others on party_tsv (Narrative only).
+        query = query.where(or_(
+            and_(in_gm, JournalEntry.narrative_tsv.op("@@")(tsq)),
+            and_(~in_gm, JournalEntry.party_tsv.op("@@")(tsq)) if has_party else false(),
+        ))
 
     query = query.options(_ENTRY_TAGS)
     if search:
-        if party_ctxs:
+        if has_party:
             rank = case(
                 (in_gm, func.ts_rank(JournalEntry.narrative_tsv, tsq)),
                 else_=func.ts_rank(JournalEntry.party_tsv, tsq),
@@ -199,7 +208,7 @@ async def get_journal(
 async def attach_tag(
     journal_id: uuid.UUID,
     body: TagAttachRequest,
-    ctx: CampaignContext = Depends(require_campaign_for(JournalEntry, "journal_id")),
+    ctx: CampaignContext = Depends(_entry_gm),
     db: AsyncSession = Depends(get_db),
 ):
     entry = await scoped_get(db, JournalEntry, ctx, journal_id)
@@ -215,6 +224,8 @@ async def attach_tag(
         (Tag.custom_category_id == body.custom_category_id) if body.custom_category_id
         else (Tag.tag_type == body.tag_type)
     )
+    # Tags are global, unique by (name, type): the lookup is by name, never
+    # by Campaign (baselined in scripts/scoped_queries_baseline.txt).
     existing = await db.execute(select(Tag).where(Tag.name == name, tag_filter))
     tag = existing.scalar_one_or_none()
     if not tag:
@@ -223,7 +234,7 @@ async def attach_tag(
         await db.flush()
 
     link_exists = await db.execute(
-        select(JournalTag).where(JournalTag.journal_id == entry.id, JournalTag.tag_id == tag.id)
+        scoped_select(JournalTag, ctx).where(JournalTag.journal_id == entry.id, JournalTag.tag_id == tag.id)
     )
     if not link_exists.scalar_one_or_none():
         db.add(JournalTag(journal_id=entry.id, tag_id=tag.id))
@@ -237,7 +248,7 @@ async def attach_tag(
 async def detach_tag(
     journal_id: uuid.UUID,
     tag_id: uuid.UUID,
-    ctx: CampaignContext = Depends(require_campaign_for(JournalEntry, "journal_id")),
+    ctx: CampaignContext = Depends(_entry_gm),
     db: AsyncSession = Depends(get_db),
 ) -> None:
     entry = await scoped_get(db, JournalEntry, ctx, journal_id)
@@ -261,16 +272,16 @@ async def autocomplete_journal_notes(
     db: AsyncSession = Depends(get_db),
     config: LLMConfig = Depends(get_user_llm_config),
 ) -> AutocompleteResponse:
+    """With `campaign_id`, the Campaign's name and genre steer the
+    suggestion; that needs `gm` there (Owner or Co-GM; anyone else gets the
+    one 404). Without it, no Campaign context."""
     campaign_name: str | None = None
     genre: str | None = None
     if body.campaign_id:
-        result = await db.execute(
-            select(Campaign).where(Campaign.id == body.campaign_id, Campaign.user_id == user.id)
-        )
-        campaign = result.scalar_one_or_none()
-        if campaign:
-            campaign_name = campaign.name
-            genre = campaign.genre.value
+        ctx = await ctx_for_request(request, db, user, body.campaign_id, "gm")
+        campaign = await scoped_get(db, Campaign, ctx, ctx.campaign_id)
+        campaign_name = campaign.name
+        genre = campaign.genre.value
     suggestion = await autocomplete_notes(body.text, campaign_name, genre, config=config)
     await llm_config_service.meter(db, user, config, body.text, suggestion)
     return AutocompleteResponse(suggestion=suggestion)
@@ -285,12 +296,13 @@ async def recap_campaign_session(
     db: AsyncSession = Depends(get_db),
     config: LLMConfig = Depends(get_user_llm_config),
 ) -> RecapResponse:
-    campaign = await get_campaign_with_access(db, body.campaign_id, user)
+    # GM only: the recap is built from Shorthand (GM content).
+    ctx = await ctx_for_request(request, db, user, body.campaign_id, "gm")
+    campaign = await scoped_get(db, Campaign, ctx, ctx.campaign_id)
 
     entries_result = await db.execute(
-        select(JournalEntry)
-        .where(JournalEntry.campaign_id == body.campaign_id)
-        .order_by(JournalEntry.created_at.desc())
+        scoped_select(JournalEntry, ctx)
+        .order_by(JournalEntry.created_at.desc(), JournalEntry.id)
         .limit(10)
     )
     entries = list(reversed(entries_result.scalars().all()))
@@ -312,7 +324,8 @@ async def summarize_session(
     db: AsyncSession = Depends(get_db),
     config: LLMConfig = Depends(get_user_llm_config),
 ) -> SessionSummaryResponse:
-    campaign = await get_campaign_with_access(db, body.campaign_id, user)
+    ctx = await ctx_for_request(request, db, user, body.campaign_id)
+    campaign = await scoped_get(db, Campaign, ctx, ctx.campaign_id)
 
     if not body.transcript.strip():
         raise HTTPException(status_code=422, detail="Transcript is empty.")
@@ -326,18 +339,13 @@ async def summarize_session(
 
 @router.post("/reindex")
 async def reindex_journal_embeddings(
-    campaign_id: uuid.UUID = Query(...),
-    user: User = Depends(get_current_user),
+    ctx: CampaignContext = Depends(require_campaign("gm")),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """Regenerate vector embeddings for all journal entries in a campaign.
-    GM only: the count covers every row, hidden ones included."""
-    ctx = await ctx_for(db, user.id, campaign_id)
-    if ctx.role != GM:
-        not_found()
-    entries_result = await db.execute(
-        select(JournalEntry).where(JournalEntry.campaign_id == campaign_id)
-    )
+    """Regenerate vector embeddings for all journal entries in a campaign
+    (`campaign_id` query parameter). GM only: the count covers every row,
+    hidden ones included."""
+    entries_result = await db.execute(scoped_select(JournalEntry, ctx))
     entries = list(entries_result.scalars().all())
     for entry in entries:
         text = f"{entry.shorthand} {entry.narrative}"
@@ -350,14 +358,12 @@ async def reindex_journal_embeddings(
 @router.delete("/{journal_id}", status_code=204)
 async def delete_journal(
     journal_id: uuid.UUID,
-    ctx: CampaignContext = Depends(require_campaign_for(JournalEntry, "journal_id")),
+    ctx: CampaignContext = Depends(_entry_gm),
     db: AsyncSession = Depends(get_db),
 ) -> None:
+    # A GM of the entry's Campaign (Owner or Co-GM) may delete any entry
+    # there; anyone else gets the one 404 (Player Journal deletes arrive with
+    # E7 through can_write).
     entry = await scoped_get(db, JournalEntry, ctx, journal_id)
-    # Anyone with access can delete their own entry; only the campaign owner can
-    # delete someone else's (the Player write rules arrive with E0-Access.6's
-    # can_write). Every denial is the one 404, never a 403.
-    if entry.user_id != ctx.user_id and not ctx.is_owner:
-        not_found()
     await db.delete(entry)
     await db.commit()

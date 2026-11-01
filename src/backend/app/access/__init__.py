@@ -10,7 +10,8 @@ lattice, the registry (`visible_clause`, `audience_of`, `scoped_select`,
 `scoped_get`, `DERIVED_REGISTRY`), `audience_ctx` and the preview header.
 E0-Access.4 adds the projections (`project`, `project_all`, `PROJECTIONS`),
 Share Links (`share_ctx`, `resolve_share_token`), `ctx_for_request`,
-`role_ctx` and the `Vary` middleware. E0-Access.8 adds citations
+`role_ctx` and the `Vary` middleware. E0-Access.5 adds `role_map_for_request`
+(cross-Campaign lists honour the preview header). E0-Access.8 adds citations
 (`register_resolver`, `visible_refs`, `resolve_sources`, `message_refs`) and
 the chat projections (`project_chat`, `replay_history`).
 """
@@ -21,6 +22,7 @@ from app.access.audience import (
 from app.access.context import (
     ANON_VIEW, MEMBER_VIEW, PREVIEW_HEADER, AsUser, CampaignContext, RoleMap, VaryMiddleware, as_user,
     audience_ctx, ctx_for, ctx_for_request, require_campaign, require_campaign_for, role_ctx, role_map,
+    role_map_for_request,
     scoped_select_multi,
 )
 from app.access.identity import bearer_scheme, get_current_user
@@ -30,7 +32,7 @@ from app.access.policy import (
 from app.access.registry import (
     DERIVED_REGISTRY, REGISTRY, SOURCE_KIND_MODELS, DerivedType, UnregisteredModel, always_gm, audience_of,
     derived, derived_from_sources, gm_fields, membership, parent, reached_through, register_derived,
-    register_source_kind, registration, scoped_get, scoped_select, stored, visible_clause,
+    owned_get, register_source_kind, registration, scoped_get, scoped_select, stored, visible_clause,
 )
 from app.access.projection import (
     CHAT_DETAIL, CHAT_META, CHAT_REPLY, LITE, PROJECTIONS, REDACTED_NOTICE, WITH_COUNT, Projection,
@@ -121,6 +123,7 @@ __all__ = [
     "mention_audience",
     "most_restrictive",
     "not_found",
+    "owned_get",
     "owner",
     "parent",
     "reached_through",
@@ -130,6 +133,7 @@ __all__ = [
     "require_campaign",
     "require_campaign_for",
     "role_map",
+    "role_map_for_request",
     "scoped_get",
     "scoped_select",
     "scoped_select_multi",

@@ -16,9 +16,11 @@ Workers, hook handlers and the backfill runner have no request: they call
 `ctx_for(db, user_id, campaign_id)`, which rebuilds the ctx `require_campaign`
 would build for that user now.
 
-Cross-Campaign lists use `role_map(db, user)` and
-`scoped_select_multi(Model, role_map)`: rows of GM Campaigns unfiltered, rows
-of Player Campaigns through the registry predicate for that Player.
+Cross-Campaign lists use `role_map_for_request(request, db, user)` (or
+`role_map(db, user)` with no request) and `scoped_select_multi(Model,
+role_map)`: rows of GM Campaigns unfiltered, rows of Player Campaigns through
+the registry predicate for that Player. With the preview header, every GM
+Campaign of the map reads as the member view.
 
 Reduced ctxs (E0-Access.3) come only from `audience_ctx(campaign_id, target,
 by=ctx)`, with target `ANON_VIEW`, `MEMBER_VIEW` or `as_user(user_id)`. They
@@ -349,11 +351,18 @@ def require_campaign_for(model: type, id_param: str, min_role: str = "player", *
 
 class RoleMap(dict):
     """{campaign_id: ctx Role}, carrying the `user_id` it was built for (so
-    `scoped_select_multi` can filter Player Campaigns as that Player)."""
+    `scoped_select_multi` can filter Player Campaigns as that Player).
 
-    def __init__(self, *args: Any, user_id: uuid.UUID | None = None, **kwargs: Any) -> None:
+    `preview=True` (set only by `role_map_for_request`, for a request with
+    `X-Lorekeeper-Preview: member`) narrows every gm Campaign to the member
+    view: `role_ctx` returns the read-only member-view ctx there and
+    `scoped_select_multi` filters those rows as the member view. Player
+    Campaigns are unchanged (the header only narrows)."""
+
+    def __init__(self, *args: Any, user_id: uuid.UUID | None = None, preview: bool = False, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self.user_id = user_id
+        self.preview = bool(preview)
 
 
 async def role_map(db: AsyncSession, user: User | uuid.UUID) -> RoleMap:
@@ -372,6 +381,24 @@ async def role_map(db: AsyncSession, user: User | uuid.UUID) -> RoleMap:
     return out
 
 
+async def role_map_for_request(request: Request, db: AsyncSession, user: User | uuid.UUID) -> RoleMap:
+    """`role_map` for a cross-Campaign list request, preview included: with
+    `X-Lorekeeper-Preview: member` (exactly) every gm Campaign reads as the
+    member view (see RoleMap), and a non-safe method is `not_found()` when
+    the header narrows anything (as `require_campaign`). Without the header,
+    or for a user who is GM nowhere, it is `role_map` unchanged."""
+    roles = await role_map(db, user)
+    if request.headers.get(PREVIEW_HEADER) == PREVIEW_MEMBER and GM in roles.values():
+        if request.method.upper() not in SAFE_METHODS:
+            not_found()
+        roles.preview = True
+    return roles
+
+
+def _previewing(roles: Mapping[uuid.UUID, str]) -> bool:
+    return bool(getattr(roles, "preview", False))
+
+
 def _check_roles(roles: Mapping[uuid.UUID, str]) -> None:
     unknown = {role for role in roles.values() if role not in (GM, PLAYER)}
     if unknown:
@@ -384,7 +411,8 @@ def role_ctx(roles: Mapping[uuid.UUID, str], campaign_id: uuid.UUID, user_id: uu
     not in the map is `not_found()`. Used per row of a cross-Campaign list
     (`scoped_select_multi`, `project_all`). `user_id` defaults to
     `roles.user_id`. The ctx carries no grant or epoch (it filters, it does
-    not authorize a write)."""
+    not authorize a write). In a previewing map (`role_map_for_request`) a gm
+    Campaign gives the read-only member-view ctx."""
     _check_roles(roles)
     role = roles.get(campaign_id)
     if role is None:
@@ -392,15 +420,20 @@ def role_ctx(roles: Mapping[uuid.UUID, str], campaign_id: uuid.UUID, user_id: uu
     uid = user_id if user_id is not None else getattr(roles, "user_id", None)
     if uid is None:
         raise ValueError("role_ctx: needs the user_id (a role_map carries it)")
-    return CampaignContext(campaign_id=campaign_id, user_id=uid, role=role, is_owner=False,
-                           audience=ctx_audience(role, uid))
+    ctx = CampaignContext(campaign_id=campaign_id, user_id=uid, role=role, is_owner=False,
+                          audience=ctx_audience(role, uid))
+    if role == GM and _previewing(roles):
+        return audience_ctx(campaign_id, MEMBER_VIEW, by=ctx)
+    return ctx
 
 
 def scoped_select_multi(model: type, roles: Mapping[uuid.UUID, str], user_id: uuid.UUID | None = None) -> sa.Select:
     """`select(model)` of the rows, across the Campaigns in `roles` (a
     `role_map`), that the user may see: every row of a GM Campaign, and the
     rows of a Player Campaign that pass `visible_clause` for that Player. An
-    empty map selects nothing. `user_id` defaults to `roles.user_id`.
+    empty map selects nothing. `user_id` defaults to `roles.user_id`. In a
+    previewing map (`role_map_for_request`) gm Campaigns are filtered as the
+    member view instead.
 
     Derived models without a `campaign_id` (journal_tags, tags) are scoped
     through their parents: one `visible_clause` branch per Campaign."""
@@ -427,9 +460,12 @@ def scoped_select_multi(model: type, roles: Mapping[uuid.UUID, str], user_id: uu
         return CampaignContext(campaign_id=cid, user_id=uid, role=PLAYER, is_owner=False, audience=owner(uid))
 
     def gm_ctx(cid: uuid.UUID) -> CampaignContext:
-        return CampaignContext(campaign_id=cid, user_id=uid, role=GM, is_owner=False,
-                               audience=ctx_audience(GM, uid))
+        ctx = CampaignContext(campaign_id=cid, user_id=uid, role=GM, is_owner=False,
+                              audience=ctx_audience(GM, uid))
+        # Preview narrows a gm Campaign to the member view (never widens).
+        return audience_ctx(cid, MEMBER_VIEW, by=ctx) if preview else ctx
 
+    preview = _previewing(roles)
     branches = []
     if derived:
         # A derived predicate is scoped to one Campaign (its parent EXISTS),
@@ -441,7 +477,10 @@ def scoped_select_multi(model: type, roles: Mapping[uuid.UUID, str], user_id: uu
         return stmt.where(sa.or_(*branches))
     # Stored / always_gm / membership predicates do not depend on the Campaign
     # (and are true() for a GM).
-    if gm_ids:
+    if gm_ids and preview:
+        branches.append(sa.and_(model.campaign_id.in_(gm_ids),
+                                registry.visible_clause(model, gm_ctx(gm_ids[0]))))
+    elif gm_ids:
         branches.append(model.campaign_id.in_(gm_ids))
     if player_ids:
         branches.append(sa.and_(model.campaign_id.in_(player_ids),

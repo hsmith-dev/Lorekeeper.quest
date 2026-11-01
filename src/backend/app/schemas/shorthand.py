@@ -19,7 +19,7 @@ class ShorthandUpdate(BaseModel):
     usage: str | None = None
 
 
-class ShorthandResponse(BaseModel):
+class ShorthandGMResponse(BaseModel):
     id: uuid.UUID
     campaign_id: uuid.UUID
     term: str
@@ -29,3 +29,11 @@ class ShorthandResponse(BaseModel):
     updated_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class ShorthandPartyResponse(ShorthandGMResponse):
+    """A term a non-GM may see (its Visibility covers them). No GM-only
+    fields today, so the same keys as the GM schema (access.project)."""
+
+
+ShorthandResponse = ShorthandGMResponse

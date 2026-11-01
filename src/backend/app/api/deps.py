@@ -8,7 +8,8 @@ from app.db.models.user import User
 # user without importing app.api. Re-exported as the same objects:
 # `app.dependency_overrides[get_current_user]` works with either import.
 from app.access.identity import bearer_scheme, get_current_user  # noqa: F401
-from app.access.context import ctx_for, role_map
+from app.access.context import ctx_for
+from app.access.registry import scoped_get
 from app.access.policy import not_found
 
 
@@ -75,8 +76,10 @@ async def get_campaign_with_access(
     require_owner: bool = False,
 ):
     """DEPRECATED (E0-Access.2): use `Depends(require_campaign(min_role))` or
-    `app.access.ctx_for`. A thin wrapper over `ctx_for`, kept until
-    E0-Access.5 moves its callers.
+    `app.access.ctx_for_request`. E0-Access.5 moved every caller off it, and
+    scripts/check_scoped_queries.py (CI-8) fails on any new reference under
+    app/: it ignores the preview header and lets any Member through whatever
+    their Role (Player or Co-GM alike).
 
     Returns the Campaign when the user is its Owner or (unless
     require_owner=True) any Member, whatever the Member's Role. Every denial
@@ -86,19 +89,11 @@ async def get_campaign_with_access(
     ctx = await ctx_for(db, user.id, campaign_id)
     if require_owner and not ctx.is_owner:
         not_found()
-    campaign = await db.get(Campaign, ctx.campaign_id)
-    if campaign is None:  # deleted between the two reads
-        not_found()
-    return campaign
+    return await scoped_get(db, Campaign, ctx, ctx.campaign_id)
 
 
-async def accessible_campaign_ids(db: AsyncSession, user: User) -> list[uuid.UUID]:
-    """DEPRECATED (E0-Access.2): use `app.access.role_map` and
-    `scoped_select_multi`. A thin wrapper over `role_map`, kept until
-    E0-Access.5 moves its callers.
-
-    Every Campaign id the user owns or is a Member of, whatever the Role."""
-    return list(await role_map(db, user))
+# The cross-Campaign helper is deleted (E0-Access.5): cross-Campaign lists use
+# `app.access.role_map_for_request` (or `role_map`) and `scoped_select_multi`.
 
 
 async def get_user_llm_config(

@@ -360,6 +360,31 @@ async def scoped_get(db: AsyncSession, model: type, ctx: "CampaignContext", row_
     return row
 
 
+async def owned_get(db: AsyncSession, model: type, user_id: uuid.UUID, row_id: Any) -> Any:
+    """The row `row_id` of an owner-only stored model (`stored(column=None)`,
+    e.g. chat_sessions: Audience Owner(author) always) if `user_id` owns it,
+    in any Campaign or none; else the one `not_found()` (a bad id, a missing
+    row and another user's are the same). The caller still checks the row's
+    Campaign Role (the ctx it then reads the row with)."""
+    reg = registration(model)
+    if not isinstance(reg, Stored) or reg.column is not None:
+        raise TypeError(f"owned_get: {model.__name__!r} is not an owner-only stored model")
+    pk = sa.inspect(model).primary_key
+    if len(pk) != 1:
+        raise TypeError(f"owned_get: {model.__name__!r} has a composite primary key")
+    if not isinstance(row_id, uuid.UUID):
+        try:
+            row_id = uuid.UUID(str(row_id))
+        except (TypeError, ValueError, AttributeError):
+            not_found()
+    row = (await db.execute(
+        sa.select(model).where(pk[0] == row_id, _col(model, reg.owner_field) == user_id)
+    )).scalar_one_or_none()
+    if row is None:
+        not_found()
+    return row
+
+
 # ── Python: audience_of ────────────────────────────────────────────────────
 
 @dataclass(frozen=True)

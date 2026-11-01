@@ -29,7 +29,7 @@ class SessionPlanUpdate(BaseModel):
     content: str | None = None
 
 
-class SessionPlanResponse(BaseModel):
+class SessionPlanGMResponse(BaseModel):
     id: uuid.UUID
     campaign_id: uuid.UUID
     title: str
@@ -38,3 +38,11 @@ class SessionPlanResponse(BaseModel):
     updated_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class SessionPlanPartyResponse(SessionPlanGMResponse):
+    """A plan a non-GM may see (its Visibility covers them). No GM-only
+    fields today, so the same keys as the GM schema (access.project)."""
+
+
+SessionPlanResponse = SessionPlanGMResponse

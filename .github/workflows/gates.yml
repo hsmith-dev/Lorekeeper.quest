@@ -79,8 +79,13 @@ jobs:
       # system ctx, RC-6) is referenced only in
       # journal_service.delete_journal_entry and world_service.merge_entities.
       # E0-Access.3: no `read_only=` keyword (any value, False included)
-      # outside app/access/ (reduced ctxs come only from audience_ctx). E0-Access.5 adds the scoped-query ratchet against
-      # scripts/scoped_queries_baseline.txt to the same script.
+      # outside app/access/ (reduced ctxs come only from audience_ctx).
+      # E0-Access.5: no reference to the deprecated get_campaign_with_access /
+      # accessible_campaign_ids, and the scoped-query ratchet: select(<registered
+      # model>), <session>.get(<registered model>), raw SQL on a registered table
+      # and `Campaign.user_id ==` outside app/access/ must be listed in
+      # scripts/scoped_queries_baseline.txt (shrink-only; the gate unit tests
+      # below freeze its ceiling).
       - name: "CI-8 AD-13 scoped queries"
         run: python scripts/check_scoped_queries.py
 

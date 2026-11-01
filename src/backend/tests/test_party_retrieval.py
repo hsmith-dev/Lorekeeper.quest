@@ -237,7 +237,8 @@ async def test_create_journal_entry_indexes_party_fields(db, world, monkeypatch)
     monkeypatch.setattr(journal_service, "extract_tags", lambda text: [])
     narrative = "The party crossed the bridge at dawn."
     entry = await journal_service.create_journal_entry(
-        db, world.owner.id, world.a, "Zorblax watched", uuid.uuid4().hex, None, narrative=narrative)
+        db, world.owner.id, world.a, "Zorblax watched", uuid.uuid4().hex, None, narrative=narrative,
+        gm_context=True)
     tsv_ok, party_hit, gm_hit, vec = await _party_state(db, entry.id)
     assert tsv_ok and not party_hit and gm_hit
     assert _close(list(vec), fake_vector(narrative))
@@ -250,7 +251,7 @@ async def test_embedding_failure_leaves_party_embedding_null_and_saves(db, world
     monkeypatch.setattr(journal_service, "extract_tags", lambda text: [])
     monkeypatch.setattr(embedding_service, "embed", broken)
     entry = await journal_service.create_journal_entry(
-        db, world.owner.id, world.a, "notes", uuid.uuid4().hex, None, narrative="Saved anyway.")
+        db, world.owner.id, world.a, "notes", uuid.uuid4().hex, None, narrative="Saved anyway.", gm_context=True)
     tsv_ok, _, _, vec = await _party_state(db, entry.id)
     assert tsv_ok and vec is None
 

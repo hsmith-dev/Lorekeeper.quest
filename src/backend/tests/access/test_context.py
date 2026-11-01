@@ -267,9 +267,11 @@ async def test_role_map_and_scoped_select_multi(db, world):
 
 
 async def test_deprecated_wrappers(db, world):
-    from app.api.deps import accessible_campaign_ids, get_campaign_with_access
+    import app.api.deps as deps
+    from app.api.deps import get_campaign_with_access
 
-    assert set(await accessible_campaign_ids(db, world.player)) == {world.a, world.b}
+    # E0-Access.5 deleted accessible_campaign_ids (role_map replaces it).
+    assert not hasattr(deps, "accessible_campaign_ids")
     assert (await get_campaign_with_access(db, world.a, world.player)).id == world.a
     assert (await get_campaign_with_access(db, world.a, world.owner, require_owner=True)).id == world.a
     with pytest.raises(NotFound):

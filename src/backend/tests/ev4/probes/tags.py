@@ -7,7 +7,9 @@ from tests.ev4.families import (
     assert_counts_and_ranking_unchanged, assert_hidden_equals_missing, assert_hidden_field_equals_unset,
     assert_no_canary,
 )
-from tests.ev4.probes._support import MISSING, add_category, add_entry, add_tag, authenticated, link, outsider
+from tests.ev4.probes._support import (
+    MISSING, add_category, add_entry, add_tag, authenticated, link, outsider, previewing,
+)
 from tests.ev4.registry import ev4_probe
 
 
@@ -29,6 +31,14 @@ async def probe_list_tags(ev4, actor):
     r = await actor.get(url)
     assert_no_canary(actor, r)
     assert_no_canary(actor, await actor.get("/api/tags/"))
+    if "gm" in actor.grants.values():
+        # E0-Access.5: previewing, a Shorthand-only tag of the actor's own GM
+        # Campaign is absent from the cross-Campaign list.
+        if ev4.b is not None:
+            await add_tag(ev4, ev4.b.ids["journal_entries"][0], source_field="shorthand",
+                          campaign_id=ev4.b.campaign_id)
+        pv = previewing(actor)
+        assert_no_canary(pv, await pv.get("/api/tags/"))
     assert sorted(t["name"].split()[0] for t in r.json()) == ["Bree", "Pelor"], r.text
     await assert_hidden_field_equals_unset(actor, url, "custom_category")
 

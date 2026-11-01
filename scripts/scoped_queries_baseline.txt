@@ -1,0 +1,67 @@
+# CI-8 (AD-13) scoped-query baseline, read by scripts/check_scoped_queries.py.
+# Sites outside src/backend/app/access/ that read registered rows without the
+# registry (`select(<registered model>)`, `<session>.get(<registered model>)`,
+# raw SQL on a registered table, `Campaign.user_id ==`) as they stood after
+# E0-Access.5 moved every Campaign route onto require_campaign / scoped_select.
+#
+# This list only shrinks. A site not listed here fails CI; a line no site
+# matches fails too (delete it in the PR that removes the site).
+# scripts/test_check_scoped_queries.py holds the frozen ceiling. Never add a
+# line: read through app.access (scoped_select, scoped_get,
+# scoped_select_multi; owner checks: require_campaign("owner")) instead.
+# E0-Journal and E0-WorldCore burn the services down. Owner infrastructure
+# (app/jobs on Job / DataBackfill) is allowed by OWNER_INFRA in the check, not
+# listed here.
+#
+# Format: <path>::<function> <kind>:<target>   (one line per site)
+
+# Admin portal: operator views across every user's Campaigns, gated by
+# require_admin, not Campaign content served to a Member.
+app/api/routes/admin.py::_user_to_admin_response owner_check:Campaign.user_id
+app/api/routes/admin.py::_user_to_admin_response select:Campaign
+app/api/routes/admin.py::_user_to_admin_response select:JournalEntry
+app/api/routes/admin.py::list_users select:Campaign
+app/api/routes/admin.py::list_users select:JournalEntry
+
+# Feedback: the operator's support view (require_admin) of a Campaign named in
+# a feedback report.
+app/api/routes/feedback.py::get_feedback_context get:Campaign
+app/api/routes/feedback.py::get_feedback_context select:JournalEntry
+app/api/routes/feedback.py::get_feedback_context select:NpcEntry
+app/api/routes/feedback.py::get_feedback_context select:Quest
+app/api/routes/feedback.py::get_feedback_context select:SourceDocument
+app/api/routes/feedback.py::list_feedback select:Campaign
+
+# Campaign list: the ids are the caller's own role_map (Campaign has no
+# campaign_id column for scoped_select_multi); rows are projected per Role.
+app/api/routes/campaigns.py::list_campaigns select:Campaign
+
+# Template delete counts every sheet, hidden ones included, to refuse a
+# cascade the caller could not see (E0-Access.4).
+app/api/routes/character_sheets.py::delete_template select:CharacterSheet
+
+# Tags are global, unique by (name, type): attach looks the tag up by name
+# after the entry's Campaign was checked (require_campaign_for, gm).
+app/api/routes/journals.py::attach_tag select:Tag
+
+# Chronicler chat: E0-Access.8 (Player-safe chat) owns chat.py.
+app/api/routes/chat.py::_prepare_chat get:Campaign
+app/api/routes/chat.py::list_sessions select:Campaign
+app/api/routes/chat.py::list_sessions select:ChatSession
+
+# Collaborate-link join: no Campaign ctx exists until the grant is written
+# (E0-Access.12 reworks join with Roles).
+app/api/routes/share.py::join_campaign get:Campaign
+app/api/routes/share.py::join_campaign select:CampaignMember
+
+# Services called with a Campaign the route already checked; E0-Journal
+# (journal writes, reindex_entry) and E0-WorldCore move them onto a ctx.
+app/services/journal_service.py::create_journal_entry raw_sql:journal_entries
+app/services/journal_service.py::create_journal_entry select:JournalEntry
+app/services/journal_service.py::create_journal_entry select:Tag
+app/services/journal_service.py::generate_draft_narrative select:Campaign
+app/services/retrieval_service.py::_search select:JournalEntry
+app/services/retrieval_service.py::_search select:JournalEntry
+app/services/shorthand_service.py::get_glossary select:ShorthandTerm
+app/services/source_service.py::retrieve_canon_context select:SourceChunk
+app/services/source_service.py::retrieve_canon_context select:SourceDocument

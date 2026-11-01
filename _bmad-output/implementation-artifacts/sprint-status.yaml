@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 10-31-2026 23:30
-last_updated: 11-01-2026 12:00
+last_updated: 11-01-2026 12:06
 project: Lorekeeper.quest
 project_key: NOKEY
 tracking_system: file-system
@@ -99,7 +99,7 @@ development_status:
   4-2-campaigncontext-require_campaign-and-the-role-map: done
   4-3-access-registry-audiences-scoped_select-and-audience_ctx: done
   4-4-party-projections-and-a-uniform-404-on-existing-read-and-wri: done
-  4-5-per-campaign-permission-checks-replace-accessible_campaign_i: backlog
+  4-5-per-campaign-permission-checks-replace-accessible_campaign_i: done
   4-6-players-are-locked-out-of-gm-authoring-and-ai-routes-and-wri: backlog
   4-7-party-only-search-and-retrieval-using-party_tsv-and-party_em: done
   4-8-player-safe-chronicler-chat-with-sourceref-citations: done
