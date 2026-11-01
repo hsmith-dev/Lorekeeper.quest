@@ -431,6 +431,20 @@ async def test_gm_ai_helpers_run_for_a_co_gm(client, ev4, monkeypatch):
         assert r.status_code == 404 and r.json() == NOT_FOUND, url
 
 
+async def test_owned_get(db, ev4):
+    from app.access import owned_get
+    from app.db.models.chat import ChatSession
+
+    sid = ev4.a.ids["chat_sessions"][0]
+    assert (await owned_get(db, ChatSession, ev4.a.owner_id, sid)).id == sid
+    player = await ev4.actor("player")
+    for user, row in ((player.user_id, sid), (ev4.a.owner_id, RANDOM), (ev4.a.owner_id, "not-a-uuid")):
+        with pytest.raises(NotFound):
+            await owned_get(db, ChatSession, user, row)
+    with pytest.raises(TypeError):
+        await owned_get(db, JournalEntry, ev4.a.owner_id, sid)
+
+
 async def test_missing_campaign_is_the_one_404(client, ev4):
     owner = (await ev4.actor("gm_owner")).headers
     for method, url in (("GET", f"/api/campaigns/{RANDOM}/export"), ("PATCH", f"/api/campaigns/{RANDOM}"),

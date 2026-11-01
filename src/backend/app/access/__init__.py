@@ -32,7 +32,7 @@ from app.access.policy import (
 from app.access.registry import (
     DERIVED_REGISTRY, REGISTRY, SOURCE_KIND_MODELS, DerivedType, UnregisteredModel, always_gm, audience_of,
     derived, derived_from_sources, gm_fields, membership, parent, reached_through, register_derived,
-    register_source_kind, registration, scoped_get, scoped_select, stored, visible_clause,
+    owned_get, register_source_kind, registration, scoped_get, scoped_select, stored, visible_clause,
 )
 from app.access.projection import (
     CHAT_DETAIL, CHAT_META, CHAT_REPLY, LITE, PROJECTIONS, REDACTED_NOTICE, WITH_COUNT, Projection,
@@ -123,6 +123,7 @@ __all__ = [
     "mention_audience",
     "most_restrictive",
     "not_found",
+    "owned_get",
     "owner",
     "parent",
     "reached_through",

@@ -44,11 +44,6 @@ app/api/routes/journals.py::attach_tag select:Tag
 
 # Chronicler chat: E0-Access.8 (Player-safe chat) owns chat.py.
 app/api/routes/chat.py::_prepare_chat get:Campaign
-app/api/routes/chat.py::_prepare_chat select:ChatSession
-app/api/routes/chat.py::_prepare_chat select:ChatSession
-app/api/routes/chat.py::delete_session select:ChatSession
-app/api/routes/chat.py::get_session select:Campaign
-app/api/routes/chat.py::get_session select:ChatSession
 app/api/routes/chat.py::list_sessions select:Campaign
 app/api/routes/chat.py::list_sessions select:ChatSession
 

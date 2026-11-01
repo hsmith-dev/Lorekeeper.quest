@@ -14,7 +14,6 @@ and left out of the prompt history; an archived session is never replayed,
 never posted to, and to a Player is absent (list) or 404. Denied, hidden,
 another user's and missing sessions are the same 404.
 """
-import uuid
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -24,8 +23,8 @@ from sqlalchemy.orm.attributes import flag_modified
 
 from app.access import (
     PLAYER, PREVIEW_HEADER, CHAT_DETAIL, CHAT_META, CHAT_REPLY, GM, CampaignContext, NotFound, RoleMap, check_chat_session,
-    ctx_for_request, not_found, project_chat, replay_history, resolve_sources, role_map, session_visible_text,
-    visible_refs,
+    ctx_for_request, not_found, owned_get, project_chat, replay_history, resolve_sources, role_map, scoped_get,
+    session_visible_text, visible_refs,
 )
 from app.access.context import PREVIEW_MEMBER
 from app.api.deps import get_current_user, get_user_llm_config
@@ -73,21 +72,18 @@ async def chat_health() -> dict:
     return {"ai_online": online}
 
 
-async def _own_session(db: AsyncSession, user: User, session_id: str) -> tuple[ChatSession, str | None]:
-    """The user's own session `session_id` and its Campaign's name; the one
-    404 for a bad id, a missing session or another user's."""
-    try:
-        sid = uuid.UUID(str(session_id))
-    except ValueError:
-        not_found()
-    row = (await db.execute(
-        select(ChatSession, Campaign.name)
-        .outerjoin(Campaign, ChatSession.campaign_id == Campaign.id)
-        .where(ChatSession.id == sid, ChatSession.user_id == user.id)
-    )).one_or_none()
-    if row is None:
-        not_found()
-    return row[0], row[1]
+async def _own_session(db: AsyncSession, user: User, session_id: str) -> ChatSession:
+    """The user's own session `session_id`; the one 404 for a bad id, a
+    missing session or another user's (`access.owned_get`)."""
+    return await owned_get(db, ChatSession, user.id, session_id)
+
+
+async def _campaign_name(db: AsyncSession, scope: "ChatScope") -> str | None:
+    """The name of the Campaign `scope` reads in (None for a campaign-less
+    session, read with a role map)."""
+    if not isinstance(scope, CampaignContext):
+        return None
+    return (await scoped_get(db, Campaign, scope, scope.campaign_id)).name
 
 
 async def _session_scope(request: Request, db: AsyncSession, user: User, session: ChatSession) -> ChatScope:
@@ -186,9 +182,10 @@ async def get_session(
 ):
     """One of the user's sessions, its messages redacted by what they may
     see now. An archived session is readable by a GM ctx only."""
-    session, campaign_name = await _own_session(db, user, session_id)
+    session = await _own_session(db, user, session_id)
     scope = await _session_scope(request, db, user, session)
-    return await project_chat(db, session, scope, CHAT_DETAIL, extra={"campaign_name": campaign_name})
+    return await project_chat(db, session, scope, CHAT_DETAIL,
+                              extra={"campaign_name": await _campaign_name(db, scope)})
 
 
 @router.delete("/sessions/{session_id}", status_code=204)
@@ -198,7 +195,7 @@ async def delete_session(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> None:
-    session, _ = await _own_session(db, user, session_id)
+    session = await _own_session(db, user, session_id)
     scope = await _session_scope(request, db, user, session)  # a DELETE in preview is 404
     check_chat_session(session, scope)
     if session.archived_at is not None:
@@ -261,7 +258,7 @@ async def _prepare_chat(
     # messages ctx may still see.
     session: ChatSession | None = None
     if body.session_id:
-        session, _ = await _own_session(db, user, body.session_id)
+        session = await _own_session(db, user, body.session_id)
         if session.campaign_id != (ctx.campaign_id if ctx is not None else None) or session.archived_at is not None:
             not_found()
         check_chat_session(session, scope)
