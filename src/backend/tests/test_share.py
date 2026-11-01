@@ -6,6 +6,8 @@ import pytest_asyncio
 import sqlalchemy as sa
 
 from app.db.models.campaign import Campaign
+from app.db.models.campaign_member import CampaignMember
+from app.domain.enums import CampaignRole
 from app.db.models.journal import EMBEDDING_DIM, JournalEntry
 from app.db.models.npc import NpcEntry, NpcRole, NpcStatus
 from app.db.models.quest import Quest, QuestStatus
@@ -106,6 +108,41 @@ async def test_collaborate_token_cannot_read_content(client, db, promo_code):
         assert r.status_code == 404
 
 
+async def _register(client, promo_code) -> tuple[uuid.UUID, dict]:
+    r = await client.post("/api/auth/register", json={
+        "email": f"member_{uuid.uuid4().hex[:8]}@example.com", "password": "password123",
+        "display_name": "Member", "promo_code": promo_code,
+    })
+    assert r.status_code in (200, 201), r.text
+    return uuid.UUID(r.json()["user_id"]), {"Authorization": f"Bearer {r.json()['access_token']}"}
+
+
+@pytest.mark.asyncio
+async def test_join_stores_player_role_through_the_orm_enum(client, db, promo_code):
+    # F1-core: CAMPAIGN_ROLE_ENUM stores the StrEnum values (values_callable),
+    # and a redeemed collaborate link makes the new Member a Player (FR-7).
+    token, _ = await _owner_with_shared_campaign(client, db, promo_code, kind="collaborate")
+    member_id, headers = await _register(client, promo_code)
+    r = await client.post(f"/api/share/{token}/join", headers=headers)
+    assert r.status_code == 200, r.text
+    campaign_id = uuid.UUID(r.json()["campaign_id"])
+
+    stored = await db.scalar(sa.text(
+        "SELECT role::text FROM campaign_members WHERE campaign_id = :c AND user_id = :u"
+    ), {"c": campaign_id, "u": member_id})
+    assert stored == "player"
+    member = await db.scalar(sa.select(CampaignMember).where(
+        CampaignMember.campaign_id == campaign_id, CampaignMember.user_id == member_id))
+    assert member.role == CampaignRole.PLAYER
+
+    co_gm_id, _ = await _register(client, promo_code)
+    db.add(CampaignMember(campaign_id=campaign_id, user_id=co_gm_id, role=CampaignRole.CO_GM))
+    await db.commit()
+    assert await db.scalar(sa.text(
+        "SELECT role::text FROM campaign_members WHERE campaign_id = :c AND user_id = :u"
+    ), {"c": campaign_id, "u": co_gm_id}) == "co_gm"
+
+
 # --- Exact-field share responses (FR-9(a)) ----------------------------------
 # The tests above check that two named fields are absent. These pin the exact
 # key set of every read-only share response, so a column added to a model (or
@@ -169,7 +206,8 @@ async def fully_filled_share(client, db, promo_code):
         user_id=user_id, campaign_id=campaign_id,
         shorthand=CANARY, narrative="The party arrived at the Drowsy Dragon at dusk.",
         entry_hash=uuid.uuid4().hex, session_date=date(2026, 10, 31),
-        embedding=[0.1] * EMBEDDING_DIM, tags=[builtin_tag, custom_tag],
+        embedding=[0.1] * EMBEDDING_DIM, party_embedding=[0.2] * EMBEDDING_DIM,
+        tags=[builtin_tag, custom_tag],
     )
     npc = NpcEntry(
         user_id=user_id, campaign_id=campaign_id, name="Barnaby", role=NpcRole.npc,
@@ -183,7 +221,13 @@ async def fully_filled_share(client, db, promo_code):
     await db.flush()
     # The app maintains narrative_tsv with raw SQL (journal_service), not via the ORM.
     await db.execute(
-        sa.text("UPDATE journal_entries SET narrative_tsv = to_tsvector('english', narrative) WHERE id = :id"),
+        sa.text("UPDATE journal_entries SET narrative_tsv = to_tsvector('english', narrative), "
+                "party_tsv = to_tsvector('english', narrative) WHERE id = :id"),
+        {"id": entry.id},
+    )
+    # journal_tags.source_field (F1-core) is not settable through the secondary relationship.
+    await db.execute(
+        sa.text("UPDATE journal_tags SET source_field = 'manual' WHERE journal_id = :id"),
         {"id": entry.id},
     )
     await db.commit()

@@ -13,13 +13,17 @@ campaign_members.role (ADD COLUMN ... NOT NULL DEFAULT 'player'), not an
 UPDATE, so re-running the data steps can never demote a later Co-GM. Every
 UPDATE in DATA_STEPS has a WHERE that makes it a no-op on rows it already
 changed; tests/migrations/test_upgrade_snapshot.py re-applies them through
-apply_data_steps() and checks nothing moves.
+apply_data_steps() and checks nothing moves. That idempotency holds for an
+immediate re-run right after the upgrade only: the data steps are a one-time
+migration step, and re-running them after go-live would archive chats that
+Members started after the migration.
 
 downgrade() is for development only; production is forward-only (NFR-8). It
 restores the exact a3e7c1f9d258 schema, including the global
 journal_entries_entry_hash_key, so it fails if two Campaigns (or two users)
 have since stored the same entry_hash.
 """
+from enum import StrEnum
 from typing import Sequence, Union
 
 from alembic import op
@@ -27,7 +31,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 from pgvector.sqlalchemy import Vector
 
-from app.domain.enums import EntryKind, TagSourceField, check_sql
+from app.domain.enums import check_sql
 
 # revision identifiers, used by Alembic.
 revision: str = 'c95acb56c595'
@@ -42,6 +46,11 @@ CAMPAIGN_ROLE_LABELS = ('co_gm', 'player')
 
 visibility = postgresql.ENUM(*VISIBILITY_LABELS, name='visibility', create_type=False)
 campaign_role = postgresql.ENUM(*CAMPAIGN_ROLE_LABELS, name='campaign_role', create_type=False)
+
+# Frozen copies of the StrEnums, so a later member never changes this revision's CHECKs.
+_EntryKind = StrEnum("EntryKind", {"GM": "gm", "PLAYER": "player"})
+_TagSourceField = StrEnum(
+    "TagSourceField", {"SHORTHAND": "shorthand", "NARRATIVE": "narrative", "MANUAL": "manual"})
 
 # (table, server default) for every table that gains a `visibility` column.
 VISIBILITY_COLUMNS = (
@@ -106,11 +115,9 @@ def upgrade() -> None:
     op.add_column('journal_entries', sa.Column(
         'kind', sa.String(length=16), nullable=False, server_default='gm'))
     op.execute("ALTER TABLE journal_entries ADD CONSTRAINT ck_journal_entries_kind "
-               + check_sql(EntryKind, 'kind'))
+               + check_sql(_EntryKind, 'kind'))
     op.add_column('journal_entries', sa.Column('party_tsv', postgresql.TSVECTOR(), nullable=True))
     op.add_column('journal_entries', sa.Column('party_embedding', Vector(384), nullable=True))
-    op.create_index('ix_journal_party_fts', 'journal_entries', ['party_tsv'],
-                    unique=False, postgresql_using='gin')
 
     for table, default in VISIBILITY_COLUMNS:
         op.add_column(table, sa.Column(
@@ -136,7 +143,7 @@ def upgrade() -> None:
     # journal_tags.source_field: NULL for every existing tag.
     op.add_column('journal_tags', sa.Column('source_field', sa.String(length=16), nullable=True))
     op.execute("ALTER TABLE journal_tags ADD CONSTRAINT ck_journal_tags_source_field "
-               + check_sql(TagSourceField, 'source_field'))
+               + check_sql(_TagSourceField, 'source_field'))
 
     # character_sheets.pc_entity_id gets its FK in F3-world.
     op.add_column('character_sheets', sa.Column('pc_entity_id', sa.UUID(), nullable=True))
@@ -149,6 +156,10 @@ def upgrade() -> None:
     # The same statements as apply_data_steps(), through op so --sql works too.
     for step in DATA_STEPS:
         op.execute(step)
+
+    # After the party_tsv backfill, so the GIN index is built once.
+    op.create_index('ix_journal_party_fts', 'journal_entries', ['party_tsv'],
+                    unique=False, postgresql_using='gin')
 
 
 def downgrade() -> None:

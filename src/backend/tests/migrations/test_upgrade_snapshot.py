@@ -226,6 +226,24 @@ async def other_f1_core_columns_take_their_defaults(conn: AsyncConnection) -> No
 
 
 @post_upgrade_check(F1_CORE)
+async def visibility_server_defaults_follow_ad12(conn: AsyncConnection) -> None:
+    # Most of these tables have no seed rows, and the model diff test ignores
+    # server defaults, so read the defaults themselves.
+    defaults = dict((await conn.execute(sa.text(
+        "SELECT table_name, column_default FROM information_schema.columns "
+        "WHERE table_schema = current_schema() AND column_name = 'visibility'"
+    ))).all())
+    assert defaults == {
+        "journal_entries": "'party'::visibility",
+        "character_sheets": "'party'::visibility",
+        "tag_categories": "'party'::visibility",
+        "session_plans": "'gm'::visibility",
+        "source_documents": "'gm'::visibility",
+        "shorthand_terms": "'gm'::visibility",
+    }
+
+
+@post_upgrade_check(F1_CORE)
 async def entry_hash_unique_per_campaign_and_author(conn: AsyncConnection) -> None:
     uniques = dict((await conn.execute(sa.text(
         "SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint "
@@ -425,16 +443,34 @@ async def _reapply_f1_core_data_steps(conn: AsyncConnection) -> None:
 def test_c95acb56c595_data_steps_are_idempotent(upgraded_snapshot):
     # "upgrade head a second time": stamp back to the baseline, re-apply the
     # revision's data steps on the already-migrated rows, stamp head again.
+    # A Co-GM promoted after the upgrade (token 402, member 301) must survive
+    # the re-run: catches a dropped `role IS NULL` guard or a role UPDATE.
     cfg = alembic_config(TEST_DB_URL)
-    before = asyncio.run(_with_conn(TEST_DB_URL, _f1_core_values))
-    assert before["chat_sessions"], "seed changed: no chat_sessions to compare"
-    command.stamp(cfg, SNAPSHOT_REVISION, purge=True)
+    asyncio.run(_with_conn(TEST_DB_URL, lambda c: _set_promoted_roles(c, "co_gm")))
     try:
-        asyncio.run(_with_conn(TEST_DB_URL, _reapply_f1_core_data_steps))
+        before = asyncio.run(_with_conn(TEST_DB_URL, _f1_core_values))
+        assert before["chat_sessions"], "seed changed: no chat_sessions to compare"
+        command.stamp(cfg, SNAPSHOT_REVISION, purge=True)
+        try:
+            asyncio.run(_with_conn(TEST_DB_URL, _reapply_f1_core_data_steps))
+        finally:
+            command.stamp(cfg, "head", purge=True)
+        after = asyncio.run(_with_conn(TEST_DB_URL, _f1_core_values))
+        assert after == before
+        assert (SEED_ID("402"), "co_gm", None, "0") in after["campaign_share_tokens"]
+        assert (SEED_ID("301"), "co_gm", "0") in after["campaign_members"]
     finally:
-        command.stamp(cfg, "head", purge=True)
-    after = asyncio.run(_with_conn(TEST_DB_URL, _f1_core_values))
-    assert after == before
+        asyncio.run(_with_conn(TEST_DB_URL, lambda c: _set_promoted_roles(c, "player")))
+
+
+async def _set_promoted_roles(conn: AsyncConnection, role: str) -> None:
+    await conn.execute(sa.text(
+        "UPDATE campaign_share_tokens SET role = CAST(:r AS campaign_role) WHERE id = :id"
+    ), {"r": role, "id": SEED_ID("402")})
+    await conn.execute(sa.text(
+        "UPDATE campaign_members SET role = CAST(:r AS campaign_role) WHERE id = :id"
+    ), {"r": role, "id": SEED_ID("301")})
+    await conn.commit()
 
 
 async def _baseline_schema(conn: AsyncConnection) -> dict:
@@ -445,7 +481,8 @@ async def _baseline_schema(conn: AsyncConnection) -> dict:
     ))).scalars())
     return {
         "types": sorted((await conn.execute(sa.text(
-            "SELECT typname FROM pg_type WHERE typname IN ('visibility', 'campaign_role')"
+            "SELECT typname FROM pg_type WHERE typname IN ('visibility', 'campaign_role') "
+            "AND typnamespace = to_regnamespace(current_schema())"
         ))).scalars()),
         "columns": sorted(f1_columns & existing),
         "indexes": sorted((await conn.execute(sa.text(

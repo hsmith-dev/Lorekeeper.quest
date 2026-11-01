@@ -21,6 +21,7 @@ class CampaignMember(Base, TimestampMixin):
     role: Mapped[CampaignRole] = mapped_column(
         CAMPAIGN_ROLE_ENUM, nullable=False, default=CampaignRole.PLAYER,
         server_default=CampaignRole.PLAYER.value)
+    # Bumped on grant changes by E0-Access.10.
     access_epoch: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
 
     campaign: Mapped["Campaign"] = relationship()
