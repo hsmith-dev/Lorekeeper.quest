@@ -1,0 +1,83 @@
+name: Dependency licences
+
+# Lorekeeper is AGPL-3.0 *and* sold under a proprietary commercial licence, so
+# every dependency must be permissively licensed. This fails on copyleft,
+# non-commercial, ethical-use and unknown licences. Policy (allowlist, deny
+# patterns, owner-approved exceptions) lives in .github/license-policy.toml.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/backend/requirements*.txt"
+      - "src/frontend/package.json"
+      - "src/frontend/package-lock.json"
+      - ".github/license-policy.toml"
+      - "scripts/check-licenses.py"
+      - ".github/workflows/license-check.yml"
+  pull_request:
+    paths:
+      - "src/backend/requirements*.txt"
+      - "src/frontend/package.json"
+      - "src/frontend/package-lock.json"
+      - ".github/license-policy.toml"
+      - "scripts/check-licenses.py"
+      - ".github/workflows/license-check.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: src/backend/requirements.txt
+
+      # Only runtime requirements: requirements-dev.txt (pytest etc.) is never
+      # distributed. CPU-only torch wheels keep the install small; their
+      # licence metadata is identical to the CUDA build.
+      - name: Install runtime dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install --extra-index-url https://download.pytorch.org/whl/cpu \
+            -r src/backend/requirements.txt
+
+      # Reads installed package metadata directly (PEP 639 License-Expression,
+      # then classifiers). pip-licenses 5.0 ignores License-Expression and
+      # reports ~40 modern packages as UNKNOWN.
+      - name: Check against policy
+        run: python scripts/check-licenses.py --python-env
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: src/frontend/package-lock.json
+
+      # Includes devDependencies on purpose: build tooling (Vite, Tailwind,
+      # the PWA plugin) injects code/CSS into the shipped bundle.
+      - name: Install dependencies
+        working-directory: src/frontend
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Collect licences
+        working-directory: src/frontend
+        run: npx --yes license-checker-rseidelsohn@4.4.2 --json --excludePrivatePackages > "$GITHUB_WORKSPACE/npm-licenses.json"
+
+      - name: Check against policy
+        run: python scripts/check-licenses.py --npm npm-licenses.json

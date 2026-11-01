@@ -1,0 +1,109 @@
+# Dependency licence policy, enforced by scripts/check-licenses.py
+# (.github/workflows/license-check.yml).
+#
+# Lorekeeper is AGPL-3.0 AND sold under a proprietary commercial licence
+# (COMMERCIAL-LICENSE.md). The commercial side is what constrains us: anything
+# we ship must be usable in a closed-source product. So only permissive
+# licences are allowed; copyleft (GPL/AGPL/LGPL), non-commercial (CC-BY-NC),
+# ethical-use (Hippocratic) and unknown licences fail unless an exception
+# below records why that specific package is fine.
+#
+# Planned additions to check on arrival: Kokoro TTS, faster-whisper,
+# WeasyPrint, Sigma.js, Leaflet. They are checked automatically when they land
+# in requirements.txt / package-lock.json. Not covered, so review them by hand:
+# model weights (Kokoro, Whisper, spaCy models) and system libraries installed
+# in the Dockerfile (e.g. WeasyPrint needs Pango, which is LGPL).
+
+[allow]
+# SPDX ids (case-insensitive). Expressions are evaluated: "A OR B" passes if
+# either side is allowed, "A AND B" only if both are.
+licenses = [
+  "MIT", "MIT-0", "MIT-CMU",
+  "BSD-2-Clause", "BSD-3-Clause", "0BSD",
+  "Apache-2.0",
+  "ISC",
+  "PSF-2.0", "Python-2.0",
+  "Zlib",
+  "Unlicense", "CC0-1.0",
+  "BlueOak-1.0.0",
+  "HPND",
+  "BSL-1.0",  # Boost
+  "CNRI-Python",
+  # MPL-2.0 is file-level copyleft: fine to depend on unmodified. If we ever
+  # patch an MPL file, that file's changes must be published.
+  "MPL-2.0",
+]
+
+[aliases]
+# Free-text licence strings (trove classifiers, metadata) -> SPDX id.
+"MIT License" = "MIT"
+"The MIT License" = "MIT"
+"MIT license" = "MIT"
+"BSD License" = "BSD-3-Clause"
+"BSD" = "BSD-3-Clause"
+"3-Clause BSD License" = "BSD-3-Clause"
+"BSD 3-Clause" = "BSD-3-Clause"
+"New BSD License" = "BSD-3-Clause"
+"Modified BSD License" = "BSD-3-Clause"
+"BSD-3-Clause license" = "BSD-3-Clause"
+"Apache Software License" = "Apache-2.0"
+"Apache License 2.0" = "Apache-2.0"
+"Apache 2.0" = "Apache-2.0"
+"Apache 2.0 License" = "Apache-2.0"
+"Apache License" = "Apache-2.0"
+"Boost Software License 1.0 (BSL-1.0)" = "BSL-1.0"
+"Apache-2" = "Apache-2.0"
+"Apache License, Version 2.0" = "Apache-2.0"
+"Apache Software License 2.0" = "Apache-2.0"
+"ISC License (ISCL)" = "ISC"
+"ISC License" = "ISC"
+"Python Software Foundation License" = "PSF-2.0"
+"PSF" = "PSF-2.0"
+"Mozilla Public License 2.0 (MPL 2.0)" = "MPL-2.0"
+"The Unlicense (Unlicense)" = "Unlicense"
+"Historical Permission Notice and Disclaimer (HPND)" = "HPND"
+"zlib/libpng License" = "Zlib"
+
+[deny]
+# Purely for clearer error messages: anything not allowed already fails.
+patterns = [
+  "\\bA?GPL", "\\bLGPL", "General Public License",
+  "\\bNC\\b", "NonCommercial", "Non-Commercial",
+  "Hippocratic",
+  "\\bSSPL\\b", "Commons Clause", "BUSL", "Business Source",
+  "UNKNOWN", "UNLICENSED", "Custom",
+]
+
+[ignore]
+# Tools that may be present only to run this check (never shipped).
+python = ["pip-licenses", "prettytable", "wcwidth"]
+
+# Owner-approved exceptions. `license` pins the string reviewed: if a new
+# release changes it, the check fails again so it gets re-reviewed.
+# Fields: ecosystem ("python" | "npm"), package, license, reason.
+
+# --- LGPL, used unmodified via normal Python import (dynamic linking) -------
+# LGPL-3.0 lets a proprietary/commercial work *use* the library provided it is
+# not modified (or changes are published), its licence text and notice ship
+# with the product, and users can swap in their own build of the library
+# (true for a pip-installed package inside our Docker image). Do NOT vendor,
+# patch or statically bundle these. OWNER TO CONFIRM both before relying on
+# them in the commercial edition.
+
+[[exception]]
+ecosystem = "python"
+package = "fpdf2"
+license = "LGPL-3.0-only"
+reason = "Direct dep (app/services/export_service.py PDF export); LGPL-3.0, imported unmodified. OWNER TO CONFIRM. Permissive alternative if wanted: reportlab (BSD) or WeasyPrint (BSD, already planned)."
+
+[[exception]]
+ecosystem = "python"
+package = "python-bidi"
+license = "GNU Library or Lesser General Public License (LGPL)"
+reason = "Transitive via easyocr; LGPL-3.0, compiled extension imported unmodified. OWNER TO CONFIRM."
+
+[[exception]]
+ecosystem = "npm"
+package = "caniuse-lite"
+license = "CC-BY-4.0"
+reason = "Browser-support data used by browserslist/autoprefixer at build time only; CC-BY permits commercial use (attribution only). OWNER TO CONFIRM."
