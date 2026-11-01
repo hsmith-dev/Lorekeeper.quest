@@ -183,6 +183,8 @@ Status: done
 - Locally, the tests that need no database pass: 32 passed, 14 skipped (the real-Valkey ones).
 - GitHub CI on PR #65 (Postgres plus Valkey, with `VALKEY_TEST_URL` set) is the gate for the DB and real-Valkey tests, including the `CLIENT LIST` check.
 
+- CI result on PR #65 at d467cf1: all checks green. The backend suite was 1988 passed, 4 skipped on the run before last. The last run fixed one real-Valkey failure: a trail now waits out PTTL rounding before it takes the next window.
+
 **Needs desktop verification:**
 - **Buffering behind nginx.** Run `curl -N -H "Authorization: Bearer <t>" https://<host>/api/<stream route>`. You should see `event: ping` within 15 s, and each event as soon as it is published. Check that the response carries `X-Accel-Buffering: no`. The location for each stream route needs `proxy_buffering off` and `proxy_read_timeout 1h`. Do this when E0-Jobs.7 or E0-Access.11 adds the first real stream route.
 - **Long-lived connections.** Hold a stream open through nginx for at least 30 minutes. Pings should keep arriving, with no nginx 504 and no cut after 60 s idle.
