@@ -433,6 +433,7 @@ def test_real_register_is_valid():
     ("(MIT OR GPL-3.0) AND GPL-3.0", False),   # used to split on OR first and pass
     ("(MIT OR GPL-3.0) AND (BSD-3-Clause)", True),
     ("(MIT) AND (GPL-3.0)", False),
+    ("(MIT OR GPL-3.0) AND (GPL-3.0)", False),
     ("MIT OR (GPL-3.0 AND LGPL-2.1)", True),
     ("MIT/X11", True),
 ])
@@ -586,6 +587,47 @@ def test_unregistered_dynamic_system_lib_resolves_to_the_allowlist(tmp_path, edi
     assert len(failures) == 1
     failures, _, _, _ = scan(reg, [("libglib2.0-0t64", "2.84", "LGPL-2.1+")], edition, eco="python")
     assert len(failures) == 1
+    failures, _, _, _ = scan(reg, [("libglib2.0-0t64", "2.84", "MIT")], edition, eco="apt")
+    assert failures == []
+
+
+def _policy_with(tmp_path, extra: str) -> "cl.Policy":
+    path = tmp_path / "policy.toml"
+    path.write_text(cl.DEFAULT_POLICY.read_text() + "\n" + extra)
+    return cl.Policy(path)
+
+
+def test_exception_matches_reviewed_licence_of_pinned_entry(tmp_path):
+    pol = _policy_with(tmp_path, '[[exception]]\necosystem = "python"\npackage = "libx"\n'
+                                 'license = "LGPL-3.0-or-later"\nreason = "ok"\n')
+    reg = make_register(tmp_path, [entry("libx", license="LGPL-3.0-or-later", scanned_license="GNU LGPL")])
+    failures, excepted, *_ = cl.check_register_scan(pol, reg, "python", [("libx", "1.0", "GNU LGPL")],
+                                                    "commercial", "backend")
+    assert failures == [] and [e[0] for e in excepted] == ["libx"]
+
+
+def test_pending_without_images_applies_everywhere_but_only_to_its_ecosystem(tmp_path):
+    pol = _policy_with(tmp_path, '[[pending]]\necosystem = "python"\npackage = "gap-*"\n'
+                                 'tracking = "T-1"\nreason = "r"\n')
+    reg = make_register(tmp_path, [])
+    for art in ("backend", "nginx", None):
+        f, _, _, _, _, pend = cl.check_register_scan(pol, reg, "python", [("gap-a", "1", "MIT")], "agpl", art)
+        assert f == [] and len(pend) == 1
+    f, _, _, _, _, pend = cl.check_register_scan(pol, reg, "apt", [("gap-a", "1", "MIT")], "agpl", "backend")
+    assert pend == [] and len(f) == 1
+
+
+def test_cli_pending_warns_and_exits_zero(tmp_path):
+    py = tmp_path / "py.json"
+    py.write_text(json.dumps([{"Name": "nvidia-cublas-cu12", "Version": "12.4",
+                               "License": "LicenseRef-NVIDIA-Proprietary"}]))
+    reg = make_register(tmp_path, [])
+    r = run_cli("--python", str(py), "--register", str(reg.path), "--artifact", "ml-gpu",
+                env={"GITHUB_ACTIONS": "true"})
+    assert r.returncode == 0, r.stdout
+    assert "PENDING   nvidia-cublas-cu12==12.4" in r.stdout and "::warning" in r.stdout
+    r = run_cli("--python", str(py), "--register", str(reg.path), "--artifact", "backend")
+    assert r.returncode == 1
 
 
 def test_absolute_doc_symlink_never_reads_the_host(tmp_path):

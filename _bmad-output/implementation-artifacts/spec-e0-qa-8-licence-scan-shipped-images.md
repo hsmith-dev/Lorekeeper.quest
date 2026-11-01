@@ -2,15 +2,57 @@
 title: 'E0-QA.8 The licence check scans the Docker images we actually ship'
 type: 'feature'
 created: '2026-11-01'
-status: 'in-review'
+status: 'done'
 baseline_revision: 'a099a75fe69cea03dd65f0175a153d96f1a4d0f2'
 review_loop_iteration: 0
-followup_review_recommended: false
+followup_review_recommended: true
 context:
   - '{project-root}/_bmad-output/implementation-artifacts/epic-2-context.md'
   - '{project-root}/_bmad-output/implementation-artifacts/spec-e0-qa-7-licence-register-strict-mode.md'
 warnings: ['oversized']
-deferred: []
+deferred:
+  - summary: >-
+      An aggregate-listed OS package whose DEP-5 union holds a GPL term plus an unrecognised term (noderivs, POWERDOG) is classified gpl and passes; the unrecognised term is never judged.
+    evidence: |-
+      classify() returns gpl once any GPL pattern matches; bad_patterns still catch NC/proprietary/UNKNOWN/Custom/NVIDIA anywhere. Per-atom judgement would need aliases for ~100 Debian short names. The register row is the human review.
+    location: >-
+      scripts/check-licenses.py classify / os_rule_ok
+    severity: medium
+  - summary: >-
+      The new permissive ids and public-domain aliases (X11, TCL, GD, Beerware, LicenseRef-Public-Domain) are global, so a pip/npm package saying "Public Domain" now passes.
+    evidence: |-
+      [allow] and [aliases] have no per-kind scope; every pip/npm package still needs a register entry, which is where it would be reviewed.
+    location: >-
+      .github/license-policy.toml [allow]/[aliases]
+    severity: low
+  - summary: >-
+      The register records binary package names and versions, not dpkg `Source:`, so GPL source retrieval for binNMUs or renamed binaries needs a lookup.
+    evidence: |-
+      load_dpkg ignores Source; only matters once built images are distributed (LICENSING.md owner action).
+    location: >-
+      scripts/check-licenses.py load_dpkg
+    severity: low
+  - summary: >-
+      os_aggregate_allowlist is one list for apt and apk, so a Debian-named pattern (^bash$, ^make$) would also admit a GPL apk package of that name.
+    evidence: |-
+      Patterns are only grouped by comment; keying by kind is a schema change.
+    location: >-
+      .github/license-policy.toml os_aggregate_allowlist
+    severity: low
+  - summary: >-
+      The bare --os-packages default (ROOT=/) has no unit test; only the image-licenses (backend) CI leg exercises it.
+    evidence: |-
+      Verification-gap mutation const=None passed the unit suite. A unit test needs a host with a dpkg/apk database.
+    location: >-
+      scripts/check-licenses.py main (argparse)
+    severity: low
+  - summary: >-
+      arm64 images are never scanned (CI builds linux/amd64 only), and their package set differs (spaCy source build).
+    evidence: |-
+      docker/build-push-action platforms: linux/amd64. Needs desktop verification.
+    location: >-
+      .github/workflows/license-check.yml image-licenses
+    severity: medium
 ---
 
 <intent-contract>
@@ -81,6 +123,50 @@ deferred: []
 
 ## Review Triage Log
 
+### 2026-11-01 — Review pass
+- verdicts: 41 findings — high 0, medium 9, low 21, false 6, maybe-false 0 (5 duplicate rows of the trigger finding are folded into its group)
+- findings:
+  - (intent) `[medium]` `patch` The `on:` block had no Dockerfile/nginx paths and no schedule, although the spec and LICENSING.md said so (an earlier scripted edit had not applied). Added `src/backend/Dockerfile*` and `nginx/**` to both path lists and a weekly cron. Blind, edge-case and verification-gap all reported the same issue (same group).
+  - (intent) `[low]` `reject` AC1/AC3 are exercised only by unit tests, not a real image. PR #20 removed the CUDA wheels from every shipped image, and the Dockerfile guard fails the build first. Real-image proof is the desktop run against the old CUDA image (Needs desktop verification).
+  - (intent) `[low]` `reject` The aggregate rule adds a third pass route beyond the AC's two. It is required by E0-QA.7's deferral and the orchestrator note on glibc/busybox/bash; documented in LICENSING.md.
+  - (intent) `[false]` `reject` "No evidence that the scan ran". CI runs 41279105798 and 41279803809 produced the rows, and run b2dabf3 is green on both images.
+  - (intent) `[low]` `reject` Unrequested checker changes (precedence fix, pin classification, exception set). Each is needed by the DEP-5 strings: parenthesised OR groups, Custom-* pins. Each is now tested.
+  - (blind) `[low]` `patch` pyyaml is only a transitive dependency in the backend image. Documented in LICENSING.md with the fallback.
+  - (blind+edge) `[medium]` `patch` `_under` followed an absolute symlink onto the host when scanning an exported rootfs. It now checks `is_symlink()` first; `test_absolute_doc_symlink_never_reads_the_host` added.
+  - (blind) `[medium]` `patch` libreadline/libgdbm (GPL-3) can load into the Python process. LICENSING.md caveat added and register notes record that Lorekeeper imports neither.
+  - (blind) `[medium]` `patch` The GPLv2 §3(c) archive pointer is not enough for commercial distribution. LICENSING.md now requires shipped source or a written offer before any published image (owner action).
+  - (blind) `[low]` `defer` Binary vs source package names (frontmatter).
+  - (blind) `[low]` `defer` Global allow ids and aliases (frontmatter).
+  - (blind+edge) `[low]` `patch` Pending typos and bad images went unvalidated. Policy now validates ecosystem ∈ KINDS and requires `images` to be a non-empty list of strings; tests added. A stale-entry warning was rejected (low, adds machinery).
+  - (blind) `[low]` `reject` The OS stub writes the raw string into `license`. Intended: the register normalises the same way, and pins are a review step described in the register header.
+  - (blind) `[medium]` `defer` arm64 is never scanned (frontmatter; Needs desktop verification). The local reproduce command now passes `--platform linux/amd64`.
+  - (blind+vgap) `[low]` `patch` The test comment promised a pip assertion. Pip and MIT rows were added.
+  - (blind) `[low]` `patch` The CUDA test did not check licence strings. It now asserts the real strings and the "proprietary" reason.
+  - (blind+edge) `[low]` `patch` Export errors went to /dev/null. tar errors now show plus a `::warning`, and an empty package DB is now an error.
+  - (blind) `[low]` `patch` The dependency direction was reversed in the policy comment. Fixed.
+  - (blind) `[low]` `defer` One aggregate list for both distros (frontmatter).
+  - (edge) `[medium]` `defer` A GPL plus unknown-term union passes via aggregate (frontmatter).
+  - (edge) `[low]` `reject` A BOM before `Format:`, or inline text in free-text copyright files: not present in either image's 220 files (scan output reviewed); a guard adds branches.
+  - (edge) `[medium]` `patch` `images = []` meant all images. Now rejected at policy load.
+  - (edge) `[low]` `patch` An unknown pending ecosystem was silent. Now rejected.
+  - (edge) `[low]` `patch` half-installed or unpacked dpkg states were skipped. Now only not-installed and config-files are skipped.
+  - (edge) `[low]` `patch` An empty package DB passed. Now an error; test added.
+  - (edge) `[low]` `patch` `--os-packages` without `--register` gave confusing plain-mode failures. Now an argparse error; test added.
+  - (edge) `[low]` `reject` An OS entry's `images` is not enforced per artifact. apt and apk kinds already separate the two distros, and no second Debian image exists yet.
+  - (edge) `[low]` `reject` (claim) A new image needing pyyaml or code changes: documented. python:false images need no code; the host-symlink case is fixed.
+  - (edge) `[false]` `reject` (claim) "Debian no-Python image hits host-symlink resolution": fixed in this pass (see above), so false now.
+  - (vgap) `[medium]` `patch` The precedence regression was untested. Added `(MIT OR GPL-3.0) AND (GPL-3.0)` → False.
+  - (vgap) `[medium]` `patch` PENDING / `::warning` output was unverified. Added `test_cli_pending_warns_and_exits_zero`.
+  - (vgap) `[low]` `patch` Pending with no images, and pending ecosystem scoping, were untested. Test added.
+  - (vgap) `[low]` `defer` The bare `--os-packages` default (frontmatter; covered by the CI leg).
+  - (vgap) `[medium]` `patch` An exception matching the reviewed licence of a pinned entry was untested. Test added.
+  - (vgap) `[low]` `patch` The permissive system-lib branch was untested. MIT row added.
+  - (blind) `[false]` `reject` "paths miss docker-compose.prod.yml": compose changes don't alter image contents; the Dockerfiles and nginx/** are now in.
+  - (blind) `[false]` `reject` "nginx has no local recipe": the workflow step is the recipe, and LICENSING.md describes the export path.
+  - (intent) `[false]` `reject` "No Needs-desktop-verification section": it lives in the Auto Run Result below, not in the diff of code.
+  - (intent) `[false]` `reject` "dev Dockerfile not built": out of scope by the story (Dockerfile.prod is the shipped image). Listed for the desktop.
+  - (blind) `[false]` `reject` The register header still says license is SPDX: it was updated in this diff to explain pins.
+
 ## Design Notes
 
 PR #20 changed the premise of AC 1 and AC 3: the shipped backend image no longer carries CUDA wheels. So the `[[pending]]` mechanism is implemented and the CUDA wheels are listed under it with the required `tracking`, but scoped to the future `ml-gpu` image. In `backend` they remain hard failures, rather than being silenced. The OS-base-layer rule follows E0-QA.7's deferral. It uses a reviewed name allowlist in the policy, like `system_lib_allowlist`, instead of trusting every distro package, so a GPL library brought in by a new `apt-get install` still needs review.
@@ -91,3 +177,60 @@ PR #20 changed the premise of AC 1 and AC 3: the shipped backend image no longer
 - `uv run --python 3.11 --with pytest --with pyyaml python -m pytest -q scripts/test_check_licenses.py` -- all pass
 - `actionlint .github/workflows/license-check.yml` -- clean
 - GitHub CI on the draft PR (`license-check.yml`, all jobs, including `image-licenses (backend)` and `(nginx)`) -- green
+
+## Auto Run Result
+
+Status: done
+
+**Summary:** A new `image-licenses` job in `license-check.yml` builds the two images we ship and runs the licence checker inside them in both editions. It uses buildx on the GitHub `type=gha` cache. `backend` is built from `Dockerfile.prod` and scanned in-image for its pip set and Debian packages. `nginx` is exported, and its Alpine packages are scanned from the runner. Each image is one matrix line; a `tts` line would use `editions: "agpl"`.
+
+The checker gains:
+- `--os-packages [ROOT]`: dpkg plus DEP-5 copyright files as kind `apt`, the apk database as kind `apk`.
+- An OS-base-layer (mere-aggregation) allowlist rule.
+- `[[pending]]` known gaps.
+- An SPDX precedence fix that splits on operators only outside parentheses.
+- `scanned_license` pins now classify the register's reviewed licence.
+
+The register gains 151 Debian rows and 69 Alpine rows, generated from the CI scan and reviewed. Seven needed pins: libpq5/-dev, libcrypt1/-dev, libbsd0, libmd0 and libpcre2-8-0. The CUDA wheels are listed under `[[pending]]` with `tracking: "E0-Platform AD-1 / ml CPU image"`, scoped to the future `ml-gpu` image, so in `backend` they still fail. `docs/LICENSING.md` (new) covers the scan, the aggregate rule and its source and licence-text obligations, the CUDA gap, the interim CPU-index rule and the OD-2 owner decision.
+
+**PR #20 verdict:** `Dockerfile.prod` built on ubuntu-latest (linux/amd64) with no changes. torch 2.15.0+cpu and torchvision 0.29.2+cpu resolved from the CPU index, and the build guard step passed in 1.6 s. The in-image pip scan found 129 packages and 0 violations in both editions. No Dockerfile fix was needed.
+
+**Files:**
+- `scripts/check-licenses.py`: OS scan, aggregate and pending rules, precedence fix.
+- `scripts/test_check_licenses.py`: 97 tests, 41 of them new.
+- `.github/license-policy.toml`: aggregate allowlist, pending entries, OS-licence allow ids and aliases.
+- `.github/workflows/license-check.yml`: the `image-licenses` job, Dockerfile and nginx path triggers, weekly cron.
+- `licenses/register.yaml`: apt and apk sections, header.
+- `docs/LICENSING.md`: new.
+- This spec.
+
+**Implementation note:** the implementation was done by the orchestrating agent, not a separate step-03 subagent. The register rows could only come from CI scan output, which needed push/observe iterations. The four review layers ran as independent subagents.
+
+**Review:** 41 findings. 22 patched (7 medium, 15 low), 6 deferred (see frontmatter), 13 rejected (6 false, 7 low), each with a reason in the triage log. **followup_review_recommended: true**: seven medium patches landed, and the specific unverified risk is the `_under` symlink rebasing on a real exported Debian rootfs. Only `nginx` (Alpine, no doc symlinks) goes through that path in CI today.
+
+**Verification:**
+- Unit tests: 97/97 pass.
+- actionlint: clean.
+- CI on b2dabf3: all 9 checks green, including both `image-licenses` legs. The cached backend rebuild takes about 3.5 min; the cold build took about 25 min.
+- A simulated scan of all 151 Debian and 69 Alpine rows against the register gives 0 failures in both editions.
+
+### Needs desktop verification
+- **arm64 build and scan:**
+  ```bash
+  docker buildx build --platform linux/arm64 -f src/backend/Dockerfile.prod -t lk-backend-arm src/backend --load
+  ```
+  Then run the LICENSING.md scan command with `lk-backend-arm`. Expect a few new apt rows (`*-aarch64-linux-gnu` toolchain packages, which match the aggregate patterns) and no triton; add any `--emit-missing` stubs to the register.
+- **The CUDA regression is caught in an image:**
+  ```bash
+  docker run --rm --entrypoint python -v $PWD/scripts:/chk:ro -v $PWD/licenses:/lic:ro -v $PWD/.github:/pol:ro lorekeeper-backend-test /chk/check-licenses.py --policy /pol/license-policy.toml --register /lic/register.yaml --python-env --artifact backend
+  ```
+  Expect exit 1, with each nvidia-*/cuda-* wheel reported with its real licence string. With `--artifact ml-gpu` they should print as PENDING instead.
+- **Running the image:** `docker compose -f docker-compose.prod.yml up -d --build`. Check that `/api/health` responds, that spaCy loads `en_core_web_trf`, and that the licence texts are present (`docker run --rm <backend> ls /usr/share/doc | wc -l`).
+- **Dev image:** `docker build -f src/backend/Dockerfile src/backend` (not shipped, so not in CI).
+
+**Residual risks:**
+- The images float on their base tags, so a base rebuild can add an unregistered package. The weekly run catches it, but it will turn main red until the stub is registered.
+- The DEP-5 union is conservative, and unknown non-GPL atoms inside an aggregate package are not judged (deferred).
+- Commercial distribution of built images needs the GPL source offer first (LICENSING.md, owner action).
+- The redis exception is unchanged and still waits on the owner's Redis-vs-Valkey decision.
+- Sprint-status sync was skipped; the orchestrator owns it.
