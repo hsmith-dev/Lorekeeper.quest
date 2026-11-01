@@ -1,5 +1,6 @@
 import secrets
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from sqlalchemy import select, func, cast, Date
@@ -149,7 +150,8 @@ async def export_campaign(
             headers={"Content-Disposition": f'attachment; filename="{safe_name}.md"'},
         )
 
-    content = build_campaign_pdf(campaign, entries)
+    # WeasyPrint layout is CPU-bound: keep it off the event loop.
+    content = await run_in_threadpool(build_campaign_pdf, campaign, entries)
     return Response(
         content=content,
         media_type="application/pdf",

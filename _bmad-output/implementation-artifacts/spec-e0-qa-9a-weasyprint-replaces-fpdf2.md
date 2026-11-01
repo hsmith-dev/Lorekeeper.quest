@@ -2,7 +2,7 @@
 title: 'E0-QA.9 (PDF half): WeasyPrint replaces fpdf2 in the campaign PDF export'
 type: 'refactor'
 created: '2026-11-01'
-status: 'in-review'
+status: 'done'
 baseline_revision: '61abdbaea6e82be7c59c94e35d739c6d27c10d0d'
 review_loop_iteration: 0
 followup_review_recommended: false
@@ -10,7 +10,35 @@ context:
   - '{project-root}/docs/LICENSING.md'
   - '{project-root}/.github/license-policy.toml'
 warnings: []
-deferred: []
+deferred:
+  - summary: >-
+      CJK, emoji, Thai and Devanagari text has no glyphs. DejaVu covers Latin, Greek, Cyrillic, Hebrew and Arabic only.
+    evidence: |-
+      Only fonts-dejavu-core/extra are installed. E8.2 owns bundled fonts (Noto fallback chain).
+    location: >-
+      src/backend/app/templates/export/campaign.css
+    severity: medium
+  - summary: >-
+      Pyphen's bundled hyphenation dictionaries carry per-file licences. Nobody has reviewed them for the commercial edition.
+    evidence: |-
+      Hyphenation is not enabled, but the files ship in the image. Settle it by listing the hyph_*.dic licences in the installed pyphen package.
+    location: >-
+      licenses/register.yaml (Pyphen row)
+    severity: medium (unverified)
+  - summary: >-
+      src/ml/scripts/export_training_report.py has no test, and no ML environment file declares weasyprint/jinja2 (fpdf2 was never declared either).
+    evidence: |-
+      grep for export_training_report finds only the script. src/ml/environments/*.yml list neither dependency.
+    location: >-
+      src/ml/scripts/export_training_report.py
+    severity: low
+  - summary: >-
+      The export endpoint has no size bound. A very large campaign renders without limit (this predates the change).
+    evidence: |-
+      fpdf2 had the same unbounded loop. The render now runs in the thread pool, so the event loop is not blocked.
+    location: >-
+      src/backend/app/api/routes/campaigns.py export_campaign
+    severity: low
 ---
 
 <intent-contract>
@@ -81,6 +109,35 @@ deferred: []
 - Given CI, when `backend-tests.yml` runs, then the PDF tests run (they are not skipped) and pass.
 - Given the backend image built from `Dockerfile.prod`, when `scripts/check-licenses.py --register licenses/register.yaml --python-env --os-packages --artifact backend` runs in both editions, then it reports 0 violations.
 
+## Review Triage Log
+
+### 2026-11-01 — Review pass
+- verdicts: 39 findings. high 0, medium 4, low 9, false 9, maybe-false 1. The other 16 are spec-drift and descriptive notes, all rejected because the fix would only edit this spec.
+- findings:
+  - `[medium]` `[patch]` The synchronous WeasyPrint render blocks the event loop. Fixed: the route awaits `run_in_threadpool(build_campaign_pdf, ...)`.
+  - `[medium]` `[patch]` No test checks that both Dockerfiles and both workflows install the WeasyPrint apt set. Fixed: added `tests/test_weasyprint_apt_sync.py`.
+  - `[low]` `[patch]` The description and narrative were not justified, because `pre-wrap` disables justification in WeasyPrint. Fixed: changed to `white-space: pre-line`, checked by re-rendering page 1.
+  - `[low]` `[patch]` Newlines in the shorthand collapsed. Fixed: `.notes` gets `white-space: pre-line`.
+  - `[low]` `[patch]` Long unbroken tokens in the title, date or notes could overflow the page. Fixed: `overflow-wrap: anywhere` on `html`.
+  - `[medium]` `[defer]` No CJK, emoji or Thai glyphs. Bundled fonts belong to E8.2.
+  - `[maybe-false]` `[defer]` Pyphen dictionary licences are unreviewed. Settle it by listing the per-file licences.
+  - `[low]` `[defer]` The ML report script is untested and its dependencies are undeclared (verification gap, blind hunter). This predates the change.
+  - `[low]` `[defer]` No export size bound. This predates the change.
+  - `[false]` `[reject]` The defusedxml row was removed although something may still install it. The built-image scan reports 0 unregistered packages.
+  - `[false]` `[reject]` No fc-cache step. The fontconfig postinst builds the cache during the apt install.
+  - `[false]` `[reject]` Unpinned WeasyPrint dependencies make the scan fail. Version differences are informational in check-licenses.py.
+  - `[false]` `[reject]` The default url_fetcher allows SSRF. All user text is autoescaped and the template has no user URLs, so no fetch is reachable.
+  - `[false]` `[reject]` The font test misses XObject fonts. pdffonts on the real export lists only the 3 embedded DejaVu faces.
+  - `[false]` `[reject]` The register rows for Pango/FriBidi break the scan. The scan passes with 0 violations in both editions, and the rows match the scan strings.
+  - `[low]` `[reject]` Register rows are inconsistent about `scanned_license`. Cosmetic: the scan matches either way.
+  - `[low]` `[reject]` MPL-1.1 is allowed policy-wide. MPL-1.1 is a permissive weak-copyleft licence, the same class as the allowed MPL-2.0.
+  - `[low]` `[reject]` No RFC 5987 `filename*`. This is an enhancement; the ASCII filename works.
+  - `[low]` `[reject]` No dev-setup docs for Pango. Backend dev runs in Docker, and the Dockerfile has the packages.
+  - `[low]` `[reject]` RTL `dir=auto` is missing. Pango applies bidi per run. Adding it would mean a markup change with no reported user.
+  - `[low]` `[reject]` The ML report adds running headers. That is not the campaign export, so E8.2's scope is untouched.
+  - `[false]` `[reject]` The intent auditor said the image size and scan output are unrecorded. They are recorded under Auto Run Result.
+  - The remaining rows (spec says route unchanged, 5 vs 6 packages, gates.yml and ML script missing from the Code Map, intent-reading descriptions) are rejected: their fix is to edit this spec. They are recorded below.
+
 ## Design Notes
 
 The narrative is free text with newlines. Render it inside one block with `white-space: pre-wrap` so it matches fpdf2's `multi_cell` line breaks, rather than splitting it into `<p>` elements. pypdf's `extract_text()` may insert line breaks inside long lines, so tests check short strings (single words or names), and the long narrative check uses a whitespace-normalised comparison.
@@ -95,3 +152,32 @@ The narrative is free text with newlines. Render it inside one block with `white
 
 **Manual checks (if no CLI):**
 - Page-1 PNGs (pdftoppm) of the fpdf2 (main) and WeasyPrint exports of the seeded demo campaign show the same sections.
+
+## Auto Run Result
+
+Status: done
+
+- **Summary:** fpdf2 is replaced by WeasyPrint 70.0 + Jinja2 (`app/templates/export/campaign.html.j2`, `campaign.css`) for `GET /api/campaigns/{id}/export?format=pdf`. DejaVu fonts are embedded, and text prints as stored (no Latin-1 `?`).
+- **Deviations from the plan, all recorded:**
+  - a sixth apt package, `fonts-dejavu-extra`, for the oblique face;
+  - the route's `safe_name` is now ASCII-only, because a non-Latin name gave a 500 (Latin-1 header) and the route now renders in the thread pool;
+  - `gates.yml` gets the apt step, since app import loads Pango;
+  - `src/ml/scripts/export_training_report.py` is ported off fpdf2;
+  - `scripts/test_check_licenses.py` now asserts the policy has no fpdf2 exception;
+  - the defusedxml row is dropped, since only fpdf2 used it.
+- **Files:**
+  - `export_service.py`, the templates, `campaigns.py`, `requirements.txt`
+  - both Dockerfiles, `backend-tests.yml`, `gates.yml`
+  - `license-policy.toml`, `register.yaml`, `LICENSING.md`
+  - `test_export_pdf.py`, `test_weasyprint_apt_sync.py`, `test_check_licenses.py`
+  - the ML script
+- **Review:** 5 patches applied (2 medium, 3 low), 4 deferred, the rest rejected (see the triage log).
+- **Follow-up review recommended:** false. No high was patched, and the 2 medium patches are each covered: one by a test, the other is a one-line thread-pool call that the full suite exercises.
+- **Verification (desktop, 2026-11-01):**
+  - `Dockerfile.prod` builds.
+  - The in-image licence scan reports 0 violations in agpl and commercial.
+  - The full backend suite passes in the built image: 757 passed, 21 skipped.
+  - The seeded demo export has 13 pages, the same as fpdf2.
+  - Page-1 PNGs show the same sections.
+  - The image grows from 6,984,843,380 to 7,039,229,485 bytes (+54.4 MB, +0.8%).
+- **Residual risks:** CI's apt step installs Ubuntu builds of the libraries, not the Debian builds that ship. CJK and emoji glyphs are deferred to E8.2.

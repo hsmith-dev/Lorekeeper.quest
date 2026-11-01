@@ -15,6 +15,8 @@ html {
   font-family: "DejaVu Sans", sans-serif;
   font-size: 11pt;
   color: #000;
+  /* Long unbroken tokens (URLs, names) wrap instead of running off the page. */
+  overflow-wrap: anywhere;
 }
 
 body,
@@ -48,16 +50,17 @@ p {
 }
 
 .notes {
+  white-space: pre-line;
   font-size: 10pt;
   color: #6e6e6e;
   margin-bottom: 2mm;
 }
 
-/* Free text keeps its stored newlines and is justified, as the old export was. */
+/* Free text keeps its stored newlines and is justified, as the old export was.
+   pre-line, not pre-wrap: WeasyPrint does not justify preserved spaces. */
 .text {
-  white-space: pre-wrap;
+  white-space: pre-line;
   text-align: justify;
-  overflow-wrap: break-word;
   line-height: 1.5;
 }
 
