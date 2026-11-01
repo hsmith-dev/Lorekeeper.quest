@@ -30,6 +30,18 @@ Register mode (licenses/register.yaml, the inventory of everything shipped):
   that ship only in the AGPL-only `tts` image. --emit-missing prints YAML stubs
   for unregistered packages. Register mode needs pyyaml (requirements-dev.txt).
 
+Image scans (E0-QA.8, the `image-licenses` job; the checker is mounted into
+the image, never installed in it):
+  docker run --rm --entrypoint python -v $PWD/scripts:/chk:ro -v $PWD/licenses:/lic:ro \
+      -v $PWD/.github:/pol:ro <image> /chk/check-licenses.py --policy /pol/license-policy.toml \
+      --register /lic/register.yaml --python-env --os-packages --artifact backend
+  --os-packages [ROOT] scans the OS packages of the filesystem at ROOT (default
+  /): Debian dpkg (licence from /usr/share/doc/<pkg>/copyright) as kind `apt`,
+  Alpine apk as kind `apk`. GPL-family OS packages pass only on the policy's
+  os_aggregate_allowlist (unmodified OS tools, mere aggregation); LGPL system
+  libraries on system_lib_allowlist need no entry. [[pending]] policy entries
+  turn a matching unregistered package into a warning (a known, tracked gap).
+
 Needs Python 3.11+ (tomllib).
 """
 from __future__ import annotations
@@ -42,18 +54,56 @@ import re
 import subprocess
 import sys
 import tomllib
+from fnmatch import fnmatchcase
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_POLICY = REPO_ROOT / ".github" / "license-policy.toml"
 EDITIONS = ("agpl", "commercial")
-KINDS = ("python", "npm", "image", "apt", "model", "voice", "font")
+KINDS = ("python", "npm", "image", "apt", "apk", "model", "voice", "font")
+OS_KINDS = ("apt", "apk")  # OS packages: Debian (dpkg) and Alpine (apk) images
 ARTIFACT_KINDS = ("model", "voice", "font")
 REQUIRED_FIELDS = ("name", "kind", "version", "license", "source_url", "editions", "notes")
 
 
 def norm_pkg(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def strip_outer_parens(term: str) -> str:
+    """Drop parentheses that enclose the whole expression ("(A) AND (B)" keeps its own)."""
+    term = term.strip()
+    while term.startswith("(") and term.endswith(")"):
+        depth = 0
+        for i, ch in enumerate(term):
+            depth += ch == "("
+            depth -= ch == ")"
+            if depth == 0 and i < len(term) - 1:
+                return term  # the first "(" closes before the end
+        term = term[1:-1].strip()
+    return term
+
+
+def split_top(expr: str, pattern: str) -> list[str]:
+    """re.split on `pattern`, but only where the match is outside parentheses."""
+    parts, start, depth = [], 0, 0
+    rx = re.compile(pattern)
+    i = 0
+    while i < len(expr):
+        ch = expr[i]
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        elif depth == 0:
+            m = rx.match(expr, i)
+            if m and m.end() > i:
+                parts.append(expr[start:i])
+                start = i = m.end()
+                continue
+        i += 1
+    parts.append(expr[start:])
+    return parts
 
 
 class Policy:
@@ -75,6 +125,21 @@ class Policy:
         self.lgpl_patterns = [re.compile(p, re.I) for p in strict.get("lgpl_patterns", [])]
         self.system_libs = [re.compile(p, re.I) for p in strict.get("system_lib_allowlist", [])]
         self.agpl_only_images = set(strict.get("agpl_only_images", []))
+        self.os_aggregate = [re.compile(p, re.I) for p in strict.get("os_aggregate_allowlist", [])]
+        # [[pending]]: known gaps with an owning story. A matching unregistered
+        # package is a warning, not a failure (`images` limits where it applies).
+        self.pending: list[dict] = []
+        for i, pend in enumerate(data.get("pending", [])):
+            missing = [f for f in ("ecosystem", "package", "tracking", "reason") if not pend.get(f)]
+            if missing:
+                raise SystemExit(f"{path}: [[pending]] #{i + 1} is missing {missing}")
+            if pend["ecosystem"] not in KINDS:
+                raise SystemExit(f"{path}: [[pending]] #{i + 1} ecosystem must be one of {list(KINDS)}")
+            imgs = pend.get("images")
+            if imgs is not None and (not isinstance(imgs, list) or not imgs
+                                     or not all(isinstance(x, str) for x in imgs)):
+                raise SystemExit(f"{path}: [[pending]] #{i + 1} images must be a non-empty list of names")
+            self.pending.append(pend)
         self.denied_packages = {
             eco: {norm_pkg(p) for p in pkgs}
             for eco, pkgs in data.get("deny", {}).get("packages", {}).items()
@@ -90,19 +155,20 @@ class Policy:
         return self.aliases.get(t.lower(), t)
 
     def term_ok(self, term: str) -> bool:
-        """Evaluate an SPDX-ish expression; OR needs one allowed side, AND needs all."""
-        term = term.strip()
-        while term.startswith("(") and term.endswith(")"):
-            term = term[1:-1].strip()
+        """Evaluate an SPDX-ish expression; OR needs one allowed side, AND needs all.
+
+        Operators split only outside parentheses, so "(A OR B) AND C" keeps
+        SPDX precedence (OR binds looser than AND)."""
+        term = strip_outer_parens(term)
         if not term:
             return False
         alias = self.aliases.get(term.lower())
         if alias:
             term = alias
-        ors = re.split(r"\s+OR\s+|\s*/\s*", term)
+        ors = split_top(term, r"\s+OR\s+|\s*/\s*")
         if len(ors) > 1:
             return any(self.term_ok(t) for t in ors)
-        ands = re.split(r"\s+AND\s+", term)
+        ands = split_top(term, r"\s+AND\s+")
         if len(ands) > 1:
             return all(self.term_ok(t) for t in ands)
         # "X WITH <exception>" only ever relaxes X (e.g. Apache-2.0 WITH LLVM-exception).
@@ -168,6 +234,139 @@ def load_npm(path: Path) -> list[tuple[str, str, str]]:
             lic = " OR ".join(lic) if len(lic) > 1 else lic[0]
         out.append((name, version, lic or "UNKNOWN"))
     return out
+
+
+# --------------------------------------------------------------------------
+# OS packages (--os-packages): Debian dpkg database + copyright files, Alpine
+# apk database. ROOT is "/" inside an image, or an exported image filesystem.
+# --------------------------------------------------------------------------
+
+def parse_deb822(text: str) -> list[dict[str, str]]:
+    """Stanzas of `Field: value` lines (continuations start with whitespace)."""
+    stanzas, cur, key = [], {}, None
+    for line in text.splitlines():
+        if not line.strip():
+            if cur:
+                stanzas.append(cur)
+            cur, key = {}, None
+        elif line[0] in " \t":
+            if key:
+                cur[key] += "\n" + line.strip()
+        elif ":" in line:
+            key, _, val = line.partition(":")
+            key = key.strip()
+            cur[key] = val.strip()
+    if cur:
+        stanzas.append(cur)
+    return stanzas
+
+
+COMMON_LICENSE_REF = re.compile(r"/usr/share/common-licenses/([A-Za-z0-9][A-Za-z0-9.+_-]*[A-Za-z0-9+])")
+
+
+def dep5_terms(short: str) -> list[str]:
+    """A DEP-5 `License:` short name as SPDX-ish AND-atoms (connectors upper-cased).
+
+    DEP-5: a comma (optionally ", and") has the lowest precedence, so
+    "GPL-1+ or Artistic, and Expat" is (GPL-1+ OR Artistic) AND Expat. Each
+    OR group is parenthesised so the atoms can be deduplicated and re-joined."""
+    t = re.sub(r"\s+", " ", short).strip().strip(",").strip()
+    atoms = []
+    for group in re.split(r"\s*,\s*(?:and\s+)?", t, flags=re.I):
+        if not group:
+            continue
+        g = re.sub(r"\s+or\s+", " OR ", group, flags=re.I)
+        g = re.sub(r"\s+and\s+", " AND ", g, flags=re.I)
+        g = re.sub(r"\s+with\s+", " WITH ", g, flags=re.I)
+        atoms += [f"({g})"] if " OR " in g else [a for a in g.split(" AND ") if a]
+    return atoms
+
+
+def debian_copyright_license(text: str | None) -> str:
+    """Licence string for a Debian package from /usr/share/doc/<pkg>/copyright.
+
+    Machine-readable (DEP-5) files: every distinct `License:` short name, sorted
+    and joined with AND. Free-text files: the /usr/share/common-licenses/<X>
+    files they point at. Nothing recognisable: UNKNOWN.
+    """
+    if text is None:
+        return "UNKNOWN (no copyright file)"
+    terms: set[str] = set()
+    head = text.lstrip().splitlines()[0] if text.strip() else ""
+    if re.match(r"Format(-Specification)?:", head, re.I):
+        for stanza in parse_deb822(text):
+            lic = stanza.get("License")
+            if lic:
+                short = lic.splitlines()[0].strip()
+                if short:
+                    terms.update(dep5_terms(short))
+    if not terms:
+        terms = set(COMMON_LICENSE_REF.findall(text))
+    if not terms:
+        return "UNKNOWN (unstructured copyright file)"
+    # deterministic order (a plain lower() key leaves "BSD-2-clause"/"BSD-2-Clause" to set order)
+    return " AND ".join(sorted(terms, key=lambda t: (t.lower(), t)))
+
+
+def _under(root: Path, rel: str) -> Path:
+    """`rel` inside the image filesystem at `root`, following absolute symlinks inside it."""
+    path = root / rel.lstrip("/")
+    for _ in range(10):
+        # check is_symlink first: exists() would follow an absolute link onto the HOST
+        if not path.is_symlink():
+            return path
+        target = os.readlink(path)
+        path = (root / target.lstrip("/")) if target.startswith("/") else path.parent / target
+    return path
+
+
+def _read(path: Path) -> str | None:
+    try:
+        return path.read_text(errors="replace")
+    except OSError:
+        return None
+
+
+def load_dpkg(root: Path) -> list[tuple[str, str, str]] | None:
+    status = _read(_under(root, "/var/lib/dpkg/status"))
+    if status is None:
+        return None
+    out = []
+    for st in parse_deb822(status):
+        name = st.get("Package")
+        # anything but not-installed / config-files has files on disk (incl. half-installed)
+        if not name or st.get("Status", "").split()[-1:] in (["not-installed"], ["config-files"]):
+            continue
+        doc = _under(root, f"/usr/share/doc/{name}")
+        out.append((name, st.get("Version", "?"), debian_copyright_license(_read(doc / "copyright"))))
+    return out
+
+
+def load_apk(root: Path) -> list[tuple[str, str, str]] | None:
+    db = _read(_under(root, "/lib/apk/db/installed"))
+    if db is None:
+        return None
+    out, cur = [], {}
+    for line in db.splitlines() + [""]:
+        if not line.strip():
+            if cur.get("P"):
+                out.append((cur["P"], cur.get("V", "?"), cur.get("L") or "UNKNOWN"))
+            cur = {}
+        elif len(line) > 1 and line[1] == ":":
+            cur.setdefault(line[0], line[2:].strip())
+    return out
+
+
+def load_os_packages(root: Path) -> list[tuple[str, list[tuple[str, str, str]]]]:
+    sources = [(kind, deps) for kind, deps in (("apt", load_dpkg(root)), ("apk", load_apk(root)))
+               if deps is not None]
+    if not sources:
+        raise SystemExit(f"--os-packages: no dpkg (var/lib/dpkg/status) or apk (lib/apk/db/installed) "
+                         f"database under {root}")
+    if not any(deps for _, deps in sources):
+        raise SystemExit(f"--os-packages: the package database under {root} lists no packages "
+                         "(truncated export?)")
+    return sources
 
 
 def check(policy: Policy, eco: str, deps: list[tuple[str, str, str]]) -> tuple[list, list]:
@@ -321,7 +520,29 @@ CLASS_REASON = {
 
 
 def is_system_lib(policy: Policy, kind: str, name: str) -> bool:
-    return kind == "apt" and any(p.search(name) for p in policy.system_libs)
+    return kind in OS_KINDS and any(p.search(name) for p in policy.system_libs)
+
+
+def is_os_aggregate(policy: Policy, kind: str, name: str) -> bool:
+    """A GPL/LGPL OS package shipped unmodified as part of the image's OS (mere aggregation)."""
+    return kind in OS_KINDS and any(p.search(name) for p in policy.os_aggregate)
+
+
+def os_rule_ok(policy: Policy, kind: str, name: str, cls: str) -> bool:
+    """GPL-family OS packages pass in both editions on the aggregate list; LGPL ones also on
+    the dynamic system-library list. Non-commercial / proprietary / unknown never pass."""
+    if cls == "lgpl" and is_system_lib(policy, kind, name):
+        return True
+    return cls in ("gpl", "lgpl") and is_os_aggregate(policy, kind, name)
+
+
+def pending_for(policy: Policy, eco: str, name: str, artifact: str | None) -> dict | None:
+    for pend in policy.pending:
+        imgs = pend.get("images")
+        if (pend["ecosystem"] == eco and fnmatchcase(norm_pkg(name), norm_pkg(pend["package"]))
+                and (not imgs or artifact in imgs)):
+            return pend
+    return None
 
 
 def exception_for(policy: Policy, eco: str, name: str, licences: set[str]) -> dict | None:
@@ -338,8 +559,10 @@ def agpl_tts_only(policy: Policy, entry: dict) -> bool:
 
 def check_register_scan(policy: Policy, reg: Register, eco: str, deps, edition: str,
                         artifact: str | None):
-    """Scanned packages against the register. Returns failures, excepted, matched, missing, drift."""
-    failures, excepted, missing = [], [], []
+    """Scanned packages against the register.
+
+    Returns failures, excepted, matched, missing, drift, pending."""
+    failures, excepted, missing, pending = [], [], [], []
     matched: set[int] = set()
     drift = 0
     in_tts = artifact in policy.agpl_only_images
@@ -354,6 +577,12 @@ def check_register_scan(policy: Policy, reg: Register, eco: str, deps, edition: 
         entry = reg.find(eco, name, version, lambda e, lic=lic: license_matches(policy, e, lic)[0])
         if entry is None:
             cls = classify(policy, lic)
+            if cls in ("ok", "lgpl") and is_system_lib(policy, eco, name):
+                continue  # dynamic LGPL system library: the allowlist stands in for an entry
+            pend = pending_for(policy, eco, name, artifact)
+            if pend:
+                pending.append((name, version, lic, f"pending ({pend['tracking']}): {pend['reason']}"))
+                continue
             also = "" if cls == "ok" else f"; also {CLASS_REASON[cls]}"
             failures.append((name, version, lic, "no register entry in licenses/register.yaml "
                                                  f"(--emit-missing prints a stub){also}"))
@@ -378,19 +607,19 @@ def check_register_scan(policy: Policy, reg: Register, eco: str, deps, edition: 
         if edition not in eds:
             failures.append((name, version, lic, f"register editions {sorted(eds)} exclude {edition}"))
             continue
-        cls = classify(policy, lic)
-        if cls == "ok":
+        # A `scanned_license` pin means the scan string is not SPDX (or is wrong)
+        # and the register's reviewed `license` is the truth to classify.
+        cls = classify(policy, entry["license"] if entry.get("scanned_license") is not None else lic)
+        if cls == "ok" or os_rule_ok(policy, eco, name, cls):
             continue
-        if cls == "lgpl" and is_system_lib(policy, eco, name):
-            continue
-        exc = exception_for(policy, eco, name, {lic})
+        exc = exception_for(policy, eco, name, {lic, entry["license"]})
         if exc:
             excepted.append((name, version, lic, exc["reason"]))
             continue
         if edition == "agpl" and cls in ("gpl", "lgpl") and in_tts and eds == {"agpl"}:
             continue
         failures.append((name, version, lic, CLASS_REASON[cls] + f" in the {edition} edition"))
-    return failures, excepted, matched, missing, drift
+    return failures, excepted, matched, missing, drift, pending
 
 
 def check_register_entries(policy: Policy, reg: Register, edition: str, skip: set[int]):
@@ -415,9 +644,7 @@ def check_register_entries(policy: Policy, reg: Register, edition: str, skip: se
         elif "agpl" not in eds:
             continue
         cls = classify(policy, e["license"])
-        if cls == "ok":
-            continue
-        if cls == "lgpl" and is_system_lib(policy, e["kind"], e["name"]):
+        if cls == "ok" or os_rule_ok(policy, e["kind"], e["name"], cls):
             continue
         exc = exception_for(policy, e["kind"], e["name"],
                             {e["license"], str(e.get("scanned_license", e["license"]))})
@@ -482,20 +709,36 @@ def check_artifacts(policy: Policy, reg: Register, root: Path):
     return failures, len(baked)
 
 
-def emit_stub(eco: str, name: str, version: str, lic: str, policy: Policy) -> str:
-    url = (f"https://pypi.org/project/{name}/" if eco == "python"
-           else f"https://www.npmjs.com/package/{name}")
-    spdx = normalise_license(policy, lic)
+STUB_URLS = {
+    "python": "https://pypi.org/project/{}/",
+    "npm": "https://www.npmjs.com/package/{}",
+    "apt": "https://packages.debian.org/{}",
+    "apk": "https://pkgs.alpinelinux.org/packages?name={}",
+}
+
+
+def emit_stub(eco: str, name: str, version: str, lic: str, policy: Policy,
+              artifact: str | None = None) -> str:
+    url = STUB_URLS[eco].format(name)
+    spdx = normalise_license(policy, lic) if eco not in OS_KINDS else lic
     parts = [f"name: {json.dumps(name)}", f"kind: {eco}", f"version: {json.dumps(version)}",
              f"license: {json.dumps(spdx)}", f"source_url: {json.dumps(url)}",
-             "editions: [agpl, commercial]", 'notes: ""']
+             "editions: [agpl, commercial]"]
+    if eco in OS_KINDS and artifact:
+        parts.append(f"images: [{artifact}]")
+    parts.append('notes: ""')
     return "  - {" + ", ".join(parts) + "}"
 
 
-def report(title: str, failures, excepted, extra: str = "") -> None:
-    print(f"== {title}: {len(failures)} violation(s), {len(excepted)} exception(s){extra}")
+def report(title: str, failures, excepted, extra: str = "", pending=()) -> None:
+    print(f"== {title}: {len(failures)} violation(s), {len(excepted)} exception(s), "
+          f"{len(pending)} pending{extra}")
     for name, version, lic, reason in excepted:
         print(f"  EXCEPTION {name}=={version}  [{lic}]  -- {reason}")
+    for name, version, lic, reason in pending:
+        print(f"  PENDING   {name}=={version}  [{lic}]  -- {reason}")
+        if "GITHUB_ACTIONS" in os.environ:
+            print(f"::warning title=Licence register ({title}) pending::{name} {version} [{lic}]: {reason}")
     for name, version, lic, reason in failures:
         print(f"  FAIL      {name}=={version}  [{lic}]  -- {reason}")
         if "GITHUB_ACTIONS" in os.environ:
@@ -517,12 +760,13 @@ def run_register(args, policy: Policy, sources) -> int:
     matched: set[int] = set()
     stubs = []
     for eco, deps in sources:
-        failures, excepted, hit, missing, drift = check_register_scan(
+        failures, excepted, hit, missing, drift, pending = check_register_scan(
             policy, reg, eco, deps, args.edition, args.artifact)
         matched |= hit
         stubs += [(eco, *m) for m in missing]
         report(f"{eco} ({args.edition})", failures, excepted,
-               f"; {len(deps)} packages, {drift} version difference(s) vs register (informational)")
+               f"; {len(deps)} packages, {drift} version difference(s) vs register (informational)",
+               pending)
         total += len(failures)
     failures, excepted = check_register_entries(policy, reg, args.edition, matched)
     report(f"register entries ({args.edition})", failures, excepted)
@@ -534,7 +778,7 @@ def run_register(args, policy: Policy, sources) -> int:
     if args.emit_missing and stubs:
         print("\n# --emit-missing: stubs for licenses/register.yaml `entries:` (check each licence by hand)")
         for eco, name, version, lic in stubs:
-            print(emit_stub(eco, name, version, lic, policy))
+            print(emit_stub(eco, name, version, lic, policy, args.artifact))
     if total:
         print(f"\n{total} licence register violation(s). Add or correct the entry in licenses/register.yaml "
               "(same PR as the dependency), replace the dependency, or record an owner-approved "
@@ -551,6 +795,9 @@ def main() -> int:
                     help="check every package installed in the interpreter running this script")
     ap.add_argument("--python", type=Path, help="pip-licenses --format=json output (alternative)")
     ap.add_argument("--npm", type=Path, help="license-checker(-rseidelsohn) --json output")
+    ap.add_argument("--os-packages", type=Path, nargs="?", const=Path("/"), metavar="ROOT",
+                    help="scan the OS packages (dpkg + /usr/share/doc/*/copyright, or apk) of the "
+                         "filesystem at ROOT (default /, i.e. inside the image being scanned)")
     ap.add_argument("--register", type=Path,
                     help="licenses/register.yaml: require an entry per scanned package and apply edition rules")
     ap.add_argument("--edition", choices=EDITIONS,
@@ -566,13 +813,16 @@ def main() -> int:
     if args.register is None:
         if args.check_artifacts or args.emit_missing:
             ap.error("--check-artifacts and --emit-missing need --register")
+        if args.os_packages:
+            ap.error("--os-packages needs --register (the OS-package rules live in register mode)")
     else:
         if args.edition is None:
             args.edition = os.environ.get("LOREKEEPER_EDITION") or "commercial"
             if args.edition not in EDITIONS:
                 ap.error(f"LOREKEEPER_EDITION must be one of {', '.join(EDITIONS)} (got {args.edition!r})")
-    if not (args.python_env or args.python or args.npm or (args.register and args.check_artifacts)):
-        ap.error("give --python-env, --python and/or --npm" +
+    if not (args.python_env or args.python or args.npm or args.os_packages
+            or (args.register and args.check_artifacts)):
+        ap.error("give --python-env, --python, --npm and/or --os-packages" +
                  (" (or --check-artifacts)" if args.register else ""))
 
     policy = Policy(args.policy)
@@ -584,6 +834,8 @@ def main() -> int:
         sources.append(("python", load_python(args.python)))
     if args.npm:
         sources.append(("npm", load_npm(args.npm)))
+    if args.os_packages:
+        sources += load_os_packages(args.os_packages)
     if args.register is not None:
         return run_register(args, policy, sources)
     for eco, deps in sources:

@@ -34,6 +34,11 @@ licenses = [
   "MPL-2.0",
   "PostgreSQL",  # PostgreSQL / pgvector
   "OFL-1.1",     # SIL Open Font License 1.1 (fonts)
+  # Permissive licences of OS packages in the shipped images (E0-QA.8)
+  "curl", "X11", "Libpng", "libtiff", "IJG", "bzip2-1.0.6", "GD", "FTL", "Beerware",
+  "LicenseRef-Public-Domain", "TCL",
+  # AV1 (libaom): royalty-free patent grant that permits commercial use
+  "LicenseRef-AOM-Patent-License-1.0",
 ]
 
 [aliases]
@@ -65,6 +70,12 @@ licenses = [
 "The Unlicense (Unlicense)" = "Unlicense"
 "Historical Permission Notice and Disclaimer (HPND)" = "HPND"
 "zlib/libpng License" = "Zlib"
+# OS package metadata (Alpine `L:` fields, Debian DEP-5 short names)
+"Public-Domain" = "LicenseRef-Public-Domain"
+"Public Domain" = "LicenseRef-Public-Domain"
+"public-domain" = "LicenseRef-Public-Domain"
+"Expat" = "MIT"
+"2-clause BSD-like license" = "BSD-2-Clause"
 
 [deny]
 # Purely for clearer error messages: anything not allowed already fails.
@@ -113,6 +124,60 @@ system_lib_allowlist = [
 ]
 # Images that exist only in the AGPL build (the optional TTS container).
 agpl_only_images = ["tts"]
+# OS-base-layer rule (E0-QA.8, docs/LICENSING.md). apt/apk package-name
+# regexes for GPL/LGPL operating-system packages that ship unmodified, as
+# separate programs and libraries of the image's distribution (Debian for
+# backend, Alpine for nginx): shells, core utilities, the C library, the
+# compiler toolchain build-essential installs, the package manager. Shipping
+# them next to Lorekeeper in one image is mere aggregation: Lorekeeper does
+# not modify them, and no Lorekeeper code is a derivative work of them.
+# Obligations: licence texts ship in the image (/usr/share/doc/*/copyright,
+# /usr/share/licenses), and corresponding source comes from the distribution
+# archive (docs/LICENSING.md). Both editions accept these; non-commercial,
+# proprietary and unknown licences still fail. A package not listed here (a
+# GPL library a new apt install pulls in) fails until it is reviewed and
+# added. Every package still needs its register entry.
+os_aggregate_allowlist = [
+  # --- Alpine (nginx image) ---
+  # base layout, package manager, busybox (sh and the core utilities) and its TLS helper
+  "^alpine-baselayout(-data)?$", "^apk-tools$", "^busybox(-binsh)?$", "^ssl_client$", "^scanelf$",
+  "^musl-utils$",
+  # envsubst, run by the nginx image's own entrypoint for config templates
+  "^gettext-envsubst$",
+  # LGPL / dual-licensed libraries that nginx and its modules load dynamically
+  # (geoip; libgcrypt via libxslt; libidn2 via libcurl); not linked by Lorekeeper
+  "^geoip$", "^libintl$", "^libgcrypt$", "^libgpg-error$", "^libidn2$", "^libunistring$",
+  "^xz-libs$",
+  # --- Debian (backend image: python:3.11-slim + build-essential + libpq-dev) ---
+  # Debian's DEP-5 copyright files list every licence in the SOURCE package
+  # (build scripts, docs, tests), so nearly every package reads as GPL/LGPL.
+  # shells, core utilities, login and init helpers
+  "^bash$", "^dash$", "^coreutils$", "^findutils$", "^diffutils$", "^grep$", "^sed$", "^mawk$",
+  "^gzip$", "^tar$", "^bzip2$", "^xz-utils$", "^hostname$", "^util-linux$", "^bsdutils$",
+  "^mount$", "^login(\\.defs)?$", "^passwd$", "^adduser$", "^sysvinit-utils$",
+  "^init-system-helpers$", "^debianutils$", "^base-(files|passwd)$", "^netbase$", "^tzdata$",
+  "^ca-certificates$", "^ncurses-(base|bin)$", "^readline-common$",
+  # package management
+  "^dpkg(-dev)?$", "^libdpkg-perl$", "^apt$", "^libapt-pkg[\\d.]+$", "^debconf$",
+  "^libdebconfclient\\d+$", "^debian-archive-keyring$", "^sqv$",
+  # C library, compiler runtime (GCC Runtime Library Exception) and kernel headers
+  "^libc6(-dev)?$", "^libc-(bin|dev-bin)$", "^libcrypt(1|-dev)$", "^linux-libc-dev$",
+  "^rpcsvc-proto$", "^gcc-\\d+-base$", "^libgcc-s\\d+$", "^libstdc\\+\\+\\d+$",
+  # build-essential toolchain (only needed for the arm64 spaCy source build;
+  # a multi-stage Dockerfile.prod would drop all of these, docs/LICENSING.md)
+  "^build-essential$", "^(gcc|g\\+\\+|cpp)(-\\d+)?(-x86-64-linux-gnu|-aarch64-linux-gnu)?$",
+  "^binutils(-common|-x86-64-linux-gnu|-aarch64-linux-gnu)?$", "^libbinutils$",
+  "^libctf(-nobfd)?\\d+$", "^libsframe\\d+$", "^libgprofng\\d+$", "^libjansson\\d+$",
+  "^lib(asan|atomic|cc1-|gomp|hwasan|itm|lsan|quadmath|tsan|ubsan)\\d+$",
+  "^lib(gcc|stdc\\+\\+)-\\d+-dev$", "^libisl\\d+$", "^libmpc\\d+$", "^libmpfr\\d+$",
+  "^make$", "^patch$", "^perl(-base|-modules-[\\d.]+)?$", "^libperl[\\d.]+$",
+  # system libraries of the base image (Python, apt, PAM, Kerberos and libpq load them)
+  "^lib(acl|attr|audit|blkid|bz2-|cap-ng|cap|com-err|db[\\d.]+|ffi|gdbm(-compat)?|gmp|hogweed|k5crypto|keyutils|krb5|krb5support|lastlog2-|lz4-|lzma|md|mount|ncursesw|nettle|pcre2-8-|readline|seccomp|selinux|semanage|sepol|smartcols|sqlite3-|systemd|tinfo|udev|uuid|xxhash|zstd)\\d+(\\.\\d+)?(t64)?$",
+  "^libaudit-common$", "^libsemanage-common$", "^libgssapi-krb5-\\d+$", "^libkrb5-\\d+$",
+  "^libpam(0g|-modules(-bin)?|-runtime)$", "^zlib1g$",
+  "^libssl(\\d+(t64)?|-dev)$", "^openssl(-provider-legacy)?$",
+  "^libldap(2|-[\\d.]+-\\d+)$", "^libsasl2-(\\d+|modules-db)$", "^libpq(5|-dev)$",
+]
 
 [artifacts]
 # --check-artifacts: tracked files with these extensions under these roots
@@ -122,6 +187,47 @@ extensions = [
   ".gguf", ".onnx", ".safetensors", ".pt", ".pth", ".ckpt", ".bin", ".h5", ".tflite",
 ]
 roots = ["site", "src", "nginx", "models", "assets"]
+
+# Known gaps with an owning story (E0-QA.8). An UNREGISTERED scanned package
+# that matches a [[pending]] entry prints a warning instead of failing; any
+# other unregistered package still fails. Fields: ecosystem (register kind),
+# package (name or glob, e.g. "nvidia-*"), tracking (owning story), reason,
+# optional images (only scans with that --artifact use the entry).
+#
+# CUDA torch's NVIDIA wheels: E0-Platform.2 moved the shipped backend images
+# to CPU torch, so the backend scan carries none of these and must keep
+# failing if one comes back (no `backend` here, and the Dockerfile guard
+# fails the build too). They remain a known gap only for the GPU override
+# image AD-1 plans for `ml` (`ml-gpu`), whose redistribution under the NVIDIA
+# EULA is an open owner decision (docs/LICENSING.md).
+
+[[pending]]
+ecosystem = "python"
+package = "nvidia-*"
+tracking = "E0-Platform AD-1 / ml CPU image"
+reason = "NVIDIA CUDA runtime wheels (cuBLAS, cuDNN, NCCL, cuSPARSELt, ...) pulled in by CUDA torch; NVIDIA EULA, proprietary. Only the planned GPU override image may carry them, pending the owner's redistribution decision."
+images = ["ml-gpu"]
+
+[[pending]]
+ecosystem = "python"
+package = "cuda-toolkit"
+tracking = "E0-Platform AD-1 / ml CPU image"
+reason = "CUDA toolkit meta-wheel pulled in by CUDA torch; NVIDIA EULA. GPU override image only."
+images = ["ml-gpu"]
+
+[[pending]]
+ecosystem = "python"
+package = "cuda-bindings"
+tracking = "E0-Platform AD-1 / ml CPU image"
+reason = "CUDA Python bindings pulled in by CUDA torch; NVIDIA software licence. GPU override image only."
+images = ["ml-gpu"]
+
+[[pending]]
+ecosystem = "python"
+package = "cuda-pathfinder"
+tracking = "E0-Platform AD-1 / ml CPU image"
+reason = "CUDA library locator pulled in by CUDA torch alongside cuda-bindings. GPU override image only."
+images = ["ml-gpu"]
 
 [ignore]
 # Tools that may be present only to run this check (never shipped).
