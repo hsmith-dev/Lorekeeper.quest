@@ -72,3 +72,6 @@ Stories were merged on green GitHub CI while the desktop was offline (owner deci
 - [ ] Offline: `scripts/sidecar_smoke.sh ml`, then `/v1/nli` and `/v1/ocr` in a `--network none` container
 - [ ] First-call latency of NLI and OCR vs the 30 s `ML_TIMEOUT_S`
 - [ ] arm64: `docker buildx build --platform linux/arm64 src/services/ml`
+
+## E0-UX.9 — Shortcut registry, help overlay, touch targets (PR #38)
+- [ ] Optional UI pass: `cd src/frontend && npm run dev`; press `?` on a page and inside an open NPC panel; type `?` in the journal (must not open help); VoiceOver over the help list
