@@ -125,7 +125,7 @@ async def _campaign(db) -> Campaign:
 async def _job(db, c: Campaign, kind: str = "test_r.count", *, age_s: float = 0, **kw) -> Job:
     row = Job(campaign_id=c.id, kind=kind, queue=registry.get_kind(kind).queue,
               idempotency_key=f"test:{uuid.uuid4().hex}", ctx_kind="gm", ctx_user_id=c.user_id,
-              created_by=c.user_id, access_epoch=0, payload={}, **kw)
+              created_by=c.user_id, access_epoch=0, **{"payload": {}, **kw})
     db.add(row)
     await db.commit()
     if age_s:
@@ -367,7 +367,7 @@ async def test_a_failed_push_stops_the_pass_and_the_next_pass_retries(db, conn, 
 
     monkeypatch.setattr(outbox, "push", flaky)
     assert (await reap(_factory(db), conn)).pushed == [rows[0].id]
-    assert all((await _row(db, r.id)).status == JobStatus.QUEUED for r in rows)
+    assert [(await _row(db, r.id)).status for r in rows] == [JobStatus.QUEUED] * 3
     monkeypatch.setattr(outbox, "push", real_push)
     assert (await reap(_factory(db), conn)).pushed == [rows[1].id, rows[2].id]
 
