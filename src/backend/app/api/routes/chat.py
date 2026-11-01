@@ -13,6 +13,10 @@ A message whose refs the reader can no longer all see is redacted on read
 and left out of the prompt history; an archived session is never replayed,
 never posted to, and to a Player is absent (list) or 404. Denied, hidden,
 another user's and missing sessions are the same 404.
+
+Account gate (app/api/deps.py, E0-Access.6): listing and reading stored
+sessions are Party reads (openapi_extra=PARTY_READ), open to a Player with
+no paid account. Chat itself (hosted AI), delete and health stay gated.
 """
 import asyncio
 import json
@@ -32,7 +36,7 @@ from app.access import (
 )
 from app.access.context import PREVIEW_MEMBER
 from app.access.policy import NOT_FOUND_DETAIL
-from app.api.deps import get_current_user, get_user_llm_config
+from app.api.deps import PARTY_READ, get_current_user, get_user_llm_config
 from app.core.limiter import limiter, user_or_ip
 from app.db.models.campaign import Campaign
 from app.db.models.chat import ChatSession
@@ -121,7 +125,7 @@ def _summary(session: ChatSession, campaign_name: str | None) -> ChatSessionSumm
     )
 
 
-@router.get("/sessions", response_model=list[ChatSessionSummary])
+@router.get("/sessions", response_model=list[ChatSessionSummary], openapi_extra=PARTY_READ)
 async def list_sessions(
     request: Request,
     search: str | None = Query(None, max_length=200),
@@ -178,7 +182,7 @@ async def list_sessions(
     return out
 
 
-@router.get("/sessions/{session_id}", response_model=None,
+@router.get("/sessions/{session_id}", response_model=None, openapi_extra=PARTY_READ,
             responses={200: {"model": ChatSessionDetailGM, "description": _GM_OR_PARTY}})
 async def get_session(
     session_id: str,

@@ -25,7 +25,8 @@ from app.schemas.share import (
     PublicNpcResponse,
     PublicQuestResponse,
 )
-from app.api.deps import require_active_account
+from app.api.deps import get_current_user, require_active_account
+from app.domain.enums import CampaignRole
 
 router = APIRouter()
 
@@ -120,14 +121,19 @@ async def get_shared_quests(
 async def join_campaign(
     request: Request,
     token: str,
-    user: User = Depends(require_active_account),
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> JoinCampaignResponse:
-    """Redeem a 'collaborate' share link. Requires an account with access
-    granted — unlike the read-only endpoints above, this grants real write
-    access, so anonymous (or not-yet-paid) redemption isn't an option. A
-    revoked or expired link is the same 404 as an unknown one."""
+    """Redeem a 'collaborate' share link. Needs a signed-in account (never
+    anonymous). E0-Access.6: a link granting Player (or a legacy link with no
+    Role, which grants Player) may be redeemed without a paid or granted
+    account, since a Player only uses Party reads; a link granting any other
+    Role (co_gm) still needs one (`require_active_account`, the 402
+    account-gate). A revoked or expired link is the same 404 as an unknown
+    one, checked before the account."""
     share = await resolve_share_token(db, token, COLLABORATE)
+    if share.role is not None and CampaignRole(share.role) is not CampaignRole.PLAYER:
+        await require_active_account(user)
     campaign = await db.get(Campaign, share.campaign_id)
     if campaign is None:
         not_found()

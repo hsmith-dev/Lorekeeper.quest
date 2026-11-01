@@ -4,7 +4,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import func
 
 from app.access import (
-    CampaignContext, check_create, ctx_for_request, project, require_campaign, require_campaign_for, scoped_get,
+    CampaignContext, can_write, check_create, ctx_for_request, project, require_campaign, require_campaign_for,
+    scoped_get,
     scoped_select,
 )
 from app.core.limiter import limiter
@@ -12,7 +13,7 @@ from app.db.session import get_db
 from app.db.models.user import User
 from app.db.models.source import SourceDocument, SourceChunk
 from app.schemas.source import SourceDocumentResponse
-from app.api.deps import get_current_user
+from app.api.deps import PARTY_READ, get_current_user
 from app.services.source_service import extract_text, chunk_text
 from app.services.embedding_service import embed
 
@@ -24,10 +25,13 @@ _MAX_BYTES = 15 * 1024 * 1024  # 15 MB
 # Source documents are GM material (E0-Access.5): GMs of the Campaign (Owner
 # or Co-GM) upload and delete them; a Player lists only documents whose
 # Visibility covers them. Every denial, and a hidden document, is the one 404.
+# Every write calls can_write on the row (E0-Access.6). Account gate
+# (app/api/deps.py): the list is a Party read (openapi_extra=PARTY_READ);
+# upload and delete need a paid or granted account.
 _source_gm = require_campaign_for(SourceDocument, "source_id", "gm")
 
 
-@router.get("/", response_model=list[SourceDocumentResponse])
+@router.get("/", response_model=list[SourceDocumentResponse], openapi_extra=PARTY_READ)
 async def list_sources(
     ctx: CampaignContext = Depends(require_campaign("player")),
     db: AsyncSession = Depends(get_db),
@@ -102,5 +106,6 @@ async def delete_source(
     db: AsyncSession = Depends(get_db),
 ) -> None:
     doc = await scoped_get(db, SourceDocument, ctx, source_id)
+    can_write(ctx, doc)
     await db.delete(doc)
     await db.commit()

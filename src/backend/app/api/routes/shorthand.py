@@ -3,25 +3,28 @@ from fastapi import APIRouter, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.access import (
-    CampaignContext, check_create, ctx_for_request, project, project_all, require_campaign, require_campaign_for,
+    CampaignContext, can_write, check_create, ctx_for_request, project, project_all, require_campaign,
+    require_campaign_for,
     scoped_get, scoped_select,
 )
 from app.db.session import get_db
 from app.db.models.user import User
 from app.db.models.shorthand import ShorthandTerm
 from app.schemas.shorthand import ShorthandCreate, ShorthandUpdate, ShorthandResponse
-from app.api.deps import get_current_user
+from app.api.deps import PARTY_READ, get_current_user
 
 router = APIRouter()
 
 # Shorthand terms are GM vocabulary (E0-Access.5): any GM of the term's
 # Campaign (Owner or Co-GM) may create, edit or delete them; a Player reads
 # only the terms whose Visibility covers them. Every denial, and a hidden
-# term, is the one 404.
+# term, is the one 404. Every write calls can_write on the row (E0-Access.6).
+# Account gate (app/api/deps.py): the list is a Party read
+# (openapi_extra=PARTY_READ); the writes need a paid or granted account.
 _term_gm = require_campaign_for(ShorthandTerm, "term_id", "gm")
 
 
-@router.get("/", response_model=list[ShorthandResponse])
+@router.get("/", response_model=list[ShorthandResponse], openapi_extra=PARTY_READ)
 async def list_shorthand(
     ctx: CampaignContext = Depends(require_campaign("player")),
     db: AsyncSession = Depends(get_db),
@@ -57,6 +60,7 @@ async def update_shorthand(
     db: AsyncSession = Depends(get_db),
 ):
     term = await scoped_get(db, ShorthandTerm, ctx, term_id)
+    can_write(ctx, term)
     for field, value in body.model_dump(exclude_none=True).items():
         setattr(term, field, value.strip() if isinstance(value, str) else value)
     await db.commit()
@@ -71,5 +75,6 @@ async def delete_shorthand(
     db: AsyncSession = Depends(get_db),
 ) -> None:
     term = await scoped_get(db, ShorthandTerm, ctx, term_id)
+    can_write(ctx, term)
     await db.delete(term)
     await db.commit()

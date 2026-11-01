@@ -69,8 +69,10 @@ export function EntryDetailPage() {
     enabled: !!entry?.campaign_id,
   });
 
-  // Delete and tag edits need GM (Owner or Co-GM) in the entry's Campaign
-  // (E0-Access.5); the server enforces it, this only hides the controls.
+  // Delete and tag edits go through access.can_write (E0-Access.6): a GM
+  // (Owner or Co-GM) may edit any entry, a Player only their own Player
+  // Journal entries (E7 brings those to the UI). The server enforces it; this
+  // only hides the controls from non-GMs.
   const { isGm } = useEffectiveRole(entry?.campaign_id);
 
   const refreshEntry = () => qc.invalidateQueries({ queryKey: ["journal", id] });

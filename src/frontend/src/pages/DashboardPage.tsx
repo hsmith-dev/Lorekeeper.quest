@@ -7,6 +7,7 @@ import { CampaignSelector } from "../components/CampaignSelector";
 import { TagFilter } from "../components/TagFilter";
 import { useCampaigns } from "../hooks/useCampaigns";
 import { usePageCampaign } from "../hooks/useCurrentCampaign";
+import { useEffectiveRole } from "../hooks/useEffectiveRole";
 import { useRecap } from "../hooks/useJournals";
 import type { Campaign } from "../types";
 
@@ -125,6 +126,10 @@ export function DashboardPage() {
   // (from this page's picker or from the nav's CampaignSwitcher).
   const selectedCampaignId = selectedCampaign?.id;
   useEffect(() => setSelectedTagId(undefined), [selectedCampaignId]);
+  // New Entry (draft + save) and the recap are GM-only (E0-Access.6). The
+  // server enforces it; this only hides the controls from Players (and while
+  // previewing as a Player).
+  const { isGm } = useEffectiveRole(selectedCampaignId);
 
   // Lets other pages (e.g. Sharing's "Shared With Me" cards) deep-link
   // straight into a specific campaign here rather than just dropping the
@@ -212,15 +217,21 @@ export function DashboardPage() {
                     · {selectedCampaign.genre}
                   </span>
                 </h1>
-                <h2 className="text-xs font-semibold uppercase tracking-widest text-muted-foreground mb-3" style={{ fontFamily: "var(--font-heading)" }}>
-                  New Entry
-                </h2>
-                <JournalInput campaign={selectedCampaign} />
+                {isGm && (
+                  <>
+                    <h2 className="text-xs font-semibold uppercase tracking-widest text-muted-foreground mb-3" style={{ fontFamily: "var(--font-heading)" }}>
+                      New Entry
+                    </h2>
+                    <JournalInput campaign={selectedCampaign} />
+                  </>
+                )}
               </div>
 
-              <div className="border-t border-border pt-4">
-                <RecapPanel campaign={selectedCampaign} />
-              </div>
+              {isGm && (
+                <div className="border-t border-border pt-4">
+                  <RecapPanel campaign={selectedCampaign} />
+                </div>
+              )}
 
               <div className="border-t border-border pt-4">
                 <h2 className="text-xs font-semibold uppercase tracking-widest text-muted-foreground mb-3" style={{ fontFamily: "var(--font-heading)" }}>

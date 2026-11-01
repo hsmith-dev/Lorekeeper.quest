@@ -6,7 +6,8 @@ from sqlalchemy.orm import selectinload
 
 from app.access import (
     GM, LITE,
-    CampaignContext, check_create, ctx_for_request, project, project_all, require_campaign, require_campaign_for,
+    CampaignContext, can_write, check_create, ctx_for_request, project, project_all, require_campaign,
+    require_campaign_for,
     scoped_get, scoped_select,
 )
 from app.db.session import get_db
@@ -17,7 +18,7 @@ from app.db.models.journal import JournalEntry
 from app.db.models.tag import Tag
 from app.schemas.quest import QuestCreate, QuestUpdate, QuestGMResponse, QuestSuggestResponse
 from app.schemas.journal import JournalLiteResponse
-from app.api.deps import get_current_user, get_user_llm_config
+from app.api.deps import PARTY_READ, get_current_user, get_user_llm_config
 from app.services.chat_service import suggest_quests, generate_quest_description
 from app.services.llm_provider import LLMConfig
 from app.services import llm_config_service
@@ -30,6 +31,13 @@ router = APIRouter()
 # FastAPI must not coerce a Party body into the GM schema).
 _GM_OR_PARTY = "GM: QuestGMResponse; Player or member preview: QuestPartyResponse (no `notes`)."
 _quest_ctx = require_campaign_for(Quest, "quest_id")
+# E0-Access.6: writes and generation declare `gm` in the quest's own Campaign,
+# so a Player gets the missing-row 404 before any LLM config is resolved
+# or any usage metered; every write also calls can_write on the row.
+# Account gate (app/api/deps.py): the list, the item and its entries are
+# Party reads (openapi_extra=PARTY_READ); every other route needs a paid
+# or granted account.
+_quest_gm = require_campaign_for(Quest, "quest_id", "gm")
 
 
 async def _get_accessible_quest(db: AsyncSession, quest_id: uuid.UUID, ctx: CampaignContext) -> Quest:
@@ -39,14 +47,14 @@ async def _get_accessible_quest(db: AsyncSession, quest_id: uuid.UUID, ctx: Camp
     return await scoped_get(db, Quest, ctx, quest_id)
 
 
-async def _visible_quest(quest_id: uuid.UUID, ctx: CampaignContext = Depends(_quest_ctx),
+async def _visible_quest(quest_id: uuid.UUID, ctx: CampaignContext = Depends(_quest_gm),
                          db: AsyncSession = Depends(get_db)) -> Quest:
     """As a dependency, so a hidden quest is the 404 before any later
     dependency (the LLM config's 402) can answer differently."""
     return await _get_accessible_quest(db, quest_id, ctx)
 
 
-@router.get("/", response_model=None,
+@router.get("/", response_model=None, openapi_extra=PARTY_READ,
             responses={200: {"model": list[QuestGMResponse], "description": _GM_OR_PARTY}})
 async def list_quests(
     ctx: CampaignContext = Depends(require_campaign("player")),
@@ -66,7 +74,7 @@ async def create_quest(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    ctx = await ctx_for_request(request, db, user, body.campaign_id)
+    ctx = await ctx_for_request(request, db, user, body.campaign_id, "gm")
     quest = Quest(user_id=user.id, **body.model_dump())
     check_create(quest, ctx)  # a row the caller could not see is refused before writing
     db.add(quest)
@@ -80,10 +88,11 @@ async def create_quest(
 async def update_quest(
     quest_id: uuid.UUID,
     body: QuestUpdate,
-    ctx: CampaignContext = Depends(_quest_ctx),
+    ctx: CampaignContext = Depends(_quest_gm),
     db: AsyncSession = Depends(get_db),
 ):
     quest = await _get_accessible_quest(db, quest_id, ctx)
+    can_write(ctx, quest)
     for field, value in body.model_dump(exclude_none=True).items():
         setattr(quest, field, value)
     await db.commit()
@@ -95,15 +104,16 @@ async def update_quest(
 @router.delete("/{quest_id}", status_code=204)
 async def delete_quest(
     quest_id: uuid.UUID,
-    ctx: CampaignContext = Depends(_quest_ctx),
+    ctx: CampaignContext = Depends(_quest_gm),
     db: AsyncSession = Depends(get_db),
 ) -> None:
     quest = await _get_accessible_quest(db, quest_id, ctx)
+    can_write(ctx, quest)
     await db.delete(quest)
     await db.commit()
 
 
-@router.get("/{quest_id}", response_model=None,
+@router.get("/{quest_id}", response_model=None, openapi_extra=PARTY_READ,
             responses={200: {"model": QuestGMResponse, "description": _GM_OR_PARTY}})
 async def get_quest(
     quest_id: uuid.UUID,
@@ -113,7 +123,7 @@ async def get_quest(
     return project(await _get_accessible_quest(db, quest_id, ctx), ctx)
 
 
-@router.get("/{quest_id}/entries", response_model=None,
+@router.get("/{quest_id}/entries", response_model=None, openapi_extra=PARTY_READ,
             responses={200: {"model": list[JournalLiteResponse], "description": _GM_OR_PARTY}})
 async def get_quest_entries(
     quest_id: uuid.UUID,
@@ -142,7 +152,7 @@ async def get_quest_entries(
 async def generate_quest_description_route(
     quest_id: uuid.UUID,
     quest: Quest = Depends(_visible_quest),
-    ctx: CampaignContext = Depends(_quest_ctx),
+    ctx: CampaignContext = Depends(_quest_gm),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     config: LLMConfig = Depends(get_user_llm_config),

@@ -11,12 +11,15 @@ from app.db.session import get_db
 from app.db.models.user import User
 from app.db.models.tag import Tag, JournalTag
 from app.schemas.tag import TagWithCountGMResponse
-from app.api.deps import get_current_user
+from app.api.deps import PARTY_READ, get_current_user
 
 router = APIRouter()
 
+# Account gate (app/api/deps.py, E0-Access.6): the tag list is a Party read
+# (openapi_extra=PARTY_READ), open to a Player with no paid account.
 
-@router.get("/", response_model=None, responses={200: {
+
+@router.get("/", response_model=None, openapi_extra=PARTY_READ, responses={200: {
     "model": list[TagWithCountGMResponse],
     "description": "GM: the GM schema; Player or member preview: the Party schema (hidden categories null).",
 }})

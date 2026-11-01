@@ -58,6 +58,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.access.audience import ALWAYS_GM_FIELDS, stored_audience, visible_to
 from app.access.context import CampaignContext, RoleMap, role_ctx
 from app.access.policy import ANON, GM, PLAYER, not_found
+from app.access.write import can_write
 from app.domain import entity_types
 from app.access.registry import (
     Derived, Stored, UnregisteredModel, audience_of, gm_fields, narrowed_audience, registration, scope_column,
@@ -216,10 +217,14 @@ def _column_default(model: type, name: str) -> Any:
 def check_create(obj: Any, ctx: CampaignContext) -> None:
     """Refuse (`not_found()`) a create whose new row ctx could not see, before
     anything is written: `obj` is the transient row, its unset Visibility
-    columns read as their column defaults. Derived rows follow their parents."""
+    columns read as their column defaults. Derived rows follow their parents
+    for visibility. It ends with `can_write` (E0-Access.6): every create goes
+    through the one write gate, so a reduced ctx, anon and a Player creating
+    anything but their own Player Journal entry are refused here too."""
     model = type(obj)
     reg = registration(model)
     if isinstance(reg, Derived):
+        can_write(ctx, obj)
         return
     if scope_column(model) is not None and _row_campaign(obj) != ctx.campaign_id:
         not_found()
@@ -237,6 +242,7 @@ def check_create(obj: Any, ctx: CampaignContext) -> None:
         aud = audience_of(obj)
     if not visible_to(aud, ctx):
         not_found()
+    can_write(ctx, obj)
 
 
 # ── Projection ─────────────────────────────────────────────────────────────

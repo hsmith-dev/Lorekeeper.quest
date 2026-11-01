@@ -44,8 +44,6 @@ POST /api/billing/checkout
 POST /api/billing/portal
 POST /api/billing/redeem-promo
 POST /api/billing/webhook
-POST /api/campaigns/
-POST /api/campaigns/generate-concept
 POST /api/feedback/
 POST /api/ingest/discord
 POST /api/ingest/image
