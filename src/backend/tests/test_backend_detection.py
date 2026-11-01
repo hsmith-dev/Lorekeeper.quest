@@ -61,6 +61,10 @@ def refused(request):
     raise httpx.ConnectError("connection refused", request=request)
 
 
+def unavailable(request):
+    return httpx.Response(503, text="Service Unavailable")
+
+
 def timed_out(request):
     raise httpx.ReadTimeout("timed out", request=request)
 
@@ -130,6 +134,15 @@ async def test_down_is_openai_compat_and_not_cached(monkeypatch, version):
     assert await detect_backend("http://ollama.test:11434") == BACKEND_OPENAI_COMPAT
     assert llm_provider._backend_cache == {}
     # Ollama finished starting: the next call probes again and sees it.
+    s.version = ollama_version
+    assert await detect_backend("http://ollama.test:11434") == BACKEND_OLLAMA
+    assert s.version_calls == 2
+
+
+async def test_5xx_is_openai_compat_and_not_cached(monkeypatch):
+    s = serve(monkeypatch, unavailable)
+    assert await detect_backend("http://ollama.test:11434") == BACKEND_OPENAI_COMPAT
+    assert llm_provider._backend_cache == {}
     s.version = ollama_version
     assert await detect_backend("http://ollama.test:11434") == BACKEND_OLLAMA
     assert s.version_calls == 2
@@ -221,3 +234,61 @@ async def test_narrative_byok_openai_never_probes(monkeypatch):
     assert s.version_calls == 0
     assert s.native_calls == 0
     assert s.paths == ["POST /v1/chat/completions"]
+
+
+class HostServer(Server):
+    """Server whose /api/version answer depends on the request host."""
+
+    def __init__(self, by_host):
+        super().__init__(lambda r: by_host[r.url.host](r))
+        self.version_hosts: list[str] = []
+
+    async def handler(self, request):
+        if request.url.path == "/api/version":
+            self.version_hosts.append(request.url.host)
+        return await super().handler(request)
+
+
+def host_server(monkeypatch, own, platform) -> HostServer:
+    s = HostServer({"own.test": own, httpx.URL(get_settings().kobold_url).host: platform})
+    monkeypatch.setattr(llm_provider, "_transport", httpx.MockTransport(s.handler))
+    return s
+
+
+async def test_narrative_byok_kobold_probes_own_url_ollama(monkeypatch):
+    from app.services import ai_service
+
+    s = host_server(monkeypatch, own=ollama_version, platform=not_found)
+    cfg = LLMConfig(provider="kobold", api_url="http://own.test:11434")
+    assert await ai_service.generate_narrative("We met a dragon.", config=cfg) == "A tale."
+    assert s.native_calls == 0
+    assert s.version_hosts == ["own.test"]
+
+
+async def test_narrative_byok_kobold_probes_own_url_koboldcpp(monkeypatch):
+    from app.services import ai_service
+
+    s = host_server(monkeypatch, own=not_found, platform=ollama_version)
+    cfg = LLMConfig(provider="kobold", api_url="http://own.test:11434")
+    assert await ai_service.generate_narrative("We met a dragon.", config=cfg) == "A tale."
+    assert s.native_calls == 3
+    assert s.version_hosts == ["own.test"]
+
+
+async def test_narrative_no_config_probes_kobold_url(monkeypatch, gate):
+    from app.services import ai_service
+
+    urls = []
+    s = Server(ollama_version)
+
+    async def handler(request):
+        if request.url.path == "/api/version":
+            urls.append(str(request.url))
+        return await s.handler(request)
+
+    monkeypatch.setattr(llm_provider, "_transport", httpx.MockTransport(handler))
+    assert await ai_service.generate_narrative("We met a dragon.") == "A tale."
+    assert urls == [get_settings().kobold_url.rstrip("/") + "/api/version"]
+    assert s.native_calls == 0
+    assert s.chat_calls == 1
+    assert gate.acquired == [GateClass.gm_interactive]

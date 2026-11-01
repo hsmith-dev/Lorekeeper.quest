@@ -53,9 +53,10 @@ async def detect_backend(api_url: str | None) -> str:
     BACKEND_OPENAI_COMPAT. Empty/None api_url = settings.kobold_url.
 
     Any answered probe (404, HTML from KoboldCpp, ...) is cached for the
-    process. A transport error or timeout returns BACKEND_OPENAI_COMPAT
-    without caching it, so an Ollama that was still starting is detected on
-    a later call. Never touches the gate and never raises."""
+    process. A transport error, a timeout or a 5xx answer (e.g. a proxy's 502
+    while Ollama is still starting) returns BACKEND_OPENAI_COMPAT without
+    caching it, so an Ollama that was still starting is detected on a later
+    call. Never touches the gate and never raises."""
     base = (api_url or get_settings().kobold_url).rstrip("/")
     cached = _backend_cache.get(base)
     if cached is not None:
@@ -65,6 +66,9 @@ async def detect_backend(api_url: str | None) -> str:
             r = await client.get(f"{base}/api/version")
     except Exception:
         # Down, timed out, or a broken handler: no answer, so don't cache.
+        return BACKEND_OPENAI_COMPAT
+    if r.status_code >= 500:
+        # Server-side trouble, not an answer about what the backend is.
         return BACKEND_OPENAI_COMPAT
     result = BACKEND_OPENAI_COMPAT
     if r.is_success:

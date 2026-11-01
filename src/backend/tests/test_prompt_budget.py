@@ -68,8 +68,13 @@ def test_window_is_context_minus_reserve():
     assert window_tokens("chat", 2048) == 2048 - policy_for("chat").reserved_output
 
 
-def test_default_context_length():
-    assert get_settings().ollama_context_length == 4096
+def test_default_context_length(monkeypatch):
+    from app.core.config import Settings
+
+    monkeypatch.delenv("OLLAMA_CONTEXT_LENGTH", raising=False)
+    s = Settings(_env_file=None, database_url="postgresql+asyncpg://u:p@localhost/x_test",
+                 postgres_password="p", secret_key="s")
+    assert s.ollama_context_length == 4096
 
 
 @pytest.mark.parametrize("call", [

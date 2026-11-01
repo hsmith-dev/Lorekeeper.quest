@@ -78,7 +78,9 @@ class Settings(BaseSettings):
     # their prompts under this minus the task's reserved output
     # (app/services/prompt_budget.py), since per-call num_ctx is stripped and
     # anything over it would be cut off by Ollama without telling us.
-    ollama_context_length: int = Field(4096, ge=256)
+    # Must exceed every TASK_POLICIES reserved_output (largest 1024), or a
+    # task's window would be zero or negative.
+    ollama_context_length: int = Field(4096, ge=2048)
     # Where the admin model installer stages the ~4.4GB fine-tune GGUF while
     # it downloads it from Hugging Face and hands it to Ollama (see
     # ollama_service.install_finetuned_events). Unset = the system temp dir.

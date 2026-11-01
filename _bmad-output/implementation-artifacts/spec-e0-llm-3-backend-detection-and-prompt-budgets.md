@@ -2,14 +2,28 @@
 title: 'E0-LLM.3: Backend detection and prompt budgets'
 type: 'feature'
 created: '2026-11-01'
-status: 'in-review'
+status: 'done'
 baseline_revision: '2b74d89798a9d9ed3e96c125eeec0a4897d39df8'
 review_loop_iteration: 0
-followup_review_recommended: false
+followup_review_recommended: true
 context:
   - '{project-root}/_bmad-output/implementation-artifacts/epic-6-context.md'
 warnings: [oversized]
-deferred: []
+deferred:
+  - summary: >-
+      The compose ollama service is not given OLLAMA_CONTEXT_LENGTH, so the budget's 4096 may not match the server's real window.
+    evidence: |-
+      docker-compose.prod.yml's ollama service sets only OLLAMA_MAX_LOADED_MODELS and OLLAMA_KEEP_ALIVE; .env goes to the backend only. Ollama's built-in default has varied by version (2048 on older releases). E0-Platform.7 owns the ollama env (OLLAMA_CONTEXT_LENGTH=4096, NUM_PARALLEL=1, MAX_LOADED_MODELS=1), so the fix lands there.
+    location: >-
+      docker-compose.prod.yml (ollama service environment)
+    severity: medium
+  - summary: >-
+      The chars/3.2 estimate under-counts text with fewer characters per token (CJK, emoji, dense code), which could overflow the window.
+    evidence: |-
+      estimate_tokens uses one ratio for every code point; CJK is roughly 1 to 1.5 chars/token on Mistral's tokenizer. The intent fixes the formula and gives calibration to E0-LLM.6 (SPIKE-6 prompt_eval_count), which is where a per-script adjustment belongs.
+    location: >-
+      src/backend/app/services/prompt_budget.py (estimate_tokens)
+    severity: medium
 ---
 
 <intent-contract>
@@ -83,6 +97,41 @@ deferred: []
 ## Spec Change Log
 
 ## Review Triage Log
+
+### 2026-11-01 — Review pass
+- verdicts: 31 findings — high 0, medium 6, low 18, false 5, maybe-false 2
+- findings:
+  - `[false]` `[reject]` (blind) No prompt builder uses fit yet — the story's technical notes scope the fix to "callers that adopt fit" and move summarize_session_transcript to E4.7; feature epics adopt it.
+  - `[medium]` `[defer]` (blind) OLLAMA_CONTEXT_LENGTH isn't passed to the Ollama container — real; the ollama env is owned by E0-Platform.7 (epics.md:1353). Deferred.
+  - `[low]` `[reject]` (blind) Trimming history can break role alternation — Ollama's Go templates don't reject non-alternating roles. The fix (pair-wise drops) adds branching for an unshown failure.
+  - `[low]` `[patch]` (blind) Context length can be below the reserves, giving a window of zero or less — ollama_context_length is now ge=2048, with a comment.
+  - `[low]` `[reject]` (blind) map_reduce has no context_length — it adds public surface; no caller needs it yet.
+  - `[low]` `[reject]` (blind) map_reduce has no round cap — a reduce that shrinks by one token per round isn't a realistic LLM behaviour; the no-shrink guard stops the real failure.
+  - `[low]` `[reject]` (blind) The backend cache never expires and is unbounded — the intent says the result is cached for the process lifetime; entries are tiny, one per distinct kobold URL.
+  - `[low]` `[reject]` (blind) A down backend costs a probe on every call — connection-refused fails at once, and the call is failing anyway; negative caching adds state for an outage path.
+  - `[maybe-false]` `[reject]` (blind) Something that mimics Ollama's /api/version is taken for Ollama — the intent defines detection as /api/version succeeding. If true, the call still works through chat completions, so it would only be low. Settled by probing KoboldCpp's Ollama emulation on the desktop.
+  - `[low]` `[patch]` (blind) generate_narrative's config=None and BYOK-kobold branches are untested — tests added (grouped with the verification-gap row).
+  - `[low]` `[patch]` (blind) test_default_context_length depends on the environment — it now builds Settings(_env_file=None) after delenv.
+  - `[false]` `[reject]` (blind) estimate_messages assumes string content — every message builder in app/ uses string content; no list-part content exists.
+  - `[false]` `[reject]` (blind) The spec isn't in the diff — the spec was deliberately kept out of the review diff; PromptBudgetError already exists on main.
+  - `[medium]` `[patch]` (edge) A 5xx probe answer was cached — a 5xx now returns openai_compat uncached; test added.
+  - `[low]` `[reject]` (edge) A stale cache after a backend swap — same as the blind cache row (process lifetime is the intent).
+  - `[low]` `[reject]` (edge) An unbounded cache from BYOK URLs — same as the blind cache row.
+  - `[maybe-false]` `[reject]` (edge) KoboldCpp's Ollama emulation is misread as Ollama — same as the blind mimic row.
+  - `[low]` `[patch]` (edge) Context length set between 256 and the reserves — same fix as the blind row (ge=2048).
+  - `[low]` `[reject]` (edge) Empty PromptParts give [] — a caller bug that fails loudly at the provider; a guard adds a branch for no shown caller.
+  - `[low]` `[reject]` (edge) drop_oldest leaves an assistant turn first — same as the blind alternation row.
+  - `[false]` `[reject]` (edge) List content under-counted — same refutation as the blind row.
+  - `[medium]` `[defer]` (edge) The CJK/emoji estimate is too low — real for non-English text; the formula is fixed by the intent and calibrated in E0-LLM.6. Deferred.
+  - `[low]` `[reject]` (edge) overhead_tokens defaults to 0 — reduce_fn's own call goes through fit, which raises rather than truncating, so nothing is silently lost.
+  - `[low]` `[reject]` (edge) map_fn returning None — a caller bug that fails loudly with TypeError.
+  - `[low]` `[reject]` (edge) map_reduce has no context_length — same as the blind row.
+  - `[medium]` `[patch]` (verification-gap) The probe URL for a user's own kobold endpoint is untested — tests added for both directions (own.test Ollama / KOBOLD_URL KoboldCpp, and the mirror), plus config=None.
+  - `[medium]` `[defer]` (verification-gap other) Ollama is never given the context length — same as the blind compose row; deferred to E0-Platform.7.
+  - `[low]` `[reject]` (verification-gap other) The cache never forgets a URL — same as the blind cache row.
+  - `[low]` `[patch]` (verification-gap other) A test depends on the local .env — same fix as the blind row.
+  - `[false]` `[reject]` (intent) Prompt builders don't adopt fit (reading R2) — the story's technical notes choose R1 ("for callers that adopt fit"; migration in E4.7).
+  - `[medium]` `[defer]` (intent) The app's context length isn't tied to the server's — same as the compose row; E0-Platform.7.
 
 ## Design Notes
 
