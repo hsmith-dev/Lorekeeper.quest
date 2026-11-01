@@ -56,6 +56,11 @@ class Settings(BaseSettings):
     # the capstone proposal's stretch goal, which previously only had the
     # fine-tuned model reachable anywhere in production.
     kobold_base_model: str = "lorekeeper-base"
+    # Where the admin model installer stages the ~4.4GB fine-tune GGUF while
+    # it downloads it from Hugging Face and hands it to Ollama (see
+    # ollama_service.install_finetuned_events). Unset = the system temp dir.
+    # The file is deleted as soon as the install finishes or fails.
+    llm_download_dir: str | None = None
 
     # App
     environment: str = "development"

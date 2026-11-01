@@ -365,7 +365,7 @@ async def model_library() -> ModelLibraryResponse:
         finetuned=ManagedModelStatus(
             name=s.kobold_model,
             installed=ollama_service.model_installed(s.kobold_model, status["models"]),
-            source=f"Hugging Face · {ollama_service.HF_FINETUNED_REF}",
+            source=f"Hugging Face · {ollama_service.HF_REPO}/{ollama_service.HF_GGUF_FILENAME}",
         ),
         base=ManagedModelStatus(
             name=s.kobold_base_model,
@@ -377,8 +377,9 @@ async def model_library() -> ModelLibraryResponse:
 
 @router.post("/models/install")
 async def install_model(body: ModelInstallRequest):
-    """SSE stream of install progress — pull from the public registry, then
-    register under the name the app expects. The X-Accel-Buffering header is
+    """SSE stream of install progress — fetch from the public registry
+    (fine-tune: GGUF download from Hugging Face + Ollama blob upload; base:
+    Ollama library pull), then register under the name the app expects. The X-Accel-Buffering header is
     what makes the progress bar live through nginx without a dedicated
     proxy_buffering-off location block."""
     import json as _json
