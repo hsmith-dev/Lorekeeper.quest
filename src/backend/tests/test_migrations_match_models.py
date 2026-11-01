@@ -1,10 +1,9 @@
 """The schema the suite runs on comes from the Alembic migrations (conftest's
 setup_test_db). These tests check that the migrations and the models agree,
-and cover the edge cases of building that schema.
-
-The last test rebuilds the session schema, so it stays at the bottom of the file.
+and cover the edge cases of building that schema. The rebuild-from-leftovers
+test is in test_zz_schema_rebuild.py so that it runs after every other file.
 """
-import asyncio
+import logging
 import os
 
 import sqlalchemy as sa
@@ -16,12 +15,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.core.config import get_settings
 from app.db.base import Base
-from tests.conftest import (
-    TEST_DB_URL,
-    _guard_test_database,
-    alembic_config,
-    build_test_schema,
-)
+from tests.conftest import TEST_DB_URL, alembic_config
 
 # Known model/migration drift that is deliberately not fixed here. Each entry is
 # (diff kind, table, columns) and matches one autogenerate diff.
@@ -52,6 +46,11 @@ def _unexpected(diffs):
     return [d for d in diffs if _diff_key(d) not in IGNORED_DIFFS]
 
 
+# The options match autogenerate's defaults: compare_type on, server defaults
+# off. With compare_server_default=True there are 12 more known diffs, where
+# the migrations set server defaults the models lack (users.is_admin,
+# user_settings.llm_provider, ...). They don't change what the app writes, and
+# closing them means editing the models, which is outside E0-QA.5.
 async def _diffs_against(metadata):
     engine = create_async_engine(TEST_DB_URL)
     try:
@@ -134,25 +133,15 @@ def test_env_is_set_before_app_import():
     assert get_settings().environment == "test"
 
 
-# Keep last: rebuilds the session schema.
-def test_build_recovers_from_leftover_tables():
-    async def _leave_leftovers():
-        engine = create_async_engine(TEST_DB_URL)
-        try:
-            async with engine.begin() as conn:
-                await conn.execute(sa.text("CREATE TABLE zz_leftover_create_all (id int)"))
-                await conn.execute(sa.text("DELETE FROM alembic_version"))
-        finally:
-            await engine.dispose()
+def test_migration_run_keeps_app_loggers():
+    # Programmatic runs make env.py skip alembic.ini's fileConfig. Its default
+    # disable_existing_loggers=True would silence every app logger and replace
+    # the root handlers for the rest of the session.
+    app_logger = logging.getLogger("app.main")  # created when app.main was imported
+    root_handlers = list(logging.getLogger().handlers)
 
-    asyncio.run(_leave_leftovers())
+    command.current(alembic_config(TEST_DB_URL))
 
-    _guard_test_database(TEST_DB_URL)
-    build_test_schema(TEST_DB_URL)
+    assert app_logger.disabled is False
+    assert logging.getLogger().handlers == root_handlers
 
-    assert asyncio.run(_scalar("SELECT to_regclass('public.zz_leftover_create_all')")) is None
-    assert asyncio.run(_scalar("SELECT version_num FROM alembic_version")) == _script_head()
-    assert (
-        asyncio.run(_scalar("SELECT open_access_mode FROM app_config WHERE id = 1"))
-        == get_settings().open_access_mode
-    )
