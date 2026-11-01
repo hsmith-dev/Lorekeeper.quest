@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import * as api from "../services/api";
+import { setPreviewCampaignId } from "@/lib/preview";
 import type { AuthToken } from "../types";
 
 export function useAuth() {
@@ -44,6 +45,7 @@ export function useAuth() {
   const logout = () => {
     localStorage.removeItem("lk_token");
     localStorage.removeItem("lk_user");
+    setPreviewCampaignId(null);
     navigate("/login");
   };
 

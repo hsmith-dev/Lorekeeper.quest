@@ -213,7 +213,7 @@ export function SlideOver({ open, onClose, title, children, size = "default", na
         role="dialog"
         aria-modal="true"
         aria-labelledby={headingId}
-        className={`fixed inset-y-0 right-0 z-50 w-full ${widthClass} bg-background border-l border-border flex flex-col shadow-2xl transition-[transform,visibility] duration-300 ease-in-out ${open ? "translate-x-0 visible" : "translate-x-full invisible"}`}
+        className={`fixed top-[var(--lk-preview-offset,0px)] bottom-0 right-0 z-50 w-full ${widthClass} bg-background border-l border-border flex flex-col shadow-2xl transition-[transform,visibility] duration-300 ease-in-out ${open ? "translate-x-0 visible" : "translate-x-full invisible"}`}
       >
         <div className="sticky top-0 z-10 flex items-center justify-between px-5 py-4 border-b border-border bg-background shrink-0">
           <div className="min-w-0 flex flex-col items-start gap-1">

@@ -278,13 +278,13 @@ export function ChatPage() {
   );
 
   return (
-    <div className="max-w-5xl mx-auto px-4 py-6 flex flex-col" style={{ height: "calc(100dvh - 3.5rem)" }}>
+    <div className="max-w-5xl mx-auto px-4 py-6 flex flex-col" style={{ height: "calc(100dvh - 3.5rem - var(--lk-preview-offset, 0px))" }}>
       {/* Mobile sidebar overlay */}
       {sidebarOpen && (
         <div className="fixed inset-0 z-40 md:hidden" onClick={() => setSidebarOpen(false)}>
           <div className="absolute inset-0 bg-background/80 backdrop-blur-sm" />
           <div
-            className="absolute left-0 top-14 bottom-0 w-72 bg-background border-r border-border"
+            className="absolute left-0 top-[calc(3.5rem+var(--lk-preview-offset,0px))] bottom-0 w-72 bg-background border-r border-border"
             onClick={(e) => e.stopPropagation()}
           >
             {Sidebar}
