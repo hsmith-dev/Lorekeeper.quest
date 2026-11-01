@@ -192,6 +192,40 @@ services:
         limits:
           cpus: "2.0"
           memory: 14g
+    # `default` for postgres/redis/ollama/nginx, `models` to reach the ml
+    # sidecar.
+    networks:
+      - default
+      - models
+
+  # Shared embeddings + NER sidecar (src/services/ml): one copy of MiniLM and
+  # en_core_web_trf instead of one per gunicorn worker. Not exposed to the
+  # host and no nginx route — only on the internal `models` network, where
+  # the backend reaches it at ML_URL (default http://ml:8000). Nothing calls
+  # it yet (E0-Platform.6 switches the callers over). Weights are baked into
+  # the image; it runs offline.
+  ml:
+    # Tagged so scripts/sidecar_smoke.sh ml finds it by its default name.
+    image: lorekeeper-ml:latest
+    build:
+      context: ./src/services/ml
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    networks:
+      - models
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=4)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 180s
+    # Provisional ceiling: MiniLM + en_core_web_trf in one process; measured
+    # limits come with E0-Platform.7. Override with ML_MEM_LIMIT in .env.
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: ${ML_MEM_LIMIT:-2560m}
 
   nginx:
     build:
@@ -219,6 +253,12 @@ services:
         limits:
           cpus: "0.5"
           memory: 256m
+
+networks:
+  # internal: no route out of the network and no host port publishing, so
+  # the ml sidecar can talk to the backend and nothing else.
+  models:
+    internal: true
 
 volumes:
   postgres_data:

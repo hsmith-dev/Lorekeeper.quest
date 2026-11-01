@@ -41,11 +41,12 @@ entries:
     license: PSF-2.0
     source_url: https://hub.docker.com/_/python
     editions: [agpl, commercial]
-    images: [backend]
+    images: [backend, ml]
     notes: >-
-      Base of src/backend/Dockerfile(.prod). Covers CPython only; the Debian
-      packages inside the image (and apt installs: build-essential, libpq-dev)
-      are scanned by E0-QA.8 (dpkg-query + copyright files).
+      Base of src/backend/Dockerfile(.prod) and src/services/ml/Dockerfile.
+      Covers CPython only; the Debian packages inside the image (and the
+      backend's apt installs: build-essential, libpq-dev; the ml image adds
+      none) are scanned by E0-QA.8 (dpkg-query + copyright files).
   - name: pgvector/pgvector
     kind: image
     version: "pg16"
@@ -341,8 +342,12 @@ entries:
     download: https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/1110a243fdf4706b3f48f1d95db1a4f5529b4d41/model.safetensors
     sha256: 53aa51172d142c89d9012cce15ae4d6cc0ca6895895114379cacb4fab128d9db
     editions: [agpl, commercial]
-    images: [backend]
-    notes: Embeddings (app/services/embedding_service.py). Downloaded by sentence-transformers on first use; sha256 is model.safetensors.
+    images: [backend, ml]
+    notes: >-
+      Embeddings (app/services/embedding_service.py). Backend: downloaded by
+      sentence-transformers on first use. ml: baked at this revision by
+      src/services/ml/bake_models.py, which verifies the sha256
+      (model.safetensors).
   - name: en_core_web_trf
     kind: model
     version: "3.7.3"
@@ -356,6 +361,21 @@ entries:
     notes: >-
       spaCy NER (app/services/nlp_service.py), baked into the backend image by
       `spacy download` in the Dockerfile (3.7.3 is what spacy 3.7.6 resolves).
+      Ships as a pip package, so image scans match it via pip_package. Based on
+      roberta-base (MIT).
+  - name: en_core_web_trf
+    kind: model
+    version: "3.8.0"
+    license: MIT
+    source_url: https://github.com/explosion/spacy-models/releases/tag/en_core_web_trf-3.8.0
+    download: https://github.com/explosion/spacy-models/releases/download/en_core_web_trf-3.8.0/en_core_web_trf-3.8.0-py3-none-any.whl
+    sha256: 272a31e9d8530d1e075351d30a462d7e80e31da23574f1b274e200f3fff35bf5
+    pip_package: en-core-web-trf
+    editions: [agpl, commercial]
+    images: [ml]
+    notes: >-
+      spaCy NER in the ml sidecar (src/services/ml), installed from
+      src/services/ml/requirements.txt as a hash-pinned wheel (spacy 3.8.18).
       Ships as a pip package, so image scans match it via pip_package. Based on
       roberta-base (MIT).
   - name: whisper-base
@@ -518,23 +538,25 @@ entries:
 
   # ---- python: CI CPU-torch install of src/backend/requirements.txt (+ baked model deps) ----
   - {name: "alembic", kind: python, version: "1.13.3", license: "MIT", source_url: "https://pypi.org/project/alembic/", editions: [agpl, commercial], images: [backend], notes: ""}
-  - {name: "annotated-doc", kind: python, version: "0.0.5", license: "MIT", source_url: "https://pypi.org/project/annotated-doc/", editions: [agpl, commercial], images: [backend], notes: ""}
-  - {name: "annotated-types", kind: python, version: "0.8.0", license: "MIT", source_url: "https://pypi.org/project/annotated-types/", editions: [agpl, commercial], images: [backend], notes: ""}
-  - {name: "anyio", kind: python, version: "4.15.1", license: "MIT", source_url: "https://pypi.org/project/anyio/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "annotated-doc", kind: python, version: "0.0.5", license: "MIT", source_url: "https://pypi.org/project/annotated-doc/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
+  - {name: "annotated-types", kind: python, version: "0.8.0", license: "MIT", source_url: "https://pypi.org/project/annotated-types/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
+  - {name: "anyio", kind: python, version: "4.15.1", license: "MIT", source_url: "https://pypi.org/project/anyio/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
   - {name: "async-timeout", kind: python, version: "5.0.1", license: "Apache-2.0", source_url: "https://pypi.org/project/async-timeout/", editions: [agpl, commercial], images: [backend], notes: ""}
   - {name: "asyncpg", kind: python, version: "0.29.0", license: "Apache-2.0", source_url: "https://pypi.org/project/asyncpg/", editions: [agpl, commercial], images: [backend], notes: ""}
   - {name: "bcrypt", kind: python, version: "4.2.0", license: "Apache-2.0", source_url: "https://pypi.org/project/bcrypt/", editions: [agpl, commercial], images: [backend], notes: ""}
   - {name: "blis", kind: python, version: "0.7.11", license: "BSD-3-Clause", source_url: "https://pypi.org/project/blis/", editions: [agpl, commercial], images: [backend], notes: ""}
-  - {name: "catalogue", kind: python, version: "2.0.10", license: "MIT", source_url: "https://pypi.org/project/catalogue/", editions: [agpl, commercial], images: [backend], notes: ""}
-  - {name: "certifi", kind: python, version: "2026.10.23", license: "MPL-2.0", source_url: "https://pypi.org/project/certifi/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "blis", kind: python, version: "1.3.4", license: "BSD-3-Clause", source_url: "https://pypi.org/project/blis/", editions: [agpl, commercial], images: [ml], notes: "ml sidecar (src/services/ml) lock; spaCy 3.8 stack, see E0-Platform.3. Metadata says 'BSD' (alias)."}
+  - {name: "catalogue", kind: python, version: "2.0.10", license: "MIT", source_url: "https://pypi.org/project/catalogue/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
+  - {name: "certifi", kind: python, version: "2026.10.23", license: "MPL-2.0", source_url: "https://pypi.org/project/certifi/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
   - {name: "cffi", kind: python, version: "2.1.1", license: "MIT-0", source_url: "https://pypi.org/project/cffi/", editions: [agpl, commercial], images: [backend], notes: ""}
-  - {name: "charset-normalizer", kind: python, version: "3.5.2", license: "MIT", source_url: "https://pypi.org/project/charset-normalizer/", editions: [agpl, commercial], images: [backend], notes: ""}
-  - {name: "click", kind: python, version: "8.5.0", license: "BSD-3-Clause", source_url: "https://pypi.org/project/click/", editions: [agpl, commercial], images: [backend], notes: ""}
-  - {name: "cloudpathlib", kind: python, version: "0.26.0", license: "MIT", source_url: "https://pypi.org/project/cloudpathlib/", editions: [agpl, commercial], images: [backend], notes: ""}
-  - {name: "cloudpickle", kind: python, version: "3.1.2", license: "BSD-3-Clause", source_url: "https://pypi.org/project/cloudpickle/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "charset-normalizer", kind: python, version: "3.5.2", license: "MIT", source_url: "https://pypi.org/project/charset-normalizer/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
+  - {name: "click", kind: python, version: "8.5.0", license: "BSD-3-Clause", source_url: "https://pypi.org/project/click/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
+  - {name: "cloudpathlib", kind: python, version: "0.26.0", license: "MIT", source_url: "https://pypi.org/project/cloudpathlib/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
+  - {name: "cloudpickle", kind: python, version: "3.1.2", license: "BSD-3-Clause", source_url: "https://pypi.org/project/cloudpickle/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
   - {name: "confection", kind: python, version: "0.1.5", license: "MIT", source_url: "https://pypi.org/project/confection/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "confection", kind: python, version: "1.3.4", license: "MIT", source_url: "https://pypi.org/project/confection/", editions: [agpl, commercial], images: [ml], notes: "ml sidecar (src/services/ml) lock; spaCy 3.8 stack, see E0-Platform.3."}
   - {name: "cryptography", kind: python, version: "50.0.2", license: "Apache-2.0 OR BSD-3-Clause", source_url: "https://pypi.org/project/cryptography/", editions: [agpl, commercial], images: [backend], notes: ""}
-  - {name: "cymem", kind: python, version: "2.0.16", license: "MIT", source_url: "https://pypi.org/project/cymem/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "cymem", kind: python, version: "2.0.16", license: "MIT", source_url: "https://pypi.org/project/cymem/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
   - {name: "defusedxml", kind: python, version: "0.7.1", license: "PSF-2.0", source_url: "https://pypi.org/project/defusedxml/", editions: [agpl, commercial], images: [backend], notes: ""}
   - {name: "Deprecated", kind: python, version: "1.3.1", license: "MIT", source_url: "https://pypi.org/project/Deprecated/", editions: [agpl, commercial], images: [backend], notes: ""}
   - {name: "dnspython", kind: python, version: "2.9.1", license: "ISC", source_url: "https://pypi.org/project/dnspython/", editions: [agpl, commercial], images: [backend], notes: ""}
@@ -542,112 +564,120 @@ entries:
   - {name: "ecdsa", kind: python, version: "0.19.2", license: "MIT", source_url: "https://pypi.org/project/ecdsa/", editions: [agpl, commercial], images: [backend], notes: ""}
   - {name: "email-validator", kind: python, version: "2.3.0", license: "Unlicense", source_url: "https://pypi.org/project/email-validator/", editions: [agpl, commercial], images: [backend], notes: ""}
   - {name: "fakeredis", kind: python, version: "2.26.2", license: "BSD-3-Clause", source_url: "https://pypi.org/project/fakeredis/", editions: [agpl, commercial], notes: "dev/test only (requirements-dev.txt); not shipped"}
-  - {name: "fastapi", kind: python, version: "0.115.0", license: "MIT", source_url: "https://pypi.org/project/fastapi/", editions: [agpl, commercial], images: [backend], notes: ""}
-  - {name: "filelock", kind: python, version: "4.2.6", license: "MIT", source_url: "https://pypi.org/project/filelock/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "fastapi", kind: python, version: "0.115.0", license: "MIT", source_url: "https://pypi.org/project/fastapi/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
+  - {name: "filelock", kind: python, version: "4.2.6", license: "MIT", source_url: "https://pypi.org/project/filelock/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
   - {name: "fonttools", kind: python, version: "4.68.0", license: "MIT", source_url: "https://pypi.org/project/fonttools/", editions: [agpl, commercial], images: [backend], notes: ""}
   - {name: "fpdf2", kind: python, version: "2.8.7", license: "LGPL-3.0-only", source_url: "https://pypi.org/project/fpdf2/", editions: [agpl, commercial], images: [backend], notes: "Direct dep (PDF export). LGPL-3.0, imported unmodified; owner-approved [[exception]] (OWNER TO CONFIRM, E0-QA.9). E8 replaces it with WeasyPrint."}
-  - {name: "fsspec", kind: python, version: "2026.9.0", license: "BSD-3-Clause", source_url: "https://pypi.org/project/fsspec/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "fsspec", kind: python, version: "2026.9.0", license: "BSD-3-Clause", source_url: "https://pypi.org/project/fsspec/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
   - {name: "greenlet", kind: python, version: "3.5.6", license: "MIT AND PSF-2.0", source_url: "https://pypi.org/project/greenlet/", editions: [agpl, commercial], images: [backend], notes: ""}
   - {name: "gunicorn", kind: python, version: "23.0.0", license: "MIT", source_url: "https://pypi.org/project/gunicorn/", editions: [agpl, commercial], images: [backend], notes: ""}
-  - {name: "h11", kind: python, version: "0.16.0", license: "MIT", source_url: "https://pypi.org/project/h11/", editions: [agpl, commercial], images: [backend], notes: ""}
-  - {name: "hf-xet", kind: python, version: "1.8.0", license: "Apache-2.0", source_url: "https://pypi.org/project/hf-xet/", editions: [agpl, commercial], images: [backend], notes: ""}
-  - {name: "httpcore", kind: python, version: "1.0.9", license: "BSD-3-Clause", source_url: "https://pypi.org/project/httpcore/", editions: [agpl, commercial], images: [backend], notes: ""}
-  - {name: "httpcore2", kind: python, version: "2.16.0", license: "BSD-3-Clause", source_url: "https://pypi.org/project/httpcore2/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "h11", kind: python, version: "0.16.0", license: "MIT", source_url: "https://pypi.org/project/h11/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
+  - {name: "hf-xet", kind: python, version: "1.8.0", license: "Apache-2.0", source_url: "https://pypi.org/project/hf-xet/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
+  - {name: "httpcore", kind: python, version: "1.0.9", license: "BSD-3-Clause", source_url: "https://pypi.org/project/httpcore/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
+  - {name: "httpcore2", kind: python, version: "2.16.0", license: "BSD-3-Clause", source_url: "https://pypi.org/project/httpcore2/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
   - {name: "httptools", kind: python, version: "0.9.0", license: "MIT", source_url: "https://pypi.org/project/httptools/", editions: [agpl, commercial], images: [backend], notes: ""}
   - {name: "httpx", kind: python, version: "0.27.2", license: "BSD-3-Clause", source_url: "https://pypi.org/project/httpx/", editions: [agpl, commercial], images: [backend], notes: ""}
-  - {name: "httpx2", kind: python, version: "2.16.0", license: "BSD-3-Clause", source_url: "https://pypi.org/project/httpx2/", editions: [agpl, commercial], images: [backend], notes: ""}
-  - {name: "huggingface_hub", kind: python, version: "2.4.0", license: "Apache-2.0", source_url: "https://pypi.org/project/huggingface_hub/", editions: [agpl, commercial], images: [backend], notes: ""}
-  - {name: "idna", kind: python, version: "3.20", license: "BSD-3-Clause", source_url: "https://pypi.org/project/idna/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "httpx", kind: python, version: "0.28.1", license: "BSD-3-Clause", source_url: "https://pypi.org/project/httpx/", editions: [agpl, commercial], images: [ml], notes: "ml sidecar (src/services/ml) lock; spaCy 3.8 stack, see E0-Platform.3."}
+  - {name: "httpx2", kind: python, version: "2.16.0", license: "BSD-3-Clause", source_url: "https://pypi.org/project/httpx2/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
+  - {name: "huggingface_hub", kind: python, version: "2.4.0", license: "Apache-2.0", source_url: "https://pypi.org/project/huggingface_hub/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
+  - {name: "idna", kind: python, version: "3.20", license: "BSD-3-Clause", source_url: "https://pypi.org/project/idna/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
   - {name: "ImageIO", kind: python, version: "2.38.1", license: "BSD-2-Clause", source_url: "https://pypi.org/project/ImageIO/", editions: [agpl, commercial], images: [backend], notes: ""}
-  - {name: "Jinja2", kind: python, version: "3.1.6", license: "BSD-3-Clause", source_url: "https://pypi.org/project/Jinja2/", editions: [agpl, commercial], images: [backend], notes: ""}
-  - {name: "joblib", kind: python, version: "1.6.0", license: "BSD-3-Clause", source_url: "https://pypi.org/project/joblib/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "Jinja2", kind: python, version: "3.1.6", license: "BSD-3-Clause", source_url: "https://pypi.org/project/Jinja2/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
+  - {name: "joblib", kind: python, version: "1.6.0", license: "BSD-3-Clause", source_url: "https://pypi.org/project/joblib/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
   - {name: "langcodes", kind: python, version: "3.5.1", license: "MIT", source_url: "https://pypi.org/project/langcodes/", editions: [agpl, commercial], images: [backend], notes: ""}
   - {name: "lazy-loader", kind: python, version: "0.6", license: "BSD-3-Clause", source_url: "https://pypi.org/project/lazy-loader/", editions: [agpl, commercial], images: [backend], notes: ""}
   - {name: "limits", kind: python, version: "5.8.0", license: "MIT", source_url: "https://pypi.org/project/limits/", editions: [agpl, commercial], images: [backend], notes: ""}
   - {name: "llvmlite", kind: python, version: "0.50.0", license: "BSD-2-Clause AND Apache-2.0 WITH LLVM-exception", source_url: "https://pypi.org/project/llvmlite/", editions: [agpl, commercial], images: [backend], notes: ""}
   - {name: "lupa", kind: python, version: "2.8", license: "MIT", source_url: "https://pypi.org/project/lupa/", editions: [agpl, commercial], notes: "dev/test only (requirements-dev.txt); not shipped"}
   - {name: "Mako", kind: python, version: "1.4.3", license: "MIT", source_url: "https://pypi.org/project/Mako/", editions: [agpl, commercial], images: [backend], notes: ""}
-  - {name: "markdown-it-py", kind: python, version: "4.2.0", license: "MIT", source_url: "https://pypi.org/project/markdown-it-py/", editions: [agpl, commercial], images: [backend], notes: ""}
-  - {name: "MarkupSafe", kind: python, version: "3.0.4", license: "BSD-3-Clause", source_url: "https://pypi.org/project/MarkupSafe/", editions: [agpl, commercial], images: [backend], notes: ""}
-  - {name: "mdurl", kind: python, version: "0.1.2", license: "MIT", source_url: "https://pypi.org/project/mdurl/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "markdown-it-py", kind: python, version: "4.2.0", license: "MIT", source_url: "https://pypi.org/project/markdown-it-py/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
+  - {name: "MarkupSafe", kind: python, version: "3.0.4", license: "BSD-3-Clause", source_url: "https://pypi.org/project/MarkupSafe/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
+  - {name: "mdurl", kind: python, version: "0.1.2", license: "MIT", source_url: "https://pypi.org/project/mdurl/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
   - {name: "more-itertools", kind: python, version: "11.2.1", license: "MIT", source_url: "https://pypi.org/project/more-itertools/", editions: [agpl, commercial], images: [backend], notes: ""}
-  - {name: "mpmath", kind: python, version: "1.3.0", license: "BSD-3-Clause", source_url: "https://pypi.org/project/mpmath/", editions: [agpl, commercial], images: [backend], notes: ""}
-  - {name: "murmurhash", kind: python, version: "1.0.16", license: "MIT", source_url: "https://pypi.org/project/murmurhash/", editions: [agpl, commercial], images: [backend], notes: ""}
-  - {name: "narwhals", kind: python, version: "2.28.0", license: "MIT", source_url: "https://pypi.org/project/narwhals/", editions: [agpl, commercial], images: [backend], notes: ""}
-  - {name: "networkx", kind: python, version: "3.6.1", license: "BSD-3-Clause", source_url: "https://pypi.org/project/networkx/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "mpmath", kind: python, version: "1.3.0", license: "BSD-3-Clause", source_url: "https://pypi.org/project/mpmath/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
+  - {name: "murmurhash", kind: python, version: "1.0.16", license: "MIT", source_url: "https://pypi.org/project/murmurhash/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
+  - {name: "narwhals", kind: python, version: "2.28.0", license: "MIT", source_url: "https://pypi.org/project/narwhals/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
+  - {name: "networkx", kind: python, version: "3.6.1", license: "BSD-3-Clause", source_url: "https://pypi.org/project/networkx/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
   - {name: "ninja", kind: python, version: "1.13.2", license: "Apache-2.0", source_url: "https://pypi.org/project/ninja/", editions: [agpl, commercial], images: [backend], notes: ""}
   - {name: "numba", kind: python, version: "0.68.1", license: "BSD-2-Clause", scanned_license: "BSD License", source_url: "https://pypi.org/project/numba/", editions: [agpl, commercial], images: [backend], notes: "Metadata trove classifier 'BSD License'; upstream LICENSE is BSD-2-Clause."}
   - {name: "numpy", kind: python, version: "1.26.4", license: "BSD-3-Clause", source_url: "https://pypi.org/project/numpy/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "numpy", kind: python, version: "2.4.6", license: "BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0", source_url: "https://pypi.org/project/numpy/", editions: [agpl, commercial], images: [ml], notes: "ml sidecar (src/services/ml) lock; spaCy 3.8 stack, see E0-Platform.3. numpy 2.x declares the bundled-code licences in License-Expression."}
   - {name: "openai-whisper", kind: python, version: "20250625", license: "MIT", source_url: "https://pypi.org/project/openai-whisper/", editions: [agpl, commercial], images: [backend], notes: ""}
   - {name: "opencv-python-headless", kind: python, version: "4.11.0.86", license: "Apache-2.0", source_url: "https://pypi.org/project/opencv-python-headless/", editions: [agpl, commercial], images: [backend], notes: ""}
-  - {name: "packaging", kind: python, version: "26.3", license: "Apache-2.0 OR BSD-2-Clause", source_url: "https://pypi.org/project/packaging/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "packaging", kind: python, version: "26.3", license: "Apache-2.0 OR BSD-2-Clause", source_url: "https://pypi.org/project/packaging/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
   - {name: "pgvector", kind: python, version: "0.4.2", license: "MIT", source_url: "https://pypi.org/project/pgvector/", editions: [agpl, commercial], images: [backend], notes: ""}
   - {name: "pillow", kind: python, version: "13.0.0", license: "MIT-CMU", source_url: "https://pypi.org/project/pillow/", editions: [agpl, commercial], images: [backend], notes: ""}
-  - {name: "preshed", kind: python, version: "3.0.15", license: "MIT", source_url: "https://pypi.org/project/preshed/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "preshed", kind: python, version: "3.0.15", license: "MIT", source_url: "https://pypi.org/project/preshed/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
   - {name: "pyasn1", kind: python, version: "0.6.5", license: "BSD-2-Clause", source_url: "https://pypi.org/project/pyasn1/", editions: [agpl, commercial], images: [backend], notes: ""}
   - {name: "pyclipper", kind: python, version: "1.4.0", license: "MIT", scanned_license: "OSI Approved; MIT License", source_url: "https://pypi.org/project/pyclipper/", editions: [agpl, commercial], images: [backend], notes: "Metadata lists the generic 'OSI Approved' classifier plus MIT."}
   - {name: "pycparser", kind: python, version: "3.12", license: "BSD-3-Clause", source_url: "https://pypi.org/project/pycparser/", editions: [agpl, commercial], images: [backend], notes: ""}
-  - {name: "pydantic", kind: python, version: "2.9.0", license: "MIT", source_url: "https://pypi.org/project/pydantic/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "pydantic", kind: python, version: "2.9.0", license: "MIT", source_url: "https://pypi.org/project/pydantic/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
   - {name: "pydantic-settings", kind: python, version: "2.5.0", license: "MIT", source_url: "https://pypi.org/project/pydantic-settings/", editions: [agpl, commercial], images: [backend], notes: ""}
-  - {name: "pydantic_core", kind: python, version: "2.23.2", license: "MIT", source_url: "https://pypi.org/project/pydantic_core/", editions: [agpl, commercial], images: [backend], notes: ""}
-  - {name: "Pygments", kind: python, version: "2.21.0", license: "BSD-2-Clause", source_url: "https://pypi.org/project/Pygments/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "pydantic_core", kind: python, version: "2.23.2", license: "MIT", source_url: "https://pypi.org/project/pydantic_core/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
+  - {name: "Pygments", kind: python, version: "2.21.0", license: "BSD-2-Clause", source_url: "https://pypi.org/project/Pygments/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
   - {name: "pypdf", kind: python, version: "6.14.2", license: "BSD-3-Clause", source_url: "https://pypi.org/project/pypdf/", editions: [agpl, commercial], images: [backend], notes: ""}
   - {name: "python-bidi", kind: python, version: "0.6.12", license: "LGPL-3.0-or-later", scanned_license: "GNU Library or Lesser General Public License (LGPL)", source_url: "https://pypi.org/project/python-bidi/", editions: [agpl, commercial], images: [backend], notes: "Transitive via easyocr. LGPL-3.0, compiled extension imported unmodified; [[exception]] (OWNER TO CONFIRM, E0-QA.9). E0-Platform moves it to the ml image."}
   - {name: "python-dotenv", kind: python, version: "1.2.4", license: "BSD-3-Clause", source_url: "https://pypi.org/project/python-dotenv/", editions: [agpl, commercial], images: [backend], notes: ""}
   - {name: "python-jose", kind: python, version: "3.3.0", license: "MIT", source_url: "https://pypi.org/project/python-jose/", editions: [agpl, commercial], images: [backend], notes: ""}
   - {name: "python-multipart", kind: python, version: "0.0.12", license: "Apache-2.0", source_url: "https://pypi.org/project/python-multipart/", editions: [agpl, commercial], images: [backend], notes: ""}
-  - {name: "PyYAML", kind: python, version: "6.0.3", license: "MIT", source_url: "https://pypi.org/project/PyYAML/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "PyYAML", kind: python, version: "6.0.3", license: "MIT", source_url: "https://pypi.org/project/PyYAML/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
   - {name: "redis", kind: python, version: "5.1.0", license: "MIT", source_url: "https://pypi.org/project/redis/", editions: [agpl, commercial], images: [backend], notes: ""}
-  - {name: "regex", kind: python, version: "2026.9.29", license: "Apache-2.0 AND CNRI-Python", source_url: "https://pypi.org/project/regex/", editions: [agpl, commercial], images: [backend], notes: ""}
-  - {name: "requests", kind: python, version: "2.34.2", license: "Apache-2.0", source_url: "https://pypi.org/project/requests/", editions: [agpl, commercial], images: [backend], notes: ""}
-  - {name: "rich", kind: python, version: "15.0.0", license: "MIT", source_url: "https://pypi.org/project/rich/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "regex", kind: python, version: "2026.9.29", license: "Apache-2.0 AND CNRI-Python", source_url: "https://pypi.org/project/regex/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
+  - {name: "requests", kind: python, version: "2.34.2", license: "Apache-2.0", source_url: "https://pypi.org/project/requests/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
+  - {name: "rich", kind: python, version: "15.0.0", license: "MIT", source_url: "https://pypi.org/project/rich/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
   - {name: "rsa", kind: python, version: "4.9.1", license: "Apache-2.0", source_url: "https://pypi.org/project/rsa/", editions: [agpl, commercial], images: [backend], notes: ""}
-  - {name: "safetensors", kind: python, version: "0.8.0", license: "Apache-2.0", source_url: "https://pypi.org/project/safetensors/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "safetensors", kind: python, version: "0.8.0", license: "Apache-2.0", source_url: "https://pypi.org/project/safetensors/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
   - {name: "scikit-image", kind: python, version: "0.26.0", license: "BSD-3-Clause", source_url: "https://pypi.org/project/scikit-image/", editions: [agpl, commercial], images: [backend], notes: ""}
-  - {name: "scikit-learn", kind: python, version: "1.9.1", license: "BSD-3-Clause", source_url: "https://pypi.org/project/scikit-learn/", editions: [agpl, commercial], images: [backend], notes: ""}
-  - {name: "scipy", kind: python, version: "1.17.1", license: "BSD-3-Clause", source_url: "https://pypi.org/project/scipy/", editions: [agpl, commercial], images: [backend], notes: ""}
-  - {name: "sentence-transformers", kind: python, version: "5.5.1", license: "Apache-2.0", source_url: "https://pypi.org/project/sentence-transformers/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "scikit-learn", kind: python, version: "1.9.1", license: "BSD-3-Clause", source_url: "https://pypi.org/project/scikit-learn/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
+  - {name: "scipy", kind: python, version: "1.17.1", license: "BSD-3-Clause", source_url: "https://pypi.org/project/scipy/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
+  - {name: "sentence-transformers", kind: python, version: "5.5.1", license: "Apache-2.0", source_url: "https://pypi.org/project/sentence-transformers/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
+  - {name: "setuptools", kind: python, version: "84.2.1", license: "MIT", source_url: "https://pypi.org/project/setuptools/", editions: [agpl, commercial], images: [ml], notes: "ml sidecar (src/services/ml) lock; spaCy 3.8 stack, see E0-Platform.3. Pinned in the lock (runtime dependency of the spaCy stack); the scanner skips pip/setuptools/wheel, so this row is the record."}
   - {name: "shapely", kind: python, version: "2.2.0", license: "BSD-3-Clause", source_url: "https://pypi.org/project/shapely/", editions: [agpl, commercial], images: [backend], notes: ""}
-  - {name: "shellingham", kind: python, version: "1.5.4", license: "ISC", source_url: "https://pypi.org/project/shellingham/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "shellingham", kind: python, version: "1.5.4", license: "ISC", source_url: "https://pypi.org/project/shellingham/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
   - {name: "six", kind: python, version: "1.17.0", license: "MIT", source_url: "https://pypi.org/project/six/", editions: [agpl, commercial], images: [backend], notes: ""}
   - {name: "slowapi", kind: python, version: "0.1.9", license: "MIT", source_url: "https://pypi.org/project/slowapi/", editions: [agpl, commercial], images: [backend], notes: ""}
   - {name: "smart_open", kind: python, version: "7.7.1", license: "MIT", source_url: "https://pypi.org/project/smart_open/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "smart-open", kind: python, version: "9.0.1", license: "MIT", source_url: "https://pypi.org/project/smart-open/", editions: [agpl, commercial], images: [ml], notes: "ml sidecar (src/services/ml) lock; spaCy 3.8 stack, see E0-Platform.3. Licence from the trove classifier."}
   - {name: "sniffio", kind: python, version: "1.3.1", license: "MIT OR Apache-2.0", source_url: "https://pypi.org/project/sniffio/", editions: [agpl, commercial], images: [backend], notes: ""}
   - {name: "sortedcontainers", kind: python, version: "2.4.0", license: "Apache-2.0", source_url: "https://pypi.org/project/sortedcontainers/", editions: [agpl, commercial], notes: "dev/test only (requirements-dev.txt); not shipped"}
   - {name: "spacy", kind: python, version: "3.7.6", license: "MIT", source_url: "https://pypi.org/project/spacy/", editions: [agpl, commercial], images: [backend], notes: ""}
-  - {name: "spacy-legacy", kind: python, version: "3.0.12", license: "MIT", source_url: "https://pypi.org/project/spacy-legacy/", editions: [agpl, commercial], images: [backend], notes: ""}
-  - {name: "spacy-loggers", kind: python, version: "1.0.5", license: "MIT", source_url: "https://pypi.org/project/spacy-loggers/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "spacy", kind: python, version: "3.8.18", license: "MIT", source_url: "https://pypi.org/project/spacy/", editions: [agpl, commercial], images: [ml], notes: "ml sidecar (src/services/ml) lock; spaCy 3.8 stack, see E0-Platform.3. 3.7.6 has no linux-aarch64 wheels."}
+  - {name: "spacy-legacy", kind: python, version: "3.0.12", license: "MIT", source_url: "https://pypi.org/project/spacy-legacy/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
+  - {name: "spacy-loggers", kind: python, version: "1.0.5", license: "MIT", source_url: "https://pypi.org/project/spacy-loggers/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
   - {name: "SQLAlchemy", kind: python, version: "2.0.35", license: "MIT", source_url: "https://pypi.org/project/SQLAlchemy/", editions: [agpl, commercial], images: [backend], notes: ""}
-  - {name: "srsly", kind: python, version: "2.5.5", license: "MIT", source_url: "https://pypi.org/project/srsly/", editions: [agpl, commercial], images: [backend], notes: ""}
-  - {name: "starlette", kind: python, version: "0.38.6", license: "BSD-3-Clause", source_url: "https://pypi.org/project/starlette/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "srsly", kind: python, version: "2.5.5", license: "MIT", source_url: "https://pypi.org/project/srsly/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
+  - {name: "starlette", kind: python, version: "0.38.6", license: "BSD-3-Clause", source_url: "https://pypi.org/project/starlette/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
   - {name: "stripe", kind: python, version: "15.4.0", license: "MIT", source_url: "https://pypi.org/project/stripe/", editions: [agpl, commercial], images: [backend], notes: ""}
-  - {name: "sympy", kind: python, version: "1.14.0", license: "BSD-3-Clause", source_url: "https://pypi.org/project/sympy/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "sympy", kind: python, version: "1.14.0", license: "BSD-3-Clause", source_url: "https://pypi.org/project/sympy/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
   - {name: "thinc", kind: python, version: "8.2.5", license: "MIT", source_url: "https://pypi.org/project/thinc/", editions: [agpl, commercial], images: [backend], notes: ""}
-  - {name: "threadpoolctl", kind: python, version: "3.7.0", license: "BSD-3-Clause", source_url: "https://pypi.org/project/threadpoolctl/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "thinc", kind: python, version: "8.3.14", license: "MIT", source_url: "https://pypi.org/project/thinc/", editions: [agpl, commercial], images: [ml], notes: "ml sidecar (src/services/ml) lock; spaCy 3.8 stack, see E0-Platform.3."}
+  - {name: "threadpoolctl", kind: python, version: "3.7.0", license: "BSD-3-Clause", source_url: "https://pypi.org/project/threadpoolctl/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
   - {name: "tifffile", kind: python, version: "2026.3.3", license: "BSD-3-Clause", source_url: "https://pypi.org/project/tifffile/", editions: [agpl, commercial], images: [backend], notes: ""}
   - {name: "tiktoken", kind: python, version: "0.14.0", license: "MIT", source_url: "https://pypi.org/project/tiktoken/", editions: [agpl, commercial], images: [backend], notes: ""}
-  - {name: "tokenizers", kind: python, version: "0.23.3", license: "Apache-2.0", source_url: "https://pypi.org/project/tokenizers/", editions: [agpl, commercial], images: [backend], notes: ""}
-  - {name: "torch", kind: python, version: "2.15.0+cpu", license: "Apache-2.0 AND Apache-2.0 WITH LLVM-exception AND BSD-2-Clause AND BSD-3-Clause AND BSL-1.0 AND ISC AND MIT AND Zlib", source_url: "https://pypi.org/project/torch/", editions: [agpl, commercial], images: [backend], notes: "CPU wheel in CI and in the shipped backend images (Dockerfile(.prod) pin it from the CPU index, E0-Platform.2). The CUDA build reports the same licence but drags in NVIDIA proprietary wheels, deliberately not registered so a regression fails."}
+  - {name: "tokenizers", kind: python, version: "0.23.3", license: "Apache-2.0", source_url: "https://pypi.org/project/tokenizers/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
+  - {name: "torch", kind: python, version: "2.15.0+cpu", license: "Apache-2.0 AND Apache-2.0 WITH LLVM-exception AND BSD-2-Clause AND BSD-3-Clause AND BSL-1.0 AND ISC AND MIT AND Zlib", source_url: "https://pypi.org/project/torch/", editions: [agpl, commercial], images: [backend, ml], notes: "CPU wheel in CI and in the shipped backend images (Dockerfile(.prod) pin it from the CPU index, E0-Platform.2). The CUDA build reports the same licence but drags in NVIDIA proprietary wheels, deliberately not registered so a regression fails."}
   - {name: "torchvision", kind: python, version: "0.29.2+cpu", license: "BSD-3-Clause", source_url: "https://pypi.org/project/torchvision/", editions: [agpl, commercial], images: [backend], notes: "Metadata says 'BSD'; upstream LICENSE is BSD-3-Clause. CPU wheel pinned from the CPU index in the shipped backend images (E0-Platform.2)."}
-  - {name: "tqdm", kind: python, version: "4.70.1", license: "MPL-2.0 AND MIT", source_url: "https://pypi.org/project/tqdm/", editions: [agpl, commercial], images: [backend], notes: ""}
-  - {name: "transformers", kind: python, version: "5.22.1", license: "Apache-2.0", source_url: "https://pypi.org/project/transformers/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "tqdm", kind: python, version: "4.70.1", license: "MPL-2.0 AND MIT", source_url: "https://pypi.org/project/tqdm/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
+  - {name: "transformers", kind: python, version: "5.22.1", license: "Apache-2.0", source_url: "https://pypi.org/project/transformers/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
   - {name: "triton", kind: python, version: "3.9.0", license: "MIT", source_url: "https://pypi.org/project/triton/", editions: [agpl, commercial], images: [backend], notes: "Pulled by openai-whisper on linux x86_64 even in the CPU-only install (MIT), so it ships in the CPU-torch backend image (E0-Platform.2); in-image verification is E0-QA.8."}
-  - {name: "truststore", kind: python, version: "0.10.5", license: "MIT", source_url: "https://pypi.org/project/truststore/", editions: [agpl, commercial], images: [backend], notes: ""}
-  - {name: "typer", kind: python, version: "0.27.3", license: "MIT", source_url: "https://pypi.org/project/typer/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "truststore", kind: python, version: "0.10.5", license: "MIT", source_url: "https://pypi.org/project/truststore/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
+  - {name: "typer", kind: python, version: "0.27.3", license: "MIT", source_url: "https://pypi.org/project/typer/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
   - {name: "typer-slim", kind: python, version: "0.24.0", license: "MIT", source_url: "https://pypi.org/project/typer-slim/", editions: [agpl, commercial], images: [backend], notes: ""}
-  - {name: "typing_extensions", kind: python, version: "4.16.0", license: "PSF-2.0", source_url: "https://pypi.org/project/typing_extensions/", editions: [agpl, commercial], images: [backend], notes: ""}
-  - {name: "tzdata", kind: python, version: "2026.6", license: "Apache-2.0", source_url: "https://pypi.org/project/tzdata/", editions: [agpl, commercial], images: [backend], notes: ""}
-  - {name: "urllib3", kind: python, version: "2.8.0", license: "MIT", source_url: "https://pypi.org/project/urllib3/", editions: [agpl, commercial], images: [backend], notes: ""}
-  - {name: "uvicorn", kind: python, version: "0.30.0", license: "BSD-3-Clause", source_url: "https://pypi.org/project/uvicorn/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "typing_extensions", kind: python, version: "4.16.0", license: "PSF-2.0", source_url: "https://pypi.org/project/typing_extensions/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
+  - {name: "tzdata", kind: python, version: "2026.6", license: "Apache-2.0", source_url: "https://pypi.org/project/tzdata/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
+  - {name: "urllib3", kind: python, version: "2.8.0", license: "MIT", source_url: "https://pypi.org/project/urllib3/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
+  - {name: "uvicorn", kind: python, version: "0.30.0", license: "BSD-3-Clause", source_url: "https://pypi.org/project/uvicorn/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
   - {name: "uvloop", kind: python, version: "0.23.0", license: "Apache-2.0 OR MIT", source_url: "https://pypi.org/project/uvloop/", editions: [agpl, commercial], images: [backend], notes: ""}
-  - {name: "wasabi", kind: python, version: "1.1.3", license: "MIT", source_url: "https://pypi.org/project/wasabi/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "wasabi", kind: python, version: "1.1.3", license: "MIT", source_url: "https://pypi.org/project/wasabi/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
   - {name: "watchfiles", kind: python, version: "1.3.0", license: "MIT", source_url: "https://pypi.org/project/watchfiles/", editions: [agpl, commercial], images: [backend], notes: ""}
   - {name: "weasel", kind: python, version: "0.4.3", license: "MIT", source_url: "https://pypi.org/project/weasel/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "weasel", kind: python, version: "1.0.1", license: "MIT", source_url: "https://pypi.org/project/weasel/", editions: [agpl, commercial], images: [ml], notes: "ml sidecar (src/services/ml) lock; spaCy 3.8 stack, see E0-Platform.3."}
   - {name: "websockets", kind: python, version: "17.4", license: "BSD-3-Clause", source_url: "https://pypi.org/project/websockets/", editions: [agpl, commercial], images: [backend], notes: ""}
-  - {name: "wrapt", kind: python, version: "2.5.2", license: "BSD-2-Clause", source_url: "https://pypi.org/project/wrapt/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "wrapt", kind: python, version: "2.5.2", license: "BSD-2-Clause", source_url: "https://pypi.org/project/wrapt/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
   - {name: "spacy-curated-transformers", kind: python, version: "0.2.2", license: "MIT", source_url: "https://pypi.org/project/spacy-curated-transformers/", editions: [agpl, commercial], images: [backend], notes: "Dependency of the baked en_core_web_trf model (not in the CI CPU install)."}
-  - {name: "curated-transformers", kind: python, version: "0.1.1", license: "MIT", source_url: "https://pypi.org/project/curated-transformers/", editions: [agpl, commercial], images: [backend], notes: "Dependency of spacy-curated-transformers (baked en_core_web_trf)."}
-  - {name: "curated-tokenizers", kind: python, version: "0.0.10", license: "MIT", source_url: "https://pypi.org/project/curated-tokenizers/", editions: [agpl, commercial], images: [backend], notes: "Dependency of spacy-curated-transformers (baked en_core_web_trf)."}
+  - {name: "spacy-curated-transformers", kind: python, version: "0.3.1", license: "MIT", source_url: "https://pypi.org/project/spacy-curated-transformers/", editions: [agpl, commercial], images: [ml], notes: "ml sidecar (src/services/ml) lock; spaCy 3.8 stack, see E0-Platform.3. Dependency of en_core_web_trf 3.8.0."}
+  - {name: "curated-transformers", kind: python, version: "0.1.1", license: "MIT", source_url: "https://pypi.org/project/curated-transformers/", editions: [agpl, commercial], images: [backend, ml], notes: "Dependency of spacy-curated-transformers (baked en_core_web_trf)."}
+  - {name: "curated-tokenizers", kind: python, version: "0.0.10", license: "MIT", source_url: "https://pypi.org/project/curated-tokenizers/", editions: [agpl, commercial], images: [backend, ml], notes: "Dependency of spacy-curated-transformers (baked en_core_web_trf)."}
   # ---- npm: every package in src/frontend/package-lock.json (license-checker-rseidelsohn) ----
   - {name: "@alloc/quick-lru", kind: npm, version: "5.2.0", license: "MIT", source_url: "https://github.com/sindresorhus/quick-lru", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}
   - {name: "@apideck/better-ajv-errors", kind: npm, version: "0.3.7", license: "MIT", source_url: "https://github.com/apideck-libraries/better-ajv-errors", editions: [agpl, commercial], notes: "build-time (devDependency tree)"}

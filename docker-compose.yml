@@ -43,6 +43,28 @@ services:
     volumes:
       - ./src/backend:/app
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    # `default` for postgres/redis/frontend, `models` to reach the ml sidecar.
+    networks:
+      - default
+      - models
+
+  # Shared embeddings + NER sidecar (src/services/ml). No ports: reachable
+  # only from the backend over the internal `models` network, at ML_URL
+  # (default http://ml:8000). Nothing calls it yet (E0-Platform.6).
+  ml:
+    # Tagged so scripts/sidecar_smoke.sh ml finds it by its default name.
+    image: lorekeeper-ml:latest
+    build:
+      context: ./src/services/ml
+      dockerfile: Dockerfile
+    networks:
+      - models
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=4)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 180s
 
   frontend:
     build:
@@ -56,6 +78,12 @@ services:
       - ./src/frontend:/app
       - /app/node_modules
     command: npm run dev -- --host
+
+networks:
+  # internal: no route out of the network and no host port publishing, so
+  # the ml sidecar can talk to the backend and nothing else.
+  models:
+    internal: true
 
 volumes:
   postgres_data:

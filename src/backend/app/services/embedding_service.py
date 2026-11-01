@@ -1,9 +1,8 @@
 from sentence_transformers import SentenceTransformer
 
-_model: SentenceTransformer | None = None
+from app.domain.embedding import EMBEDDING_DIM, EMBEDDING_MODEL  # noqa: F401 (re-exported)
 
-EMBEDDING_MODEL = "all-MiniLM-L6-v2"
-EMBEDDING_DIM = 384
+_model: SentenceTransformer | None = None
 
 
 def load_embedding_model() -> None:

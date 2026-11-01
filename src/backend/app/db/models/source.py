@@ -4,8 +4,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.dialects.postgresql import UUID
 from pgvector.sqlalchemy import Vector
 from app.db.base import Base, TimestampMixin
-
-EMBEDDING_DIM = 384
+from app.domain.embedding import EMBEDDING_DIM
 
 
 class SourceDocument(Base, TimestampMixin):
