@@ -13,6 +13,9 @@ from app.db.models.npc import NpcEntry, NpcRole, NpcStatus
 from app.db.models.quest import Quest, QuestStatus
 from app.db.models.tag import JournalTag, Tag, TagType
 from app.db.models.tag_category import TagCategory
+from app.schemas.npc import NpcPartyResponse
+from app.schemas.quest import QuestPartyResponse
+from app.schemas.share import PublicNpcResponse, PublicQuestResponse
 
 # Read-only share links are anonymous and player-facing. They must never
 # return GM-private fields: NPC/quest `notes` and journal `shorthand` (the
@@ -60,21 +63,19 @@ async def _owner_with_shared_campaign(client, db, promo_code, kind="read_only"):
 
 
 @pytest.mark.asyncio
-async def test_shared_npcs_and_quests_omit_gm_notes(client, db, promo_code):
+async def test_shared_npcs_and_quests_are_empty(client, db, promo_code):
+    # NPCs and Quests are always_gm until F3-world (Decision B1-D4,
+    # E0-Access.4): a read-only share link lists none of them.
     token, _ = await _owner_with_shared_campaign(client, db, promo_code)
 
     npcs = await client.get(f"/api/share/{token}/npcs")
     assert npcs.status_code == 200
-    assert len(npcs.json()) == 1
-    assert npcs.json()[0]["description"] == "A jovial innkeeper."
-    assert "notes" not in npcs.json()[0]
+    assert npcs.json() == []
     assert GM_SECRET not in npcs.text
 
     quests = await client.get(f"/api/share/{token}/quests")
     assert quests.status_code == 200
-    assert len(quests.json()) == 1
-    assert quests.json()[0]["description"] == "Merchants vanished on the north road."
-    assert "notes" not in quests.json()[0]
+    assert quests.json() == []
     assert GM_SECRET not in quests.text
 
 
@@ -248,7 +249,7 @@ async def fully_filled_share(client, db, promo_code):
 
     share = await client.post(f"/api/campaigns/{campaign_id}/share", json={"kind": "read_only"}, headers=headers)
     assert share.status_code == 201, share.text
-    return {"token": share.json()["token"], "entry_id": entry.id}
+    return {"token": share.json()["token"], "entry_id": entry.id, "npc_id": npc.id, "quest_id": quest.id}
 
 
 def _assert_public_journal(item: dict) -> None:
@@ -291,17 +292,57 @@ async def test_shared_journals_exact_keys(client, fully_filled_share):
 
 
 @pytest.mark.asyncio
-async def test_shared_npcs_and_quests_exact_keys(client, fully_filled_share):
+async def test_shared_npcs_and_quests_exact_keys(client, db, fully_filled_share):
     token = fully_filled_share["token"]
 
+    # The share lists are empty (always_gm, Decision B1-D4)...
     npcs = await client.get(f"/api/share/{token}/npcs")
     assert npcs.status_code == 200
-    assert len(npcs.json()) == 1
-    assert set(npcs.json()[0]) == NPC_KEYS
-    assert CANARY not in npcs.text
-
+    assert npcs.json() == []
     quests = await client.get(f"/api/share/{token}/quests")
     assert quests.status_code == 200
-    assert len(quests.json()) == 1
-    assert set(quests.json()[0]) == QUEST_KEYS
-    assert CANARY not in quests.text
+    assert quests.json() == []
+
+    # ...and the allowlist still holds on the Party schema they would be
+    # served through: the exact keys of a fully filled row.
+    npc = (await db.execute(sa.select(NpcEntry).where(NpcEntry.id == fully_filled_share["npc_id"]))).scalar_one()
+    body = PublicNpcResponse.model_validate(npc).model_dump(mode="json")
+    assert set(body) == NPC_KEYS
+    assert CANARY not in str(body)
+    quest = (await db.execute(sa.select(Quest).where(Quest.id == fully_filled_share["quest_id"]))).scalar_one()
+    body = PublicQuestResponse.model_validate(quest).model_dump(mode="json")
+    assert set(body) == QUEST_KEYS
+    assert CANARY not in str(body)
+    assert PublicNpcResponse is NpcPartyResponse and PublicQuestResponse is QuestPartyResponse
+
+
+@pytest.mark.asyncio
+async def test_share_token_expired_revoked_unknown_are_the_same_404(client, db, fully_filled_share):
+    from app.db.models.share_token import CampaignShareToken
+
+    token = fully_filled_share["token"]
+    entry_id = fully_filled_share["entry_id"]
+    paths = ("", "/journals", f"/journals/{entry_id}", "/npcs", "/quests")
+    for p in paths:
+        assert (await client.get(f"/api/share/{token}{p}")).status_code == 200, p
+    unknown = {p: await client.get(f"/api/share/no-such-token{p}") for p in paths}
+    for r in unknown.values():
+        assert r.status_code == 404 and r.json() == {"detail": "Not found"}
+
+    share = (await db.execute(sa.select(CampaignShareToken).where(CampaignShareToken.token == token))).scalar_one()
+    share.expires_at = sa.func.now()  # expires_at <= now(): expired
+    await db.commit()
+    for p in paths:
+        r = await client.get(f"/api/share/{token}{p}")
+        assert (r.status_code, r.content) == (unknown[p].status_code, unknown[p].content), p
+
+    await db.execute(sa.text("UPDATE campaign_share_tokens SET expires_at = now() + interval '1 day', "
+                             "revoked = true WHERE token = :t"), {"t": token})
+    await db.commit()
+    for p in paths:
+        r = await client.get(f"/api/share/{token}{p}")
+        assert (r.status_code, r.content) == (unknown[p].status_code, unknown[p].content), p
+
+    await db.execute(sa.text("UPDATE campaign_share_tokens SET revoked = false WHERE token = :t"), {"t": token})
+    await db.commit()
+    assert (await client.get(f"/api/share/{token}/journals")).status_code == 200  # a future expiry is live

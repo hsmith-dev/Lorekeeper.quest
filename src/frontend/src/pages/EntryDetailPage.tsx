@@ -158,18 +158,20 @@ export function EntryDetailPage() {
           {entry.session_date ? formatDate(entry.session_date) : formatDate(entry.created_at)}
         </p>
 
-        {/* Original notes */}
-        <section>
-          <p
-            className="text-xs font-semibold uppercase tracking-widest text-muted-foreground mb-2"
-            style={{ fontFamily: "var(--font-heading)" }}
-          >
-            Session Notes
-          </p>
-          <p className="text-sm text-muted-foreground italic leading-relaxed border-l-2 border-border pl-4">
-            {entry.shorthand}
-          </p>
-        </section>
+        {/* Original notes (GM only: absent from a Player's response) */}
+        {entry.shorthand && (
+          <section>
+            <p
+              className="text-xs font-semibold uppercase tracking-widest text-muted-foreground mb-2"
+              style={{ fontFamily: "var(--font-heading)" }}
+            >
+              Session Notes
+            </p>
+            <p className="text-sm text-muted-foreground italic leading-relaxed border-l-2 border-border pl-4">
+              {entry.shorthand}
+            </p>
+          </section>
+        )}
 
         {/* Narrative */}
         <section>

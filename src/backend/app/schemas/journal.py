@@ -1,7 +1,7 @@
 from pydantic import BaseModel, field_validator
 import uuid
 from datetime import datetime, date
-from app.schemas.tag import TagResponse
+from app.schemas.tag import TagGMResponse, TagPartyResponse
 
 
 class GenerateRequest(BaseModel):
@@ -37,23 +37,50 @@ class GenerateDraftResponse(BaseModel):
     narrative: str
 
 
-class JournalResponse(BaseModel):
+# GM and Party projections (E0-Access.4), returned only through
+# app.access.project. The Party schema has no `shorthand` (the GM's raw
+# notes): absent, not blanked.
+
+class JournalGMResponse(BaseModel):
     id: uuid.UUID
     campaign_id: uuid.UUID
     shorthand: str
     narrative: str
     session_date: date | None
-    tags: list[TagResponse]
+    tags: list[TagGMResponse]
     created_at: datetime
 
     model_config = {"from_attributes": True}
 
 
-class JournalListResponse(BaseModel):
-    items: list[JournalResponse]
+class JournalPartyResponse(BaseModel):
+    id: uuid.UUID
+    campaign_id: uuid.UUID
+    narrative: str
+    session_date: date | None
+    tags: list[TagPartyResponse]
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class JournalGMListResponse(BaseModel):
+    items: list[JournalGMResponse]
     total: int
     page: int
     limit: int
+
+
+class JournalPartyListResponse(BaseModel):
+    items: list[JournalPartyResponse]
+    total: int
+    page: int
+    limit: int
+
+
+# The pre-E0-Access.4 names are the GM schemas.
+JournalResponse = JournalGMResponse
+JournalListResponse = JournalGMListResponse
 
 
 class JournalLiteResponse(BaseModel):
@@ -65,25 +92,10 @@ class JournalLiteResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
-class JournalLitePartyResponse(BaseModel):
-    """A journal entry as a non-GM sees it in search and entry lists
-    (E0-Access.7): the Narrative only, never the Shorthand. `tags` stays
-    because the journal list's card reads it."""
-    id: uuid.UUID
-    campaign_id: uuid.UUID
-    narrative: str
-    session_date: date | None
-    tags: list[TagResponse]
-    created_at: datetime
-
-    model_config = {"from_attributes": True}
-
-
-class JournalListPartyResponse(BaseModel):
-    items: list[JournalLitePartyResponse]
-    total: int
-    page: int
-    limit: int
+# E0-Access.7's names for the non-GM search / entry-list item and page: the
+# Party projection itself (one schema decides what a non-GM sees).
+JournalLitePartyResponse = JournalPartyResponse
+JournalListPartyResponse = JournalPartyListResponse
 
 
 class AutocompleteRequest(BaseModel):

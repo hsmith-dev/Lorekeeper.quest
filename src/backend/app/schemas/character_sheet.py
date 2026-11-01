@@ -42,7 +42,11 @@ class TemplateUpdate(BaseModel):
         return v
 
 
-class TemplateResponse(BaseModel):
+# GM and Party projections (E0-Access.4), returned only through
+# app.access.project. Templates and sheets carry no GM field today, so each
+# pair has the same keys; `character_count` counts only sheets the ctx sees.
+
+class TemplateGMResponse(BaseModel):
     id: uuid.UUID
     campaign_id: uuid.UUID
     name: str
@@ -52,6 +56,22 @@ class TemplateResponse(BaseModel):
     updated_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class TemplatePartyResponse(BaseModel):
+    id: uuid.UUID
+    campaign_id: uuid.UUID
+    name: str
+    fields: list[TemplateField]
+    character_count: int = 0
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+# The pre-E0-Access.4 name is the GM schema.
+TemplateResponse = TemplateGMResponse
 
 
 class CharacterSheetCreate(BaseModel):
@@ -66,7 +86,7 @@ class CharacterSheetUpdate(BaseModel):
     data: dict[str, Any] | None = None
 
 
-class CharacterSheetResponse(BaseModel):
+class CharacterSheetGMResponse(BaseModel):
     id: uuid.UUID
     campaign_id: uuid.UUID
     template_id: uuid.UUID
@@ -76,3 +96,19 @@ class CharacterSheetResponse(BaseModel):
     updated_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class CharacterSheetPartyResponse(BaseModel):
+    id: uuid.UUID
+    campaign_id: uuid.UUID
+    template_id: uuid.UUID
+    name: str
+    data: dict[str, Any]
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+# The pre-E0-Access.4 name is the GM schema.
+CharacterSheetResponse = CharacterSheetGMResponse

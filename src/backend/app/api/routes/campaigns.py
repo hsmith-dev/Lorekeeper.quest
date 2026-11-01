@@ -21,6 +21,7 @@ from app.schemas.campaign import (
 from app.db.models.campaign_member import CampaignMember
 from app.schemas.share import ShareTokenResponse, ShareTokenCreate, CampaignMemberResponse
 from app.schemas.tag_category import TagCategoryCreate, TagCategoryResponse
+from app.access import CampaignContext, project, project_all, require_campaign, role_map, scoped_get
 from app.api.deps import get_current_user, get_campaign_with_access, get_user_llm_config
 from app.services.export_service import build_campaign_markdown, build_campaign_pdf
 from app.services.chat_service import generate_campaign_concept
@@ -68,32 +69,49 @@ async def generate_campaign_concept_route(
     return CampaignConceptResponse(name=name, description=description)
 
 
-@router.get("/", response_model=list[CampaignResponse])
+_GM_OR_PARTY = "GM (Owner, Co-GM): CampaignGMResponse; Player or member preview: CampaignPartyResponse."
+
+
+def _campaign_extra(campaign: Campaign, is_owner: bool) -> dict:
+    # owner_display_name only for is_owner=False rows: lets the UI show
+    # "Shared by <name>" so two campaigns with the same name (yours and one
+    # someone shared with you) are still distinguishable at a glance.
+    return {"is_owner": is_owner, "owner_display_name": None if is_owner else campaign.user.display_name}
+
+
+@router.get("/", response_model=None,
+            responses={200: {"model": list[CampaignResponse], "description": _GM_OR_PARTY}})
 async def list_campaigns(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
-) -> list[CampaignResponse]:
-    owned = (await db.execute(select(Campaign).where(Campaign.user_id == user.id))).scalars().all()
-    member_result = await db.execute(
-        select(Campaign)
-        .join(CampaignMember, CampaignMember.campaign_id == Campaign.id)
-        .where(CampaignMember.user_id == user.id)
+):
+    """Every Campaign the user owns or is a Member of, owned first, each
+    projected for the user's Role in it (E0-Access.4)."""
+    roles = await role_map(db, user)
+    if not roles:
+        return []
+    campaigns = (await db.execute(
+        select(Campaign).where(Campaign.id.in_(list(roles))).order_by(Campaign.created_at)
         # Eager-load the owner so we can surface "Shared by <name>" without an
         # extra round trip per row — joined campaigns are the whole point of
         # this endpoint, not a rare edge case, so N+1 here is worth avoiding.
         .options(selectinload(Campaign.user))
-    )
-    joined = member_result.scalars().all()
+    )).scalars().all()
+    owned = [c for c in campaigns if c.user_id == user.id]
+    joined = [c for c in campaigns if c.user_id != user.id]
+    return await project_all(db, owned + joined, roles, extra=lambda c: _campaign_extra(c, c.user_id == user.id))
 
-    return [
-        CampaignResponse.model_validate(c, from_attributes=True).model_copy(update={"is_owner": True})
-        for c in owned
-    ] + [
-        CampaignResponse.model_validate(c, from_attributes=True).model_copy(
-            update={"is_owner": False, "owner_display_name": c.user.display_name}
-        )
-        for c in joined
-    ]
+
+@router.get("/{campaign_id}", response_model=None,
+            responses={200: {"model": CampaignResponse, "description": _GM_OR_PARTY}})
+async def get_campaign(
+    ctx: CampaignContext = Depends(require_campaign("player")),
+    db: AsyncSession = Depends(get_db),
+):
+    """One Campaign the caller owns or is a Member of; anyone else gets the
+    one 404, like a Campaign that does not exist."""
+    campaign = await scoped_get(db, Campaign, ctx, ctx.campaign_id, options=[selectinload(Campaign.user)])
+    return project(campaign, ctx, extra=_campaign_extra(campaign, ctx.is_owner))
 
 
 @router.patch("/{campaign_id}", response_model=CampaignResponse)

@@ -32,7 +32,10 @@ export function JoinCampaignPage() {
       const { data } = await api.joinCampaign(token);
       navigate("/", { replace: true, state: { joinedCampaignId: data.campaign_id } });
     } catch (err: any) {
-      setError(err?.response?.data?.detail || "Could not join this campaign. The link may be invalid or revoked.");
+      // A dead link is the same 404 as an unknown one ({"detail":"Not found"}).
+      setError(err?.response?.status === 404
+        ? "This invite link is invalid, expired or revoked."
+        : err?.response?.data?.detail || "Could not join this campaign. The link may be invalid, expired or revoked.");
     } finally {
       setJoining(false);
     }
@@ -44,7 +47,7 @@ export function JoinCampaignPage() {
         <p className="text-4xl">🤝</p>
 
         {isLoading && <div className="h-6 w-48 mx-auto bg-muted rounded animate-pulse" />}
-        {isError && <p className="text-sm text-danger">This invite link is invalid or has been revoked.</p>}
+        {isError && <p className="text-sm text-danger">This invite link is invalid, expired or revoked.</p>}
 
         {campaign && campaign.share_kind === "collaborate" && (
           <>

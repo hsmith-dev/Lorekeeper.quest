@@ -1,10 +1,11 @@
 import uuid
-from datetime import date, datetime
+from datetime import datetime
 from pydantic import BaseModel, field_validator
 from app.db.models.campaign import Genre
-from app.db.models.npc import NpcRole, NpcStatus
-from app.db.models.quest import QuestStatus
-from app.db.models.tag import TagType
+from app.schemas.journal import JournalPartyListResponse, JournalPartyResponse
+from app.schemas.npc import NpcPartyResponse
+from app.schemas.quest import QuestPartyResponse
+from app.schemas.tag import TagCategoryPartyRef, TagPartyResponse
 
 _VALID_KINDS = {"read_only", "collaborate"}
 
@@ -31,91 +32,40 @@ class ShareTokenResponse(BaseModel):
 
 
 class PublicCampaignResponse(BaseModel):
+    """The anon (Share Link) projection of a Campaign (E0-Access.4)."""
+
     id: uuid.UUID
     name: str
     genre: Genre
     description: str | None
     share_kind: str
 
+    model_config = {"from_attributes": True}
+
 
 # --- Public (read-only share link) response schemas -------------------------
-# Anonymous share-link viewers are players/audience, not the GM. These are
-# allow-lists: a field reaches a share viewer only if it is named here, so a
+# Anonymous share-link viewers are players/audience, not the GM. Since
+# E0-Access.4 these are the Party projections (app/schemas/<domain>.py,
+# returned through app.access.project for an anon ctx); the E0a names stay as
+# aliases so share output keys are unchanged. The Party schemas are
+# allow-lists: a field reaches a share viewer only if it is named there, so a
 # column added to a model later stays private by default. GM-private data
 # deliberately left out:
 #   - JournalEntry.shorthand: the GM's raw session notes the narrative is
 #     generated from (asides, spoilers); `narrative` is the player-facing
 #     chronicle.
 #   - NpcEntry.notes / Quest.notes: free-text GM notes (secrets, motives,
-#     planned twists), as opposed to the player-facing `description`.
+#     planned twists). NPCs and Quests are always_gm until F3-world anyway
+#     (Decision B1-D4), so the share lists are empty.
 #   - Session plans, source documents, character sheets and the shorthand
 #     glossary: no share endpoint exposes them at all.
-# The full roles/visibility model belongs to the player-portal feature; this
-# only stops the existing share link leaking GM prep.
 
-
-class PublicTagCategoryRef(BaseModel):
-    id: uuid.UUID
-    name: str
-    campaign_id: uuid.UUID
-    created_at: datetime
-
-    model_config = {"from_attributes": True}
-
-
-class PublicTagResponse(BaseModel):
-    # Same fields as the owner TagResponse, but declared here so nested tags
-    # are allow-listed too: a field added to the owner tag schema later does
-    # not reach share viewers unless it is also named here.
-    id: uuid.UUID
-    name: str
-    tag_type: TagType | None = None
-    custom_category: PublicTagCategoryRef | None = None
-
-    model_config = {"from_attributes": True}
-
-
-class PublicJournalResponse(BaseModel):
-    id: uuid.UUID
-    campaign_id: uuid.UUID
-    narrative: str
-    session_date: date | None
-    tags: list[PublicTagResponse]
-    created_at: datetime
-
-    model_config = {"from_attributes": True}
-
-
-class PublicJournalListResponse(BaseModel):
-    items: list[PublicJournalResponse]
-    total: int
-    page: int
-    limit: int
-
-
-class PublicNpcResponse(BaseModel):
-    id: uuid.UUID
-    campaign_id: uuid.UUID
-    name: str
-    role: NpcRole
-    status: NpcStatus
-    description: str | None
-    created_at: datetime
-    updated_at: datetime
-
-    model_config = {"from_attributes": True}
-
-
-class PublicQuestResponse(BaseModel):
-    id: uuid.UUID
-    campaign_id: uuid.UUID
-    title: str
-    description: str | None
-    status: QuestStatus
-    created_at: datetime
-    updated_at: datetime
-
-    model_config = {"from_attributes": True}
+PublicTagCategoryRef = TagCategoryPartyRef
+PublicTagResponse = TagPartyResponse
+PublicJournalResponse = JournalPartyResponse
+PublicJournalListResponse = JournalPartyListResponse
+PublicNpcResponse = NpcPartyResponse
+PublicQuestResponse = QuestPartyResponse
 
 
 class JoinCampaignResponse(BaseModel):
