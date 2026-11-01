@@ -1,0 +1,176 @@
+name: Structural gates
+
+# Every structural architecture gate in one place (E0-QA.10): each gate is one
+# named step, so this file is the list of what CI enforces. No `paths:`
+# filter (AD-21, NFR-4): a required check that is skipped on some PRs is no
+# gate. Gates owned by other epics have a reserved, commented slot below;
+# the owning story uncomments it (one step each) when its script lands.
+#
+# Where today's code misses the target architecture, the gap is a reasoned,
+# shrink-only baseline next to the gate (each gate's failure message says
+# what to do). Never grow a baseline to make a gate pass.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  # Stdlib scripts plus import-linter. Nothing from requirements.txt is
+  # installed: import-linter parses the source, it does not import it.
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: src/backend/requirements-dev.txt
+
+      - name: Install gate tooling
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r <(grep -iE '^(pyyaml|pytest|import-linter|grimp)==' src/backend/requirements-dev.txt)
+
+      # CI-2 (AD-1): api > services > schemas > db > core > domain; domain
+      # imports no app package; clients only core/domain; no model package
+      # imported outside app/clients. Contracts: src/backend/.importlinter.
+      - name: "CI-2 AD-1 import contracts (lint-imports)"
+        working-directory: src/backend
+        env:
+          PYTHONPATH: .
+        run: |
+          lint-imports --no-cache || {
+            echo "::error::An AD-1 import contract is broken (see above). Fix the import: routes call services, services call clients/db, models are reached only through app/clients. A 'No matches for ignored import' error means an exception is gone: delete its line from src/backend/.importlinter and from FROZEN_IGNORES in scripts/test_import_ratchet.py."
+            exit 1
+          }
+
+      # CI-2: ignore_imports only shrinks, every line has a `# ratchet:`
+      # reason, and the contracts the AC names exist. Also plants a violation
+      # for each contract in a throwaway package and checks lint-imports fails.
+      - name: "CI-2 AD-1 import ratchet"
+        run: python -m pytest -q scripts/test_import_ratchet.py
+
+      # CI-3 (AD-1, AD-16): the web/worker image installs no model package
+      # outside scripts/model_packages_baseline.txt (shrink-only).
+      - name: "CI-3 AD-1 no model packages in the web/worker image"
+        run: python scripts/check_model_packages.py
+
+      # CI-7 (AD-19): one owner per table (spine boundary map + AD-19 +
+      # epics.md additions); every migration-created table is owned or in
+      # scripts/table_owners_legacy.txt (shrink-only).
+      - name: "CI-7 AD-19 one owner per table"
+        run: python scripts/check_table_owners.py
+
+      # CI-14 (AD-7): the *_MEM_LIMIT sum in .env.example is <= 14.5 GiB and
+      # the compose files use the same defaults.
+      - name: "CI-14 AD-7 memory budget"
+        run: python scripts/check_memory_budget.py
+
+      - name: Gate unit tests
+        run: |
+          python -m pytest -q \
+            scripts/test_check_model_packages.py \
+            scripts/test_check_table_owners.py \
+            scripts/test_check_memory_budget.py
+
+      # ---- reserved slots (owning story uncomments its step) ----------------
+      #
+      # CI-8 (AD-13), E0-Access.5: scoped-query ratchet against
+      # scripts/scoped_queries_baseline.txt.
+      # - name: "CI-8 AD-13 scoped queries"
+      #   run: python scripts/check_scoped_queries.py
+      #
+      # CI-15 (UX-DR3), E0-UX.2: frontend tsc strict build plus the colour-token
+      # grep (scripts/check-ui-tokens.mjs). Needs setup-node; may become its
+      # own job in this file.
+      # - name: "CI-15 UI colour tokens"
+      #   run: node scripts/check-ui-tokens.mjs
+
+  # Gates that need the migrated test database (pgvector Postgres, same image
+  # and credentials as backend-tests.yml; tests/conftest.py builds the schema
+  # with `alembic upgrade head`).
+  database:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: lorekeeper
+          POSTGRES_PASSWORD: changeme
+          POSTGRES_DB: lorekeeper_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql+asyncpg://lorekeeper:changeme@localhost:5432/lorekeeper_test
+      TEST_DATABASE_URL: postgresql+asyncpg://lorekeeper:changeme@localhost:5432/lorekeeper_test
+      POSTGRES_PASSWORD: changeme
+      SECRET_KEY: ci-test-secret-key-not-used-anywhere-real
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: |
+            src/backend/requirements.txt
+            src/backend/requirements-dev.txt
+
+      # tests/conftest.py imports app.main, so the backend's runtime deps are
+      # needed (CPU torch index, as in the images and the licence job).
+      - name: Install dependencies
+        working-directory: src/backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install --extra-index-url https://download.pytorch.org/whl/cpu \
+            -r requirements.txt -r requirements-dev.txt
+
+      # CI-10 (AD-9): each registered (StrEnum, table, column) in
+      # tests/test_enum_check_sync.py matches its CHECK in pg_constraint.
+      - name: "CI-10 AD-9 StrEnum / CHECK sync"
+        working-directory: src/backend
+        run: python -m pytest -v tests/test_enum_check_sync.py
+
+      # ---- reserved slots (owning story uncomments its step) ----------------
+      #
+      # CI-9 (AD-8), E0-LLM.4: flat LLM schemas (no $ref/anyOf, extra="forbid").
+      # - name: "CI-9 AD-8 flat LLM schemas"
+      #   working-directory: src/backend
+      #   run: python -m pytest -v tests/test_llm_schemas_flat.py
+      #
+      # CI-11 (AD-12), E0-Access.3: registry property test,
+      # visible_clause(Model, ctx) agrees with audience_of(row).
+      # - name: "CI-11 AD-12 visibility registry property test"
+      #   working-directory: src/backend
+      #   run: python -m pytest -v tests/test_access_registry_property.py
+      #
+      # CI-12 (NFR-5), E0-QA.11 scaffold / E0-QA.14 hard gate: EV-4
+      # spoiler-leak suite, 0 leaks, every route probed or exempted.
+      # - name: "CI-12 EV-4 spoiler-leak suite"
+      #   working-directory: src/backend
+      #   run: python -m pytest -v tests/ev4
+
+  # ---- reserved jobs (they build images, so they are jobs, not steps) -------
+  #
+  # CI-5 (AD-6), E0-Platform (scripts/sidecar_smoke.sh from E0-Platform.3;
+  # stt in E0-Platform.5, tts in E5.4): each sidecar image starts with
+  # `--network none` and passes its health route.
+  # sidecars:
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - name: "CI-5 AD-6 ml sidecar offline health"
+  #       run: scripts/sidecar_smoke.sh ml
+  #
+  # CI-13 (AD-25), E0-Platform.9: multi-arch buildx build of every image
+  # (.github/workflows/images.yml per that story; listed here as the gate).

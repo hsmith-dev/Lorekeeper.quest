@@ -7,3 +7,7 @@ pyyaml==6.0.3  # scripts/check-licenses.py --register (dev/CI only)
 # CI covers the rest). lupa gives fakeredis EVAL, which the gate's Lua needs.
 fakeredis[lua]==2.26.2
 lupa==2.8
+# AD-1 import contracts (src/backend/.importlinter, gates.yml). grimp is its
+# import-graph engine; pinned so a grimp release can't change the graph.
+import-linter==2.15
+grimp==3.18

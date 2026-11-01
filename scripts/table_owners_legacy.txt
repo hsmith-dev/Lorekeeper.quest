@@ -1,0 +1,36 @@
+# Pre-expansion tables: created by migrations before the boundary map existed
+# and owned by no epic (epics only add columns to them), read by
+# scripts/check_table_owners.py (CI-7, AD-19). This list only shrinks: a table
+# that gains an owner, or that no migration creates any more, must be removed.
+# Never add one; a new table belongs to the epic that creates it.
+# scripts/test_check_table_owners.py holds the frozen ceiling.
+#
+# Format: <table>: <reason (the migration that created it)>
+
+users: pre-expansion core schema (fc4226e829a0_initial_schema)
+campaigns: pre-expansion core schema (fc4226e829a0_initial_schema)
+journal_entries: pre-expansion core schema (fc4226e829a0_initial_schema); E0-Access adds columns only
+tags: pre-expansion core schema (fc4226e829a0_initial_schema)
+journal_tags: pre-expansion core schema (fc4226e829a0_initial_schema); F1-core adds source_field only
+tag_categories: pre-expansion custom tag categories (828ca5263985)
+npcs: legacy NPCs, frozen after F3-world copies them into entities (00bc84d5d90c, AD-18)
+quests: legacy Quests, frozen after F3-world copies them into entities (00bc84d5d90c, AD-18)
+chat_sessions: pre-expansion chat (622e1505cab4); F1-core adds archived_at and npc_entity_id only
+source_documents: pre-expansion source uploads (402ad2866114)
+source_chunks: pre-expansion source uploads (402ad2866114)
+campaign_members: pre-expansion membership (914e38623288); F1-core adds role and access_epoch only
+campaign_share_tokens: pre-expansion share links (3e0983cd48fc); F1-core adds role, expires_at, access_epoch only
+model_evaluations: pre-expansion model evals (46e514a682dd)
+character_sheet_templates: pre-expansion character sheets (d4c5e6f7a8b9)
+character_sheets: pre-expansion character sheets (d4c5e6f7a8b9); F1-core adds pc_entity_id only
+user_settings: pre-expansion settings (a3f8b9c2d1e4); E9 adds streaks_enabled and achievements_enabled only
+session_plans: pre-expansion session plans (d3c4e5f6a7b8)
+shorthand_terms: pre-expansion shorthand glossary (c3d4e5f6a7b8)
+feedback: pre-expansion feedback (e4d5f6a7b8c9)
+admin_messages: pre-expansion admin features (a1b2c3d4e5f6)
+password_reset_tokens: pre-expansion password reset (f5e6a7b8c9d0)
+promo_codes: pre-expansion billing (b1a2c3d4e5f6)
+promo_code_redemptions: pre-expansion billing (b1a2c3d4e5f6)
+subscriptions: pre-expansion billing (b1a2c3d4e5f6)
+training_samples: pre-expansion fine-tune data (c5d4e3f2a1b0)
+app_config: pre-expansion app config (4b8f2d9e71c3)
