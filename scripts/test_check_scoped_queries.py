@@ -182,12 +182,6 @@ FROZEN_BASELINE = {
     "app/api/routes/journals.py::attach_tag select:Tag": 1,
     "app/api/routes/share.py::join_campaign get:Campaign": 1,
     "app/api/routes/share.py::join_campaign select:CampaignMember": 1,
-    "app/jobs/enqueue.py::_active_with_key select:Job": 1,
-    "app/jobs/enqueue.py::enqueue select:Job": 1,
-    "app/jobs/outbox.py::_released_dependents select:Job": 1,
-    "app/jobs/worker.py::_claim get:Job": 2,
-    "app/jobs/worker.py::_claim select:Job": 1,
-    "app/jobs/worker.py::_finish get:Job": 1,
     "app/services/journal_service.py::create_journal_entry raw_sql:journal_entries": 1,
     "app/services/journal_service.py::create_journal_entry select:JournalEntry": 1,
     "app/services/journal_service.py::create_journal_entry select:Tag": 1,
@@ -330,3 +324,71 @@ def test_main_runs_the_ratchet(tmp_path, capsys):
     empty.write_text("")
     assert csq.main(["--app", str(app), "--baseline", str(empty)]) == 1
     assert "app/services/s.py:2: select `Campaign`" in capsys.readouterr().out
+
+
+# ---- Owner infrastructure (OWNER_INFRA) ---------------------------------------
+
+# Pinned: widening the allowance means changing this test too.
+FROZEN_OWNER_INFRA = {"app/jobs/": ("E0-Jobs", frozenset({"Job", "DataBackfill"}))}
+
+INFRA_REGISTRY = """
+REGISTRY: dict = {
+    JournalEntry: stored(),
+    Job: always_gm(owner_field="created_by"),
+    DataBackfill: always_gm(),
+}
+"""
+INFRA_MODELS = """
+class JournalEntry(Base):
+    __tablename__ = "journal_entries"
+
+class Job(Base):
+    __tablename__ = "jobs"
+
+class DataBackfill(Base):
+    __tablename__ = "data_backfills"
+"""
+
+
+def infra(tmp_path: Path, files: dict[str, str]) -> list[str]:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    path = tmp_path / "baseline.txt"
+    path.write_text("")
+    app = make_app(tmp_path, {"access/registry.py": INFRA_REGISTRY, "db/models/models.py": INFRA_MODELS, **files})
+    return csq.check_ratchet(app, path)
+
+
+def test_owner_infra_is_pinned():
+    assert csq.OWNER_INFRA == FROZEN_OWNER_INFRA
+
+
+def test_owner_infra_matches_the_real_table_owner_map():
+    assert csq.check_owner_infra() == []
+
+
+def test_owner_infra_cross_check_fails_when_the_epic_does_not_own_the_table():
+    owners = {"jobs": {"E0-Jobs": "spine"}, "data_backfills": {"E0-Jobs": "spine", "E0-Journal": "epics"}}
+    problems = csq.check_owner_infra(csq.APP, owners)
+    assert len(problems) == 1 and "data_backfills" in problems[0] and "not E0-Jobs alone" in problems[0]
+    assert "nobody" in csq.check_owner_infra(csq.APP, {})[0]
+
+
+def test_jobs_package_may_read_its_own_tables(tmp_path):
+    assert infra(tmp_path, {
+        "jobs/worker.py": ("async def _claim(db, i):\n    job = await db.get(Job, i)\n"
+                           "    return job, select(DataBackfill), text('UPDATE jobs SET status = 1')\n"),
+    }) == []
+
+
+@pytest.mark.parametrize("rel, body", [
+    # app/jobs reading Campaign content: still a scoped-query site.
+    ("jobs/worker.py", "def f():\n    return select(JournalEntry)\n"),
+    # Another package reading Job (e.g. a route serving a Player their Jobs).
+    ("api/routes/jobs.py", "async def r(db, i):\n    return await db.get(Job, i)\n"),
+    ("services/reaper.py", "def f():\n    return select(Job)\n"),
+    # A look-alike prefix is not the package.
+    ("jobsx/w.py", "def f():\n    return select(Job)\n"),
+])
+def test_owner_infra_allows_nothing_else(tmp_path, rel, body):
+    errors = infra(tmp_path, {rel: body})
+    assert len(errors) == 1 and "outside app/access/" in errors[0], errors

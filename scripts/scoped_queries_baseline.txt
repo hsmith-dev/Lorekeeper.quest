@@ -9,7 +9,9 @@
 # scripts/test_check_scoped_queries.py holds the frozen ceiling. Never add a
 # line: read through app.access (scoped_select, scoped_get,
 # scoped_select_multi; owner checks: require_campaign("owner")) instead.
-# E0-Journal and E0-WorldCore burn the services down; chat.py is E0-Access.8's.
+# E0-Journal and E0-WorldCore burn the services down. Owner infrastructure
+# (app/jobs on Job / DataBackfill) is allowed by OWNER_INFRA in the check, not
+# listed here.
 #
 # Format: <path>::<function> <kind>:<target>   (one line per site)
 
@@ -51,18 +53,6 @@ app/api/routes/chat.py::list_sessions select:ChatSession
 # (E0-Access.12 reworks join with Roles).
 app/api/routes/share.py::join_campaign get:Campaign
 app/api/routes/share.py::join_campaign select:CampaignMember
-
-# Job runtime (E0-Jobs.2): enqueue's idempotency and dependency lookups (the
-# found Job's Campaign is checked against ctx right after), the outbox and the
-# worker read Jobs by id with no request; the worker rebuilds the handler's
-# ctx with ctx_for.
-app/jobs/enqueue.py::_active_with_key select:Job
-app/jobs/enqueue.py::enqueue select:Job
-app/jobs/outbox.py::_released_dependents select:Job
-app/jobs/worker.py::_claim get:Job
-app/jobs/worker.py::_claim get:Job
-app/jobs/worker.py::_claim select:Job
-app/jobs/worker.py::_finish get:Job
 
 # Services called with a Campaign the route already checked; E0-Journal
 # (journal writes, reindex_entry) and E0-WorldCore move them onto a ctx.
