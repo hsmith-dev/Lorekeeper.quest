@@ -14,6 +14,8 @@ and left out of the prompt history; an archived session is never replayed,
 never posted to, and to a Player is absent (list) or 404. Denied, hidden,
 another user's and missing sessions are the same 404.
 """
+import asyncio
+from contextlib import suppress
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -23,10 +25,11 @@ from sqlalchemy.orm.attributes import flag_modified
 
 from app.access import (
     PLAYER, PREVIEW_HEADER, CHAT_DETAIL, CHAT_META, CHAT_REPLY, GM, CampaignContext, NotFound, RoleMap, check_chat_session,
-    ctx_for_request, not_found, owned_get, project_chat, replay_history, resolve_sources, role_map, scoped_get,
-    session_visible_text, visible_refs,
+    ctx_for, ctx_for_request, grant_watch, not_found, owned_get, project_chat, replay_history, resolve_sources,
+    role_map, scoped_get, session_visible_text, visible_refs,
 )
 from app.access.context import PREVIEW_MEMBER
+from app.access.policy import NOT_FOUND_DETAIL
 from app.api.deps import get_current_user, get_user_llm_config
 from app.core.limiter import limiter, user_or_ip
 from app.db.models.campaign import Campaign
@@ -433,6 +436,33 @@ async def chat(
     return out
 
 
+async def _cancel(task: "asyncio.Future") -> None:
+    """Cancel `task` and wait for it to finish, swallowing its outcome."""
+    task.cancel()
+    with suppress(BaseException):
+        await task
+
+
+async def _watched_grants(db: AsyncSession, user: User, prep: _ChatPrep) -> list[CampaignContext]:
+    """The grants a stream stands on (E0-Access.10): the chat's ctx in its
+    Campaign, or, with no Campaign, the user's Co-GM grants in the role map
+    (the Campaigns whose entries it reads as GM). The Owner's own Campaigns
+    are watched only through their ctx (deleting the Campaign)."""
+    if prep.ctx is not None:
+        return [prep.ctx]
+    watched = []
+    for campaign_id, role in prep.scope.items():
+        if role != GM:
+            continue
+        try:
+            ctx = await ctx_for(db, user, campaign_id)
+        except NotFound:
+            continue
+        if ctx.grant_id is not None:
+            watched.append(ctx)
+    return watched
+
+
 @router.post("/stream")
 @limiter.limit("20/minute", key_func=user_or_ip)
 async def chat_stream(
@@ -448,13 +478,20 @@ async def chat_stream(
     all known before generation starts, projected like the blocking reply),
     then `delta` events, then `done` (or `error` if the model was unreachable
     before any token arrived). The frontend falls back to the blocking
-    endpoint if this one fails."""
+    endpoint if this one fails.
+
+    The stream stands on the caller's grant (E0-Access.10): when
+    `grant_watch` fires mid-stream (a role change, a removal, a deleted
+    Campaign), no further delta is sent, the upstream LLM request is
+    closed, the turn is not persisted and the stream ends with
+    `error {"detail": "Not found"}`."""
     import json as _json
     from fastapi.responses import StreamingResponse
     from starlette.background import BackgroundTask
     from app.services import llm_provider
 
     prep = await _prepare_chat(request, body, user, db, config)
+    watched = await _watched_grants(db, user, prep)
     # Reserve the local-LLM slot before the stream starts, so a busy gate is
     # a normal 503 {"code": "llm_busy"} (LLMBusy handler) rather than a
     # stream that opens and then fails. A no-op slot for BYOK.
@@ -462,23 +499,53 @@ async def chat_stream(
 
     async def event_stream():
         error: HTTPException | None = None
+        revoked = False
         parts: list[str] = []
+        # E0-Access.10: every chunk races the grant watch. When the grant
+        # changes, nothing more is sent, the upstream request is closed and
+        # nothing is persisted.
+        watch = asyncio.ensure_future(grant_watch(*watched, bind=db.bind)) if watched else None
+        stream = chunk = None
         try:
             yield f"event: meta\ndata: {_json.dumps(prep.meta)}\n\n"
             # held(): stream_messages' own gate acquire becomes a no-op.
             with slot.held():
+                stream = llm_provider.stream_messages(
+                    prep.chat_messages, config, max_tokens=600,
+                    timeout=chat_settings.kobold_timeout_seconds,
+                )
                 try:
-                    async for delta in llm_provider.stream_messages(
-                        prep.chat_messages, config, max_tokens=600,
-                        timeout=chat_settings.kobold_timeout_seconds,
-                    ):
+                    while True:
+                        chunk = asyncio.ensure_future(anext(stream))
+                        waiting = {chunk} if watch is None else {chunk, watch}
+                        await asyncio.wait(waiting, return_when=asyncio.FIRST_COMPLETED)
+                        if watch is not None and watch.done():
+                            # Fired (or failed: fail closed). A chunk that
+                            # arrived at the same moment is dropped.
+                            revoked = True
+                            await _cancel(chunk)
+                            break
+                        try:
+                            delta = chunk.result()
+                        except StopAsyncIteration:
+                            break
                         parts.append(delta)
                         yield f"event: delta\ndata: {_json.dumps({'text': delta})}\n\n"
                 except HTTPException as exc:
                     error = exc
         finally:
             # Also on client disconnect (generator closed mid-stream).
+            if watch is not None:
+                await _cancel(watch)
+            if chunk is not None and not chunk.done():
+                await _cancel(chunk)  # a disconnect mid-wait: the generator must not be running
+            if stream is not None:
+                with suppress(Exception):
+                    await stream.aclose()  # closes the upstream HTTP request
             await slot.release()
+        if revoked:
+            yield f"event: error\ndata: {_json.dumps({'detail': NOT_FOUND_DETAIL})}\n\n"
+            return
         if error is not None:
             yield f"event: error\ndata: {_json.dumps({'detail': error.detail})}\n\n"
             return

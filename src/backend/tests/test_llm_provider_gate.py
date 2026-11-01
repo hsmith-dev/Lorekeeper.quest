@@ -380,9 +380,13 @@ async def test_reserved_slot_covers_stream(backend, gate):
 
 def fake_prep():
     """Just enough of chat._ChatPrep for event_stream (no DB, no retrieval):
-    the projected meta event and the completion's messages."""
+    the projected meta event and the completion's messages. No Campaign and
+    an empty role map: the stream stands on no grant, so nothing is watched
+    (E0-Access.10)."""
     session_id = uuid.uuid4()
     return SimpleNamespace(
+        ctx=None,
+        scope={},
         session=SimpleNamespace(id=session_id),
         meta={"session_id": str(session_id), "sources": [], "canon_sources": [], "grounded": False,
               "retrieval": None, "citations": []},

@@ -7,6 +7,12 @@ An unknown token, a revoked one, an expired one (`expires_at <= now()`) and
 a token of the wrong kind (a collaborate link on a content route) are all
 the one `not_found()`: a viewer cannot tell a dead link from one that never
 existed. Only the share routes and `audience_ctx` build anon ctxs.
+
+Expiry is a grant change (E0-Access.10): the first resolve of an expired,
+non-revoked token bumps its `access_epoch` once (`grants.bump_expired_share_token`:
+one conditional UPDATE, then a commit and the `access:` publish), and still
+answers `not_found()`. A Share Link ctx carries `grant_id` = the token id, so
+`grant_watch` can follow it.
 """
 from __future__ import annotations
 
@@ -15,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.access.audience import PUBLIC
 from app.access.context import CampaignContext
+from app.access.grants import bump_expired_share_token
 from app.access.policy import ANON, not_found
 from app.db.models.share_token import CampaignShareToken
 
@@ -37,16 +44,17 @@ async def resolve_share_token(db: AsyncSession, token: str, kind: str | None = R
         stmt = stmt.where(CampaignShareToken.kind == kind)
     share = (await db.execute(stmt)).scalar_one_or_none()
     if share is None:
+        await bump_expired_share_token(db, token)
         not_found()
     return share
 
 
 def ctx_for_share(share: CampaignShareToken) -> CampaignContext:
     """The anon ctx (Public Audience, read-only, no user) a live share token
-    grants in its Campaign."""
+    grants in its Campaign. `grant_id` is the token id."""
     return CampaignContext(
         campaign_id=share.campaign_id, user_id=None, role=ANON, is_owner=False, audience=PUBLIC,
-        grant_id=None, access_epoch=share.access_epoch or 0, read_only=True,
+        grant_id=share.id, access_epoch=share.access_epoch or 0, read_only=True,
     )
 
 

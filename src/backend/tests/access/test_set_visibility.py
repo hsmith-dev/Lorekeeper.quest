@@ -406,11 +406,24 @@ async def test_a_failing_listener_is_logged_and_the_cache_still_goes(db, ev4, gm
 class _FakeValkey:
     def __init__(self, keys, fail=False):
         self.keys = set(keys)
+        self.values: dict[str, int] = {}
+        self.calls: list[str] = []
         self.fail = fail
 
-    async def scan_iter(self, match, count):
+    async def set(self, key, value, nx=False):
+        self.calls.append("set")
         if self.fail:
             raise ConnectionError("down")
+        if not (nx and key in self.values):
+            self.values[key] = int(value)
+
+    async def incr(self, key):
+        self.calls.append("incr")
+        self.values[key] = self.values.get(key, 0) + 1
+        return self.values[key]
+
+    async def scan_iter(self, match, count):
+        self.calls.append("scan")
         for key in sorted(self.keys):
             if fnmatch.fnmatchcase(key, match):
                 yield key
@@ -427,9 +440,11 @@ async def test_invalidate_deletes_only_that_campaigns_keys(monkeypatch, caplog):
     monkeypatch.setattr(valkey_client, "_valkey", fake)
     await vis.invalidate_campaign_cache(cid)
     assert fake.keys == {f"cache:{other}:x", "llm_gate:x"}
+    # E0-Access.10: the Campaign's generation (seeded, never from 0) moves before the delete.
+    assert fake.calls[:3] == ["set", "incr", "scan"] and fake.values[f"cachegen:{cid}"] > 10 ** 15
     monkeypatch.setattr(valkey_client, "_valkey", _FakeValkey({f"cache:{cid}:x"}, fail=True))
     await vis.invalidate_campaign_cache(cid)  # logged, not raised
-    assert "visibility_cache_invalidate_failed" in caplog.text
+    assert "cache_invalidate_failed" in caplog.text
     monkeypatch.setattr(valkey_client, "_valkey", None)
     await vis.invalidate_campaign_cache(cid)  # no client: nothing cached
 

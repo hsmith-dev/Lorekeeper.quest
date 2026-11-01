@@ -37,8 +37,9 @@ or "field_visibility.<key>" and does the write itself.
 `mark_dependents_stale(db, [ref])`, which calls every stale marker
 `(db, ref)` in registration order inside the caller's transaction. After
 the root transaction commits, each listener is called once per Campaign
-with `(campaign_id, refs, actor_ctx)`, and then every `cache:{campaign_id}:*`
-key is deleted from Valkey. On rollback (of the root transaction, or of the
+with `(campaign_id, refs, actor_ctx)`, and then the Campaign's cache
+generation is incremented and every `cache:{campaign_id}:*` key is deleted
+from Valkey (`access.cache`). On rollback (of the root transaction, or of the
 savepoint the change was made in), the listeners and cache work for it are
 discarded. A listener or cache failure is logged, never raised: the change
 has already committed.
@@ -60,6 +61,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session, SessionTransaction, selectinload
 from sqlalchemy.util.concurrency import await_only, in_greenlet
 
+from app.access import cache
 from app.access.audience import ALWAYS_GM_FIELDS
 from app.access.context import CampaignContext
 from app.access.policy import GM, not_found
@@ -83,7 +85,6 @@ logger = logging.getLogger(__name__)
 VISIBILITY_FLOOR = "visibility_floor"
 FIELD_PREFIX = "field_visibility."
 PENDING_KEY = "lorekeeper.access.visibility_changed"
-CACHE_SCAN_COUNT = 500
 
 
 # ── Errors ─────────────────────────────────────────────────────────────────
@@ -366,27 +367,10 @@ def _by_campaign(pending: Sequence[_Pending]) -> list[tuple[uuid.UUID, list[Reco
 
 
 async def invalidate_campaign_cache(campaign_id: uuid.UUID) -> None:
-    """Delete every `cache:{campaign_id}:*` key (the E0-Access.10 key
-    scheme). No Valkey client (tests, scripts) means nothing is cached. A
-    Valkey error is logged, never raised."""
-    from app.core.valkey_client import get_valkey
-
-    try:
-        client = get_valkey()
-    except RuntimeError:
-        return
-    try:
-        batch: list[str] = []
-        async for key in client.scan_iter(match=f"cache:{campaign_id}:*", count=CACHE_SCAN_COUNT):
-            batch.append(key)
-            if len(batch) >= CACHE_SCAN_COUNT:
-                await client.unlink(*batch)
-                batch = []
-        if batch:
-            await client.unlink(*batch)
-    except Exception:
-        logger.warning(json.dumps({"event": "visibility_cache_invalidate_failed", "campaign_id": str(campaign_id)}),
-                       exc_info=True)
+    """`cache.invalidate_campaign_cache`: increment the Campaign's cache
+    generation, then delete every `cache:{campaign_id}:*` key (the
+    E0-Access.10 key scheme). Never raises."""
+    await cache.invalidate_campaign_cache(campaign_id)
 
 
 async def dispatch(pending: Sequence[_Pending]) -> None:
