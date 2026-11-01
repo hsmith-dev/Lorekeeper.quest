@@ -14,7 +14,9 @@ Everything runs on your own machine. No OpenAI/Anthropic key needed (though brin
 
 ## Setup (Docker)
 
-**Requirements:** [Docker](https://docs.docker.com/get-docker/) with Compose (Docker Desktop on Windows/macOS, docker engine + compose plugin on Linux) · ~8 GB free RAM · ~15 GB free disk (images + one model). An NVIDIA GPU is optional but makes generation much faster — see [GPU](#gpu-optional-big-speedup) below.
+**Requirements:** [Docker](https://docs.docker.com/get-docker/) with Compose (Docker Desktop on Windows/macOS, docker engine + compose plugin on Linux) · **16 GB RAM recommended** · ~15 GB free disk (images + one model). An NVIDIA GPU is optional but makes generation much faster — see [CPU vs GPU speed](#cpu-vs-gpu-speed) below.
+
+Why 16 GB: measured on a running stack, the backend (4 workers + embedding model) sits around 4 GB and the model server around 5 GB once the 7B model is loaded, so ~9 GB steady. Both spike during generation and at startup (backend ~8 GB, model server ~9 GB at peak), so the combined worst case is ~17 GB. The two peaks don't usually line up, so 16 GB (ideally with some swap) is the practical baseline; 8 GB is not enough.
 
 ### 1 · Clone and configure
 
@@ -93,9 +95,13 @@ Prefer a different model entirely? Any instruct GGUF works — `ollama cp` any p
 
 Out of the box the stack generates a **self-signed certificate** at startup (browsers warn once; fine for local/LAN use). For a real domain, get a Let's Encrypt cert onto the host (`certbot certonly --standalone`) — the nginx container mounts `/etc/letsencrypt` and automatically prefers a real cert found there. See the TLS section of `docs/OCI_DEPLOYMENT.md`.
 
+### CPU vs GPU speed
+
+**On CPU, expect minutes per answer, not seconds.** A 7B model on CPU generates roughly a few tokens per second depending on your cores and memory bandwidth, and a full chat answer or journal entry is several hundred tokens, so one reply typically takes one to several minutes. The bundled `ollama` container uses all your CPU cores by default. On a shared machine you can cap it with `OLLAMA_CPUS` in `.env` (e.g. `OLLAMA_CPUS=6`), at the cost of proportionally slower replies. Requests time out after `KOBOLD_TIMEOUT_SECONDS` (default 1200 s); raise it if slow hardware hits that.
+
 ### GPU (optional, big speedup)
 
-With an NVIDIA GPU, add a compose override giving the `ollama` service a device reservation:
+With an NVIDIA GPU (and the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) on the host), add a compose override giving the `ollama` service a device reservation:
 
 ```yaml
 # docker-compose.override.yml
@@ -110,7 +116,26 @@ services:
               capabilities: [gpu]
 ```
 
-then start with both files: `docker compose -f docker-compose.prod.yml -f docker-compose.override.yml up -d`. Verify with `ollama ps` (should read `100% GPU`). A 7B Q4 model needs ~5 GB VRAM; generations drop from minutes (CPU) to seconds.
+then start with both files: `docker compose -f docker-compose.prod.yml -f docker-compose.override.yml up -d`. Verify with `docker compose -f docker-compose.prod.yml exec ollama ollama ps` (should read `100% GPU`). A 7B Q4 model needs ~5 GB VRAM; generations drop from minutes (CPU) to seconds.
+
+### Changing nginx's ports or bind address
+
+`docker-compose.prod.yml` publishes nginx on `80` and `443` on all interfaces. Compose *appends* an override file's `ports` list to the base file's instead of replacing it, so a plain `ports:` entry in `docker-compose.override.yml` adds a binding and still leaves 80/443 open. Use `!override` to replace the list:
+
+```yaml
+# docker-compose.override.yml — e.g. serve only on a Tailscale IP, on 8443
+services:
+  nginx:
+    ports: !override
+      - "100.x.y.z:8080:80"
+      - "100.x.y.z:8443:443"
+```
+
+`!override` needs Docker Compose v2.24 or newer. Check the result with `docker compose -f docker-compose.prod.yml -f docker-compose.override.yml config nginx` before `up -d`. The same file can hold the GPU section above.
+
+### Known limitations
+
+- **Per-user rate limits are counted per backend worker.** The app's own limits (e.g. 20 AI requests/minute per user) are kept in each of the 4 gunicorn workers' memory, so in practice a user can get up to 4× that before the app refuses. nginx's stricter per-user limit on AI endpoints (10/minute, short burst allowed) applies first, so that is the limit you'll actually hit.
 
 ### Remote dev over Tailscale
 
