@@ -130,7 +130,11 @@ def build_chat_messages(
         entries = []
         for j in journal_context:
             date_str = f" [{j['session_date']}]" if j.get("session_date") else ""
-            entries.append(f"- Notes{date_str}: {j['shorthand']}\n  Chronicle: {j['narrative'][:350]}")
+            if j.get("shorthand"):
+                entries.append(f"- Notes{date_str}: {j['shorthand']}\n  Chronicle: {j['narrative'][:350]}")
+            else:
+                # A non-GM's context carries no Shorthand (E0-Access.7): no Notes line.
+                entries.append(f"- Chronicle{date_str}: {j['narrative'][:350]}")
         system_parts.append(
             "\n[Relevant journal entries — use these to ground your answer in the player's actual story:]\n"
             + "\n".join(entries)

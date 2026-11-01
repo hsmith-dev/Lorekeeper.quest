@@ -20,11 +20,14 @@ from app.schemas.chat import (
     RetrievalCandidate,
     RetrievalDebug,
 )
-from app.api.deps import get_current_user, get_user_llm_config, get_campaign_with_access
+from app.access import GM, CampaignContext, NotFound, ctx_for, role_map
+from app.api.deps import get_current_user, get_user_llm_config
 from app.services.chat_service import build_chat_messages, rewrite_search_query, check_kobold_health, settings as chat_settings
 from app.services.llm_provider import complete_messages
-from app.services.retrieval_service import hybrid_search_journal, RAG_RELEVANCE_MAX_DISTANCE
-from app.services.embedding_service import embed
+from app.services.retrieval_service import (
+    RAG_RELEVANCE_MAX_DISTANCE, SOURCE_DOCUMENTS, hybrid_search_journal, hybrid_search_own_journals,
+    retrieve_sources,
+)
 from app.services.source_service import retrieve_canon_context
 from app.services.shorthand_service import get_glossary
 from app.services.llm_provider import LLMConfig
@@ -139,6 +142,10 @@ class _ChatPrep:
     context, the loaded-or-created session, and the exact messages array for
     the completion. Built by _prepare_chat below."""
     campaign_uuid: uuid.UUID | None
+    # The caller's ctx in campaign_uuid (None for a chat with no Campaign).
+    # Only a GM ctx (or no Campaign: the user's own GM entries) sees
+    # Shorthand, glossary, canon and the system prompt (E0-Access.7).
+    ctx: CampaignContext | None
     search_query: str
     rewritten_from: str | None
     journal_context: list[dict]
@@ -152,13 +159,19 @@ class _ChatPrep:
     def grounded(self) -> bool:
         return not (self.campaign_uuid and not self.sources and not self.canon_sources)
 
+    @property
+    def is_gm(self) -> bool:
+        return self.ctx is None or self.ctx.role == GM
+
     def retrieval_debug(self) -> RetrievalDebug:
+        system_prompt = self.chat_messages[0]["content"] if self.chat_messages else None
         return RetrievalDebug(
             query=self.search_query,
             rewritten_from=self.rewritten_from,
             threshold=RAG_RELEVANCE_MAX_DISTANCE,
             candidates=self.retrieval_candidates,
-            system_prompt=self.chat_messages[0]["content"] if self.chat_messages else None,
+            # The system prompt can carry Shorthand and the glossary: GM only.
+            system_prompt=system_prompt if self.is_gm else None,
         )
 
 
@@ -179,13 +192,19 @@ async def _prepare_chat(
         except ValueError:
             pass
 
+    ctx: CampaignContext | None = None
     if campaign_uuid:
         try:
-            campaign = await get_campaign_with_access(db, campaign_uuid, user)
+            ctx = await ctx_for(db, user.id, campaign_uuid)
+            campaign = await db.get(Campaign, ctx.campaign_id)
+            if campaign is None:
+                raise NotFound()
             campaign_name = campaign.name
             genre = campaign.genre.value
-        except HTTPException:
+        except NotFound:
+            ctx = None
             campaign_uuid = None  # no access — fall back to the user's own history below
+    is_gm = ctx is None or ctx.role == GM
 
     # --- Query rewriting: follow-ups ("what did he find there?") carry no
     # retrieval signal — resolve them against recent history into a
@@ -220,13 +239,20 @@ async def _prepare_chat(
     retrieval_candidates: list[RetrievalCandidate] = []
 
     try:
-        results = await hybrid_search_journal(
-            db, search_query, campaign_id=campaign_uuid, user_id=user.id,
-        )
+        if ctx is not None:
+            # GM: today's columns and gate. Anyone else: Party Narratives of
+            # the entries they may see, never the Shorthand.
+            results = await hybrid_search_journal(db, search_query, ctx=ctx)
+        else:
+            # No Campaign: the user's own entries in Campaigns they GM.
+            results = await hybrid_search_own_journals(db, search_query, roles=await role_map(db, user))
         for r in results:
+            # Hidden means absent: a non-GM gets no Shorthand anywhere (the
+            # Party schemas without the field are E0-Access.8).
+            shorthand = r.entry.shorthand if is_gm else ""
             retrieval_candidates.append(RetrievalCandidate(
                 id=str(r.entry.id),
-                shorthand=r.entry.shorthand[:120],
+                shorthand=shorthand[:120],
                 session_date=str(r.entry.session_date) if r.entry.session_date else None,
                 vector_distance=round(r.vector_distance, 4) if r.vector_distance is not None else None,
                 lexical_rank=r.lexical_rank,
@@ -235,16 +261,18 @@ async def _prepare_chat(
                 used=r.used,
             ))
             if r.used:
-                journal_context.append({
+                item = {
                     "narrative": r.entry.narrative,
-                    "shorthand": r.entry.shorthand,
                     "session_date": str(r.entry.session_date) if r.entry.session_date else None,
-                })
+                }
+                if is_gm:
+                    item["shorthand"] = r.entry.shorthand
+                journal_context.append(item)
                 sources.append(JournalSource(
                     id=str(r.entry.id),
                     snippet=r.entry.narrative[:200],
                     session_date=str(r.entry.session_date) if r.entry.session_date else None,
-                    shorthand=r.entry.shorthand,
+                    shorthand=shorthand,
                     distance=round(r.vector_distance, 4) if r.vector_distance is not None else None,
                     method=r.method,
                 ))
@@ -254,14 +282,18 @@ async def _prepare_chat(
     canon_context: str | None = None
     canon_sources: list[str] = []
     try:
-        canon_context, canon_sources = await retrieve_canon_context(
-            db, search_query, user.id, campaign_uuid
-        )
+        if ctx is not None:
+            # The source_documents provider: nothing for a non-GM ctx while
+            # source documents are GM-only.
+            found = await retrieve_sources(db, search_query, ctx=ctx, kinds=[SOURCE_DOCUMENTS])
+            canon_context, canon_sources = found[SOURCE_DOCUMENTS]
+        else:
+            canon_context, canon_sources = await retrieve_canon_context(db, search_query, user.id, None)
     except Exception:
         pass  # RAG failure must not break chat
 
     shorthand_glossary: list[dict] | None = None
-    if campaign_uuid:
+    if campaign_uuid and is_gm:  # the glossary is GM-only
         try:
             shorthand_glossary = await get_glossary(db, campaign_uuid)
         except Exception:
@@ -301,6 +333,7 @@ async def _prepare_chat(
 
     prep = _ChatPrep()
     prep.campaign_uuid = campaign_uuid
+    prep.ctx = ctx
     prep.search_query = search_query
     prep.rewritten_from = rewritten_from
     prep.journal_context = journal_context

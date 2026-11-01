@@ -49,14 +49,11 @@ GET /api/chat/sessions/{session_id}
 GET /api/feedback/
 GET /api/feedback/{feedback_id}/context
 GET /api/health
-GET /api/journals/
 GET /api/journals/{journal_id}
 GET /api/npcs/
 GET /api/npcs/{npc_id}
-GET /api/npcs/{npc_id}/entries
 GET /api/quests/
 GET /api/quests/{quest_id}
-GET /api/quests/{quest_id}/entries
 GET /api/session-plans/
 GET /api/session-plans/{plan_id}
 GET /api/settings/
@@ -98,8 +95,6 @@ POST /api/campaigns/{campaign_id}/tag-categories
 POST /api/campaigns/generate-concept
 POST /api/character-sheets/
 POST /api/character-sheets/templates
-POST /api/chat/
-POST /api/chat/stream
 POST /api/feedback/
 POST /api/ingest/discord
 POST /api/ingest/image
@@ -109,7 +104,6 @@ POST /api/journals/autocomplete
 POST /api/journals/generate
 POST /api/journals/generate-draft
 POST /api/journals/recap
-POST /api/journals/reindex
 POST /api/journals/summarize-session
 POST /api/npcs/
 POST /api/npcs/{npc_id}/generate

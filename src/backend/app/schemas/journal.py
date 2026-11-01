@@ -65,6 +65,27 @@ class JournalLiteResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class JournalLitePartyResponse(BaseModel):
+    """A journal entry as a non-GM sees it in search and entry lists
+    (E0-Access.7): the Narrative only, never the Shorthand. `tags` stays
+    because the journal list's card reads it."""
+    id: uuid.UUID
+    campaign_id: uuid.UUID
+    narrative: str
+    session_date: date | None
+    tags: list[TagResponse]
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class JournalListPartyResponse(BaseModel):
+    items: list[JournalLitePartyResponse]
+    total: int
+    page: int
+    limit: int
+
+
 class AutocompleteRequest(BaseModel):
     text: str
     campaign_id: uuid.UUID | None = None

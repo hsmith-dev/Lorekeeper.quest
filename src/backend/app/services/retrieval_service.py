@@ -18,13 +18,17 @@ that failed the relevance gate — so the chat response can show its work
 dropped) instead of asserting groundedness."""
 
 from dataclasses import dataclass
+from typing import Any, Awaitable, Callable, Iterable, Mapping
 import uuid
 
-from sqlalchemy import select, func, Integer
+from sqlalchemy import and_, false, select, func, update, Integer
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.access import GM, CampaignContext, visible_clause
 from app.db.models.journal import JournalEntry
-from app.services.embedding_service import embed
+from app.domain.enums import EntryKind
+from app.schemas.sources import SourceKind
+from app.services import embedding_service, source_service
 
 # Max cosine distance (0 = identical, 2 = opposite) for a *vector* hit to
 # count as relevant. Lexical hits pass the gate on their own — an exact
@@ -76,29 +80,81 @@ async def hybrid_search_journal(
     db: AsyncSession,
     query_text: str,
     *,
-    campaign_id: uuid.UUID | None,
-    user_id: uuid.UUID,
+    ctx: CampaignContext,
+    limit: int = 3,
+    max_distance: float = RAG_RELEVANCE_MAX_DISTANCE,
+    entry_ids: Iterable[uuid.UUID] | None = None,
+    narrative_only: bool = False,
+) -> list[RetrievedEntry]:
+    """Top-`limit` fused results plus every also-ran, ordered by RRF score,
+    over the entries of `ctx`'s Campaign that `ctx` may see. Callers use the
+    `used` entries for prompt context and the full list for the transparency
+    panel.
+
+    A GM ctx matches and ranks on `narrative_tsv` / `embedding` (Shorthand +
+    Narrative), exactly as before E0-Access.7. Any other ctx, and any ctx
+    with `narrative_only=True` (RC-9), uses the Party columns `party_tsv` /
+    `party_embedding` (Narrative only): a word that appears only in the
+    Shorthand can never match, rank or unlock the gate. Rows whose
+    `party_embedding` is still NULL are not vector candidates; there is no
+    fallback to `embedding`.
+
+    `entry_ids` (the NPC Knowledge contract) restricts candidates to those
+    ids after visibility; an empty set means no candidates. Both
+    `entry_ids` and `narrative_only` can only narrow."""
+    party = narrative_only or ctx.role != GM
+    base_filter = and_(JournalEntry.campaign_id == ctx.campaign_id, visible_clause(JournalEntry, ctx))
+    if entry_ids is not None:
+        ids = list(entry_ids)
+        base_filter = and_(base_filter, JournalEntry.id.in_(ids) if ids else false())
+    return await _search(db, query_text, base_filter, party=party, limit=limit, max_distance=max_distance)
+
+
+async def hybrid_search_own_journals(
+    db: AsyncSession,
+    query_text: str,
+    *,
+    roles: Mapping[uuid.UUID, str],
+    user_id: uuid.UUID | None = None,
     limit: int = 3,
     max_distance: float = RAG_RELEVANCE_MAX_DISTANCE,
 ) -> list[RetrievedEntry]:
-    """Top-`limit` fused results plus every also-ran, ordered by RRF score.
-    Callers use the `used` entries for prompt context and the full list for
-    the transparency panel."""
-    if campaign_id:
-        # A selected campaign is shared context — every member's entries
-        # count, not just the requesting user's.
-        base_filter = JournalEntry.campaign_id == campaign_id
+    """Retrieval for a chat with no Campaign selected: the user's own
+    entries in the Campaigns where `roles` (an `access.role_map`) makes them
+    GM, searched as a GM. Entries in Player Campaigns are left out (no
+    Campaign ctx to filter them by). `user_id` defaults to `roles.user_id`."""
+    uid = user_id if user_id is not None else getattr(roles, "user_id", None)
+    if uid is None:
+        raise ValueError("hybrid_search_own_journals: needs the user_id (a role_map carries it)")
+    gm_ids = [cid for cid, role in roles.items() if role == GM]
+    base_filter = and_(JournalEntry.user_id == uid, JournalEntry.campaign_id.in_(gm_ids) if gm_ids else false())
+    return await _search(db, query_text, base_filter, party=False, limit=limit, max_distance=max_distance)
+
+
+async def _search(
+    db: AsyncSession,
+    query_text: str,
+    base_filter: Any,
+    *,
+    party: bool,
+    limit: int,
+    max_distance: float,
+) -> list[RetrievedEntry]:
+    """The hybrid retriever over the rows matching `base_filter`: the Party
+    columns when `party`, else the GM columns."""
+    if party:
+        tsv_col, vec_col = JournalEntry.party_tsv, JournalEntry.party_embedding
     else:
-        base_filter = JournalEntry.user_id == user_id
+        tsv_col, vec_col = JournalEntry.narrative_tsv, JournalEntry.embedding
 
     # ── Dense retriever ────────────────────────────────────────────────────
     vector_hits: dict[uuid.UUID, tuple[JournalEntry, float, int]] = {}
     try:
-        query_embedding = embed(query_text)
-        distance = JournalEntry.embedding.cosine_distance(query_embedding)
+        query_embedding = embedding_service.embed(query_text)
+        distance = vec_col.cosine_distance(query_embedding)
         result = await db.execute(
             select(JournalEntry, distance.label("dist"))
-            .where(base_filter, JournalEntry.embedding.isnot(None))
+            .where(base_filter, vec_col.isnot(None))
             .order_by(distance)
             .limit(_CANDIDATE_POOL)
         )
@@ -136,7 +192,7 @@ async def hybrid_search_journal(
         }
 
         match_cases = [
-            (w, func.cast(JournalEntry.narrative_tsv.op("@@")(func.plainto_tsquery("english", w)), Integer))
+            (w, func.cast(tsv_col.op("@@")(func.plainto_tsquery("english", w)), Integer))
             for w in content
         ]
         total_expr = sum((expr for _, expr in match_cases[1:]), match_cases[0][1])
@@ -156,7 +212,8 @@ async def hybrid_search_journal(
             # let States→state match "stated", and case-folding let "United"
             # match "...more united than ever". A real name appears verbatim
             # and capitalized when it appears at all.
-            haystack = f"{entry.shorthand} {entry.narrative}"
+            # A Party search never looks at the Shorthand (FR-9(b)).
+            haystack = entry.narrative if party else f"{entry.shorthand} {entry.narrative}"
             matched_proper = any(p in haystack for p in proper_cased)
             # Gate-bypass rule — lexical evidence waives the vector gate only
             # when it's strong on its own terms:
@@ -207,3 +264,118 @@ async def hybrid_search_journal(
             r.used = True
             kept += 1
     return fused
+
+
+# ── Party fields ───────────────────────────────────────────────────────────
+
+async def index_party_fields(db: AsyncSession, entry: JournalEntry) -> None:
+    """Set `entry`'s Party search fields from its stored Narrative, in the
+    caller's transaction (the caller commits): `party_tsv =
+    to_tsvector('english', narrative)` in SQL, and `party_embedding =
+    embed(narrative)`. An embedding failure leaves `party_embedding` NULL
+    (clearing a stale vector) and never raises, so it never blocks a save.
+
+    Called from every journal write and reindex path (journal_service,
+    journals.reindex). E0-Journal moves it into `reindex_entry`."""
+    await db.flush()  # the row exists and the stored narrative is the current one
+    await db.execute(
+        update(JournalEntry)
+        .where(JournalEntry.id == entry.id)
+        .values(party_tsv=func.to_tsvector("english", JournalEntry.narrative))
+        .execution_options(synchronize_session=False)
+    )
+    try:
+        vector = embedding_service.embed(entry.narrative)
+    except Exception:
+        vector = None  # no model / model failure: non-GM vector search skips the row
+    entry.party_embedding = vector
+
+
+# ── Source providers ───────────────────────────────────────────────────────
+
+SourceProvider = Callable[..., Awaitable[Any]]
+
+# The provider name for uploaded source documents (canon chunks); not a
+# citation kind (E2.1's canon notes are `SourceKind.CANON_NOTE`).
+SOURCE_DOCUMENTS = "source_documents"
+
+_SOURCES: dict[str, SourceProvider] = {}
+
+
+def _source_key(kind: SourceKind | str) -> str:
+    key = kind.value if isinstance(kind, SourceKind) else str(kind)
+    if not key:
+        raise ValueError("register_source: kind must be a SourceKind or a provider name")
+    return key
+
+
+def register_source(kind: SourceKind | str, fn: SourceProvider) -> SourceProvider:
+    """Register `fn` as the provider for `kind` (a SourceKind or a provider
+    name such as SOURCE_DOCUMENTS). A provider is `async fn(db, query_text,
+    *, ctx, **options) -> Any` and must return only what `ctx` may see.
+    Registering a second, different provider for a kind raises ValueError."""
+    key = _source_key(kind)
+    existing = _SOURCES.get(key)
+    if existing is not None and existing is not fn:
+        raise ValueError(f"register_source: {key!r} already has a provider ({existing.__qualname__})")
+    _SOURCES[key] = fn
+    return fn
+
+
+def source_provider(kind: SourceKind | str) -> SourceProvider:
+    """The provider registered for `kind`; KeyError when there is none (fail closed)."""
+    key = _source_key(kind)
+    if key not in _SOURCES:
+        raise KeyError(f"no source provider registered for {key!r}")
+    return _SOURCES[key]
+
+
+def registered_sources() -> list[str]:
+    return sorted(_SOURCES)
+
+
+async def retrieve_sources(
+    db: AsyncSession,
+    query_text: str,
+    *,
+    ctx: CampaignContext,
+    kinds: Iterable[SourceKind | str] | None = None,
+    **options: Any,
+) -> dict[str, Any]:
+    """{kind: provider result} for each of `kinds` (every registered kind when
+    None), each provider called with `ctx`. `options` are passed to every
+    provider. An unregistered kind raises KeyError."""
+    keys = [_source_key(k) for k in kinds] if kinds is not None else registered_sources()
+    return {key: await source_provider(key)(db, query_text, ctx=ctx, **options) for key in keys}
+
+
+async def _journal_kind(db: AsyncSession, query_text: str, ctx: CampaignContext, kind: EntryKind,
+                        **options: Any) -> list[RetrievedEntry]:
+    results = await hybrid_search_journal(db, query_text, ctx=ctx, **options)
+    return [r for r in results if r.entry.kind == kind]
+
+
+async def journal_source(db: AsyncSession, query_text: str, *, ctx: CampaignContext,
+                         **options: Any) -> list[RetrievedEntry]:
+    """`SourceKind.JOURNAL`: the ctx retrieval's GM-kind entries."""
+    return await _journal_kind(db, query_text, ctx, EntryKind.GM, **options)
+
+
+async def player_journal_source(db: AsyncSession, query_text: str, *, ctx: CampaignContext,
+                                **options: Any) -> list[RetrievedEntry]:
+    """`SourceKind.PLAYER_JOURNAL`: the ctx retrieval's Player-kind entries."""
+    return await _journal_kind(db, query_text, ctx, EntryKind.PLAYER, **options)
+
+
+async def source_documents_source(db: AsyncSession, query_text: str, *, ctx: CampaignContext,
+                                  **options: Any) -> tuple[str | None, list[str]]:
+    """SOURCE_DOCUMENTS: `source_service.retrieve_canon_context` for a GM
+    ctx; `(None, [])` for any other ctx while source documents are GM-only."""
+    if ctx.role != GM:
+        return None, []
+    return await source_service.retrieve_canon_context(db, query_text, ctx.user_id, ctx.campaign_id, **options)
+
+
+register_source(SourceKind.JOURNAL, journal_source)
+register_source(SourceKind.PLAYER_JOURNAL, player_journal_source)
+register_source(SOURCE_DOCUMENTS, source_documents_source)

@@ -2,14 +2,17 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, or_
+from sqlalchemy.orm import selectinload
 
 from app.db.session import get_db
 from app.db.models.user import User
 from app.db.models.npc import NpcEntry
 from app.db.models.campaign import Campaign
 from app.db.models.journal import JournalEntry
+from app.db.models.tag import Tag
 from app.schemas.npc import NpcCreate, NpcUpdate, NpcResponse, NpcExtractResponse
-from app.schemas.journal import JournalLiteResponse
+from app.schemas.journal import JournalLitePartyResponse, JournalLiteResponse
+from app.access import GM, ctx_for, visible_clause
 from app.api.deps import get_current_user, get_user_llm_config, get_campaign_with_access
 from app.services.nlp_service import extract_tags
 from app.services.chat_service import generate_npc_bio
@@ -93,26 +96,44 @@ async def get_npc(
     return await _get_accessible_npc(db, npc_id, user)
 
 
-@router.get("/{npc_id}/entries", response_model=list[JournalLiteResponse])
+@router.get("/{npc_id}/entries", response_model=list[JournalLiteResponse] | list[JournalLitePartyResponse])
 async def get_npc_entries(
     npc_id: uuid.UUID,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
-) -> list[JournalLiteResponse]:
+) -> list[JournalLiteResponse] | list[JournalLitePartyResponse]:
+    """Entries mentioning this NPC by name. A GM matches the Shorthand or
+    the Narrative; anyone else matches the Narrative only, among the entries
+    visible to them, and gets Party items (no Shorthand), so a Shorthand-only
+    mention never shows up or reorders their list (E0-Access.7)."""
     npc = await _get_accessible_npc(db, npc_id, user)
+    ctx = await ctx_for(db, user.id, npc.campaign_id)
+    if ctx.role == GM:
+        entries_result = await db.execute(
+            select(JournalEntry)
+            .where(
+                JournalEntry.campaign_id == npc.campaign_id,
+                or_(
+                    JournalEntry.shorthand.ilike(f"%{npc.name}%"),
+                    JournalEntry.narrative.ilike(f"%{npc.name}%"),
+                ),
+            )
+            .order_by(JournalEntry.created_at.desc())
+            .limit(20)
+        )
+        return [JournalLiteResponse.model_validate(e) for e in entries_result.scalars().all()]
     entries_result = await db.execute(
         select(JournalEntry)
         .where(
             JournalEntry.campaign_id == npc.campaign_id,
-            or_(
-                JournalEntry.shorthand.ilike(f"%{npc.name}%"),
-                JournalEntry.narrative.ilike(f"%{npc.name}%"),
-            ),
+            visible_clause(JournalEntry, ctx),
+            JournalEntry.narrative.ilike(f"%{npc.name}%"),
         )
-        .order_by(JournalEntry.created_at.desc())
+        .options(selectinload(JournalEntry.tags).selectinload(Tag.custom_category))
+        .order_by(JournalEntry.created_at.desc(), JournalEntry.id)
         .limit(20)
     )
-    return list(entries_result.scalars().all())
+    return [JournalLitePartyResponse.model_validate(e) for e in entries_result.scalars().all()]
 
 
 @router.post("/{npc_id}/generate")
