@@ -78,7 +78,8 @@ async def get_campaign_with_access(
     """DEPRECATED (E0-Access.2): use `Depends(require_campaign(min_role))` or
     `app.access.ctx_for_request`. E0-Access.5 moved every caller off it, and
     scripts/check_scoped_queries.py (CI-8) fails on any new reference under
-    app/: it ignores the preview header and any Role below `owner`.
+    app/: it ignores the preview header and lets any Member through whatever
+    their Role (Player or Co-GM alike).
 
     Returns the Campaign when the user is its Owner or (unless
     require_owner=True) any Member, whatever the Member's Role. Every denial
@@ -91,7 +92,7 @@ async def get_campaign_with_access(
     return await scoped_get(db, Campaign, ctx, ctx.campaign_id)
 
 
-# `accessible_campaign_ids` is deleted (E0-Access.5): cross-Campaign lists use
+# The cross-Campaign helper is deleted (E0-Access.5): cross-Campaign lists use
 # `app.access.role_map_for_request` (or `role_map`) and `scoped_select_multi`.
 
 

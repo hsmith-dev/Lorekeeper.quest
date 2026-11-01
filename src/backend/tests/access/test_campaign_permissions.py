@@ -325,6 +325,112 @@ def test_accessible_campaign_ids_is_deleted():
     assert not hasattr(deps, "accessible_campaign_ids")
 
 
+async def test_owner_management_success_paths(client, db, ev4):
+    from app.db.models.campaign_member import CampaignMember
+    from app.db.models.share_token import CampaignShareToken
+
+    a = ev4.a.campaign_id
+    owner = (await ev4.actor("gm_owner")).headers
+    tokens = (await client.get(f"/api/campaigns/{a}/share", headers=owner)).json()
+    seeded = await db.scalar(sa.select(CampaignShareToken.id).where(CampaignShareToken.campaign_id == a))
+    assert [t["id"] for t in tokens] == [str(seeded)]
+    assert (await client.delete(f"/api/campaigns/{a}/share/{seeded}", headers=owner)).status_code == 204
+    await db.refresh(await db.get(CampaignShareToken, seeded))
+    assert (await db.get(CampaignShareToken, seeded)).revoked is True
+
+    leaver, stayer = await ev4.actor("player"), await ev4.actor("player_2")
+    members = (await client.get(f"/api/campaigns/{a}/members", headers=owner)).json()
+    assert {m["user_id"] for m in members} == {str(leaver.user_id), str(stayer.user_id)}
+    mine = await _entry(db, a, leaver.user_id)
+    theirs = await _entry(db, a, stayer.user_id)
+    await db.commit()
+    member_id = next(m["id"] for m in members if m["user_id"] == str(leaver.user_id))
+    r = await client.delete(f"/api/campaigns/{a}/members/{member_id}?delete_entries=true", headers=owner)
+    assert r.status_code == 204, r.text
+    assert await db.scalar(sa.select(sa.func.count()).where(CampaignMember.id == uuid.UUID(member_id))) == 0
+    assert await db.scalar(sa.select(sa.func.count()).where(JournalEntry.id == mine.id)) == 0
+    assert await db.scalar(sa.select(sa.func.count()).where(JournalEntry.id == theirs.id)) == 1
+    # Another Campaign's token id under A is a missing one.
+    other = await db.scalar(sa.select(CampaignShareToken.id).where(CampaignShareToken.campaign_id != a))
+    if other is not None:
+        r = await client.delete(f"/api/campaigns/{a}/share/{other}", headers=owner)
+        assert r.status_code == 404 and r.json() == NOT_FOUND
+
+
+async def test_analytics_top_tags_and_own_entries(client, db, ev4):
+    a = ev4.a.campaign_id
+    owner = (await ev4.actor("gm_owner")).headers
+    co_gm = await ev4.actor("co_gm")
+    seeded = ev4.a.ids["journal_entries"]
+    name = f"Barnaby {uuid.uuid4().hex[:6]}"
+    tag = Tag(name=name, tag_type=TagType.character)
+    db.add(tag)
+    await db.flush()
+    db.add_all([JournalTag(journal_id=seeded[0], tag_id=tag.id, source_field="narrative"),
+                JournalTag(journal_id=seeded[1], tag_id=tag.id, source_field="narrative")])
+    await _entry(db, a, co_gm.user_id)
+    await db.commit()
+    r = (await client.get(f"/api/campaigns/{a}/analytics", headers=owner)).json()
+    assert r["total_entries"] == len(seeded)
+    assert {"name": name, "count": 2} in r["top_characters"]
+    # A Co-GM's analytics cover their own entries (E0-Access.13 widens it).
+    r = (await client.get(f"/api/campaigns/{a}/analytics", headers=co_gm.headers)).json()
+    assert r["total_entries"] == 1 and r["top_characters"] == []
+    md = await client.get(f"/api/campaigns/{a}/export?format=markdown", headers=co_gm.headers)
+    assert md.status_code == 200
+    for entry_id in seeded:
+        narrative = await db.scalar(sa.select(JournalEntry.narrative).where(JournalEntry.id == entry_id))
+        assert narrative not in md.text
+
+
+async def test_non_gm_drafts_get_no_gm_context_and_gms_keep_it(client, db, ev4, monkeypatch):
+    from app.api.routes import journals as journal_routes
+    from app.services import journal_service, llm_provider
+    from tests.ev4.probes.retrieval import use_fake_llm
+
+    async def no_dup(*_args):
+        return False
+
+    async def noop(*_args):
+        return None
+
+    monkeypatch.setattr(journal_routes, "check_hash", no_dup)
+    monkeypatch.setattr(journal_service, "store_hash", noop)
+    monkeypatch.setattr(journal_service, "extract_tags", lambda _text: [])
+    monkeypatch.setattr(journal_service.embedding_service, "embed", lambda _text: None)
+    term = ev4.a.canary("TERM").token  # the seeded (gm) glossary term
+    a = str(ev4.a.campaign_id)
+
+    async def prompts(actor, url, body):
+        with llm_provider.capture() as cap:
+            r = await client.post(url, json=body, headers=actor.headers)
+        assert r.status_code in (200, 201), r.text
+        return " ".join(str(m.get("content")) for call in cap.calls for m in call.messages)
+
+    for who, sees in (("player", False), ("co_gm", True)):
+        actor = await ev4.actor(who)
+        await use_fake_llm(ev4, actor)
+        draft = await prompts(actor, "/api/journals/generate-draft", {"notes": "met the innkeeper", "campaign_id": a})
+        one_step = await prompts(actor, "/api/journals/generate", {
+            "notes": "met the innkeeper", "campaign_id": a, "entry_hash": uuid.uuid4().hex})
+        assert (term in draft) is sees and (term in one_step) is sees, who
+
+
+async def test_gm_ai_helpers_run_for_a_co_gm(client, ev4, monkeypatch):
+    from app.api.routes import npcs as npc_routes
+    from tests.ev4.probes.retrieval import use_fake_llm
+
+    monkeypatch.setattr(npc_routes, "extract_tags", lambda _text: [])
+    a = ev4.a.campaign_id
+    co_gm, player = await ev4.actor("co_gm"), await ev4.actor("player")
+    for actor in (co_gm, player):
+        await use_fake_llm(ev4, actor)
+    for url in (f"/api/npcs/extract?campaign_id={a}", f"/api/quests/suggest?campaign_id={a}"):
+        assert (await client.post(url, headers=co_gm.headers)).status_code == 200, url
+        r = await client.post(url, headers=player.headers)
+        assert r.status_code == 404 and r.json() == NOT_FOUND, url
+
+
 async def test_missing_campaign_is_the_one_404(client, ev4):
     owner = (await ev4.actor("gm_owner")).headers
     for method, url in (("GET", f"/api/campaigns/{RANDOM}/export"), ("PATCH", f"/api/campaigns/{RANDOM}"),

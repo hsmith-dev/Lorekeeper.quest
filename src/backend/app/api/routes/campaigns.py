@@ -355,7 +355,10 @@ async def create_tag_category(
     if not name:
         raise HTTPException(status_code=422, detail="Category name cannot be empty.")
 
-    existing = await db.execute(scoped_select(TagCategory, ctx).where(TagCategory.name.ilike(name)))
+    existing = await db.execute(
+        scoped_select(TagCategory, ctx).where(func.lower(TagCategory.name) == name.lower())
+        .order_by(TagCategory.created_at, TagCategory.id)
+    )
     if found := existing.scalars().first():
         return project(found, ctx)
 

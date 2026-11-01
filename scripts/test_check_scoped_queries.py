@@ -158,9 +158,10 @@ def test_read_only_inside_access_and_strings_pass(tmp_path):
 
 # ---- E0-Access.5: deprecated helpers and the scoped-query ratchet -----------
 
-# The ceiling: the baseline may lose lines, never gain them. Lower a count (or
-# drop a key) in the same PR that removes a line from
-# scripts/scoped_queries_baseline.txt.
+# The ceiling: the baseline may lose lines, never gain them. Lower the count
+# (or drop the key) here in the same PR that removes a line from
+# scripts/scoped_queries_baseline.txt; test_baseline_never_grows fails until
+# both match, so a removed line cannot quietly come back later.
 FROZEN_BASELINE = {
     "app/api/routes/admin.py::_user_to_admin_response owner_check:Campaign.user_id": 1,
     "app/api/routes/admin.py::_user_to_admin_response select:Campaign": 1,
@@ -185,6 +186,12 @@ FROZEN_BASELINE = {
     "app/api/routes/journals.py::attach_tag select:Tag": 1,
     "app/api/routes/share.py::join_campaign get:Campaign": 1,
     "app/api/routes/share.py::join_campaign select:CampaignMember": 1,
+    "app/jobs/enqueue.py::_active_with_key select:Job": 1,
+    "app/jobs/enqueue.py::enqueue select:Job": 1,
+    "app/jobs/outbox.py::_released_dependents select:Job": 1,
+    "app/jobs/worker.py::_claim get:Job": 2,
+    "app/jobs/worker.py::_claim select:Job": 1,
+    "app/jobs/worker.py::_finish get:Job": 1,
     "app/services/journal_service.py::create_journal_entry raw_sql:journal_entries": 1,
     "app/services/journal_service.py::create_journal_entry select:JournalEntry": 1,
     "app/services/journal_service.py::create_journal_entry select:Tag": 1,
@@ -232,9 +239,18 @@ def test_repo_ratchet_is_clean():
 def test_baseline_never_grows():
     keys, errors = csq.load_baseline(csq.BASELINE)
     assert not errors
-    grown = {k: n for k, n in Counter(keys).items() if n > FROZEN_BASELINE.get(k, 0)}
+    counts = Counter(keys)
+    grown = {k: n for k, n in counts.items() if n > FROZEN_BASELINE.get(k, 0)}
     assert not grown, (f"scoped_queries_baseline.txt gained {sorted(grown)}; the baseline only shrinks. Read "
                        "through app.access (scoped_select / scoped_get / scoped_select_multi) instead")
+    shrunk = {k: n for k, n in FROZEN_BASELINE.items() if counts.get(k, 0) < n}
+    assert not shrunk, (f"scoped_queries_baseline.txt lost {sorted(shrunk)}: lower FROZEN_BASELINE in this test "
+                        "to match, so the ceiling shrinks with it")
+
+
+def test_annotated_tablename_is_read(tmp_path):
+    app = ratchet_app(tmp_path, {"db/models/more.py": "class Campaign(Base):\n    __tablename__: str = 'campaigns'\n"})
+    assert csq.registered_models(app)["Campaign"] == "campaigns"
 
 
 def test_registered_models_come_from_the_registry_and_tablenames(tmp_path):

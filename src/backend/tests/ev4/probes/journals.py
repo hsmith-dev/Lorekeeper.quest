@@ -12,7 +12,7 @@ from tests.ev4.families import (
 )
 from tests.ev4.probes._support import (
     MISSING, add_category, add_entry, add_tag, assert_same_answer, authenticated, is_gm_of_a, link, outsider,
-    row_count,
+    previewing, row_count,
 )
 from tests.ev4.registry import ev4_probe
 
@@ -43,6 +43,12 @@ async def probe_list_journals(ev4, actor):
         return
     assert_no_canary(actor, await actor.get(f"/api/journals/?campaign_id={a}"))
     assert_no_canary(actor, await actor.get("/api/journals/"))
+    if "gm" in actor.grants.values():
+        # E0-Access.5: previewing, every GM Campaign (A for co_gm, B for
+        # cross_gm_player) reads as the member view, across Campaigns too.
+        pv = previewing(actor)
+        assert_no_canary(pv, await pv.get("/api/journals/?limit=100"))
+        assert_no_canary(pv, await pv.get(f"/api/journals/?campaign_id={a}"))
     await assert_hidden_equals_missing(actor, f"/api/journals/?campaign_id={hidden.campaign_id}",
                                        f"/api/journals/?campaign_id={MISSING}")
     if is_gm_of_a(ev4, actor):
@@ -163,7 +169,6 @@ async def probe_delete_journal(ev4, actor):
         await assert_hidden_equals_missing(actor, f"/api/journals/{target}", f"/api/journals/{MISSING}",
                                            method="DELETE")
         assert await row_count(ev4, JournalEntry, JournalEntry.id == target) == 1
-
 
 
 @ev4_probe("POST", "/api/journals/generate")

@@ -2,10 +2,11 @@
 title: 'E0-Access.5: Per-Campaign permission checks replace accessible_campaign_ids and inline owner checks'
 type: 'feature'
 created: '2026-11-01'
-status: 'in-review'
+status: 'done'
 baseline_revision: '9160cb62abe2d7cace054d4e95f6d85883b185f9'
+rebased_onto: '5ad0e3113f26a397cee6debe176bcbd239c5ba54'
 review_loop_iteration: 0
-followup_review_recommended: false
+followup_review_recommended: true
 context:
   - '{project-root}/_bmad-output/planning-artifacts/epics.md'
 warnings: ['oversized']
@@ -84,7 +85,59 @@ deferred: []
 
 ## Spec Change Log
 
+### 2026-11-01 — review patch outside the contract (no loopback)
+- Trigger: blind-hunter finding that Players now see Delete / tag controls that answer 404 (journal delete and tag attach / detach became gm-only).
+- Amended: nothing in this spec was re-derived; the patch adds cosmetic role gating to `src/frontend/src/pages/EntryDetailPage.tsx` (`useEffectiveRole(entry.campaign_id).isGm`), although the contract's Never list says "the frontend". The contract is left as written (read-only); this entry records the deviation.
+- Known-bad state avoided: a Player confirming "Delete this entry?" and getting an unhandled "Not found".
+- KEEP: the server stays the only enforcement point; the frontend change only hides controls.
+
 ## Review Triage Log
+
+### 2026-11-01 — Review pass
+- verdicts: 42 findings — high 0, medium 8, low 20, false 14, maybe-false 0
+- findings:
+  - `[false]` `[reject]` (blind) Players lose autocomplete when the frontend sends campaign_id — the specified behaviour: the AC replaces the autocomplete owner check with `require_campaign("gm")`, and E0-Access.6 lists `/autocomplete` as 404 for Players.
+  - `[medium]` `[patch]` (blind) Player UI still shows Delete / tag attach / detach, which now 404 — EntryDetailPage hides them unless `useEffectiveRole(entry.campaign_id).isGm` (see Spec Change Log); tsc and build pass.
+  - `[medium]` `[patch]` (blind) `gm_context` defaults to True (fails open) — now a required keyword on `generate_draft_narrative` and `create_journal_entry`; direct test callers pass it.
+  - `[low]` `[reject]` (blind) Ratchet misses update/delete/insert, aliased, select_from, qualified names, import aliases, text(CONST) — the story's list is select / get / raw SQL / `Campaign.user_id ==`; evading it takes deliberate aliasing, and alias tracking adds complexity; E0-Access.9 adds the Visibility-write checks.
+  - `[low]` `[reject]` (blind) Owner check misses `campaign.user_id == user.id`, `.in_`, filter_by — the AC names `Campaign.user_id ==`; the instance form compares loaded objects, not a query.
+  - `[low]` `[patch]` (blind) Frozen ceiling does not shrink with the baseline — `test_baseline_never_grows` now also fails when the baseline lost a line the ceiling still lists.
+  - `[low]` `[reject]` (blind) Party-projected routes keep the GM `response_model` — the Party schemas subclass the GM ones with identical keys; a future divergence fails FastAPI validation or renders the default, never the GM value.
+  - `[low]` `[patch]` (blind) `get_campaign_with_access` docstring misleading; kept without reason — docstring corrected ("lets any Member through whatever their Role"); kept because the story deletes only `accessible_campaign_ids`.
+  - `[low]` `[patch]` (blind) upload / extract / suggest probes run no Co-GM — grouped with the verification-gap extract/suggest row; `test_gm_ai_helpers_run_for_a_co_gm` added.
+  - `[low]` `[patch]` (blind) `_query_route_gm_only` never checks a GM 200 — same group and test.
+  - `[false]` `[reject]` (blind) No check of the Owner's 400 on leave — `test_leave_campaign` asserts the Owner's 400.
+  - `[medium]` `[patch]` (blind) Co-GM export / analytics contents untested — grouped with the analytics verification gap; `test_analytics_top_tags_and_own_entries` checks the Co-GM's own-entry stats and that the export holds none of the Owner's narratives.
+  - `[low]` `[patch]` (blind) generate_plan_draft queries lack an id tiebreaker — added.
+  - `[false]` `[reject]` (blind) create_session_plan / create_shorthand use body.campaign_id and user.id — ctx is built from body.campaign_id and the same user, so the values are identical.
+  - `[low]` `[patch]` (blind) Stray blank line in probes/journals.py — removed.
+  - `[low]` `[reject]` (blind) raw_sql matcher could flag a column named like a table — only string literals inside text() / exec_driver_sql are scanned; no such false positive exists and a literal naming `tags` is the table in practice.
+  - `[low]` `[reject]` (edge) update/delete/insert/select_from not flagged — same as the blind ratchet row.
+  - `[low]` `[reject]` (edge) get() with an attribute or alias first argument — same reasoning (deliberate evasion; complexity).
+  - `[low]` `[reject]` (edge) `Campaign.user_id.in_/.is_` or an alias — same reasoning.
+  - `[low]` `[reject]` (edge) Raw SQL held in a variable — same reasoning.
+  - `[low]` `[patch]` (edge) `__tablename__` as an annotated assignment is missed — accepted; `test_annotated_tablename_is_read` added.
+  - `[low]` `[patch]` (edge) Tag-category dedupe used `ilike` (wildcards) and `.first()` — now `lower(name) == lower(input)` ordered by created_at, id.
+  - `[false]` `[reject]` (edge) Player autocomplete 404 — the specified behaviour (as the blind row).
+  - `[low]` `[patch]` (edge, claim) AC grep for `accessible_campaign_ids` matched a deps.py comment — comment reworded; `grep accessible_campaign_ids src/backend/app` is empty.
+  - `[low]` `[reject]` (edge, claim) Ratchet does not stop every unscoped read — the gate covers the forms the story names; see the ratchet rows.
+  - `[medium]` `[patch]` (verification-gap) One-step /generate drops GM context for non-GMs untested; no GM positive control — `test_non_gm_drafts_get_no_gm_context_and_gms_keep_it` captures both routes' prompts: the seeded glossary canary is absent for a Player and present for a Co-GM.
+  - `[medium]` `[patch]` (verification-gap) Analytics top tags and Co-GM own entries untested — `test_analytics_top_tags_and_own_entries`.
+  - `[medium]` `[patch]` (verification-gap) Owner success paths for revoke / remove (`delete_entries`) / list contents never run — `test_owner_management_success_paths`.
+  - `[medium]` `[patch]` (verification-gap) No GM runs extract / suggest — `test_gm_ai_helpers_run_for_a_co_gm` (Co-GM 200, Player 404).
+  - `[false]` `[reject]` (intent) Shorthand / plans / sources writes became GM-only — the AC's "require_campaign("gm") (authoring)"; reads through scoped_select keep hidden ≡ missing; E0-Access.6 lists these writes as GM-only.
+  - `[false]` `[reject]` (intent) A Player can no longer delete their own entry — the AC: delete requires gm (E7 adds Player Journal deletes).
+  - `[false]` `[reject]` (intent) Autocomplete 404 for Players — as above.
+  - `[false]` `[reject]` (intent) `gm_context` leak fix beyond the story — needed for the generate-draft probe the intent asks for to report zero leaks.
+  - `[false]` `[reject]` (intent) Export / analytics widened Owner → gm — the AC splits owner (management) from gm; E0-Access.6's management list excludes them; content stays own-entries until E0-Access.13.
+  - `[false]` `[reject]` (intent) Chat ignores preview — the intent leaves chat to E0-Access.8.
+  - `[false]` `[reject]` (intent) list_campaigns keeps a baselined raw select — the ids are the caller's role_map (preview applied), Campaign has no campaign_id column, rows are projected per Role.
+  - `[low]` `[reject]` (intent) Ratchet is AST name matching — same as the ratchet rows.
+  - `[false]` `[reject]` (intent) A new site in a listed function passes while the count holds — each site is its own line; one more site exceeds the count and fails (`test_each_site_needs_its_own_line`).
+  - `[low]` `[reject]` (intent) Editing both baseline and FROZEN_BASELINE defeats the ratchet — true of every committed ceiling (CI-2/3/7/14 use the same pattern); review catches a grown ceiling.
+  - `[false]` `[reject]` (intent) Baseline lists sites in touched routes — each carries its reason (global tags by name, role_map ids, service after the route's check).
+  - `[medium]` `[patch]` (intent) EV-4 probes never send the preview header or touch the GM Campaign — the journal and tag list probes now also run a previewing copy of each GM actor (grants narrowed to player) over the cross-Campaign and single-Campaign lists; disabling `roles.preview` makes 3 probes report leaks.
+  - `[false]` `[reject]` (intent) test_projection rewritten to the new rules — descriptive; the expectations are the story's ACs.
 
 ## Design Notes
 
@@ -98,3 +151,32 @@ Baseline lines are line-number-free (`<path>::<function> <kind>:<target>`, one l
 - `bash /private/tmp/claude-501/-Users-harrisonsmith-Documents-GitHub-Lorekeeper-quest/a5524f3a-4ba6-4d29-8233-79940950d6ae/scratchpad/a5_test.sh -q` (desktop, cached image, isolated pg + valkey) -- expected: all pass, `EV-4: probes=77 pending=50 leaks=0`.
 - `python scripts/check_scoped_queries.py`, `python -m pytest -q scripts/test_check_scoped_queries.py`, `lint-imports` -- expected: clean.
 - `gh pr checks <n> --repo hsmith-dev/Lorekeeper.quest --watch` -- expected: all green.
+
+## Auto Run Result
+
+Status: done
+
+**Summary:** Every remaining route is off `get_campaign_with_access` and the inline `Campaign.user_id ==` checks: campaigns.py runs on `require_campaign("owner"|"gm"|"player")` (management Owner-only; export, analytics and tag-category writes `gm`; tag-category list and leave `player`); journals.py's attach / detach / delete use `require_campaign_for(JournalEntry, "journal_id", "gm")`, its AI helpers `ctx_for_request` (recap and autocomplete-with-Campaign `gm`, generate-draft and summarize-session `player`), reindex `require_campaign("gm")`; shorthand / session plans / sources read through `scoped_select` + `project` for `player` and write for `gm`; NPC extract, Quest suggest and session-plan generate are `gm` with scoped queries. `role_map_for_request` (RoleMap.preview) narrows every GM Campaign of a cross-Campaign list to the member view, so `/api/journals/`, `/api/tags/` and `/api/campaigns/` honour the preview header (closes E0-Access.4's deferred item). A non-GM's journal draft gets no glossary or source canon (`gm_context`, required). `accessible_campaign_ids` is deleted. CI-8 bans the deprecated helpers and ratchets select / get / raw SQL on registered models and `Campaign.user_id ==` outside app/access/ against `scripts/scoped_queries_baseline.txt` (40 lines: admin, feedback, chat.py, share join, list_campaigns, template delete, attach_tag's global tag lookup, the E0-Jobs.2 runtime, services). EV-4: 32 routes probed and off the pending baseline.
+
+**Implementation note:** the code was written in this session before the spec was filed (the step-03 implementation subagent was not used); the review layers ran on the full diff as specified.
+
+**Files changed:**
+- `src/backend/app/access/{context,projection,__init__}.py` -- preview-aware role map; projections for ShorthandTerm, SessionPlan, SourceDocument, TagCategory.
+- `src/backend/app/schemas/{shorthand,session_plan,source,tag_category}.py` -- GM / Party pairs.
+- `src/backend/app/api/deps.py` -- helper deleted / docstring.
+- `src/backend/app/api/routes/{campaigns,journals,shorthand,session_plans,sources,tags,npcs,quests}.py` -- per-Campaign Role checks, scoped reads, uniform 404.
+- `src/backend/app/services/journal_service.py` -- required `gm_context`.
+- `scripts/check_scoped_queries.py`, `scripts/scoped_queries_baseline.txt`, `scripts/test_check_scoped_queries.py`, `.github/workflows/gates.yml` -- CI-8 ratchet.
+- `src/backend/tests/ev4/probes/{authoring,ai_routes,campaigns,journals,tags,_support}.py`, `tests/ev4/pending_baseline.txt` -- probes (incl. a previewing actor).
+- `src/backend/tests/access/{test_campaign_permissions,test_projection,test_context}.py`, `tests/test_party_retrieval.py` -- tests.
+- `src/frontend/src/pages/EntryDetailPage.tsx` -- hides Delete / tag edits for non-GMs.
+
+**Review:** 42 findings (high 0, medium 8, low 20, false 14). Patched: 7 medium entries (frontend gating; required `gm_context`; one-step generate / GM-context test; analytics and Co-GM export test; Owner management success paths; Co-GM extract / suggest; preview actor in EV-4) and 9 low (exact ceiling, docstring, tiebreakers, blank line, annotated `__tablename__`, tag-category exact match, deps comment, and the two Co-GM probe rows grouped into the extract / suggest test). Deferred: none. Rejected: the ratchet-coverage rows (update/delete/alias/variable SQL: outside the story's list, deliberate evasion only), the Party `response_model` row, the raw_sql false-positive row, and every `false` row with its refutation above.
+
+**Follow-up review recommended:** true -- 7 medium entries were patched on this first pass; the patches (frontend gating in EntryDetailPage, the required `gm_context` keyword, the exact-ceiling assertion, the previewing EV-4 actor) have not been through the review layers.
+
+**Verification:** After rebasing onto `5ad0e31` (E0-Jobs.2), on the desktop (cached `lorekeeper-backend-test` image plus `rq`, isolated pgvector + valkey containers): full backend suite 1415 passed, 4 skipped; `EV-4: probes=77 exemptions=0 pending=50 leaks=0`. A mutation (preview flag never set) makes the journal / tag list probes report 3 leaks. `check_scoped_queries.py` ok; gate unit tests 55 passed; `lint-imports` 5 kept; frontend `tsc --noEmit` and `npm run build` pass. First CI run: all green except the CI-8 step, which failed only on E0-Jobs.2's new `app/jobs` sites (baselined after the rebase).
+
+**Needs desktop verification:** nothing specific (no Ollama, GPU, compose or nginx surface).
+
+**Residual risks:** Players lose some actions the old routes allowed (own-entry delete, tag edits, autocomplete with a Campaign, shorthand / session-plan / source writes) until E0-Access.6 / E7 define Player writes; only EntryDetailPage hides its controls. The E0-Access.8 chat work will touch baselined chat.py sites (renames or removals there must update the baseline and FROZEN_BASELINE). E0-Access.9 edits check_scoped_queries.py next: the ratchet is a separate section below `main`'s helpers.

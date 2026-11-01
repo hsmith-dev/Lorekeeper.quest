@@ -53,7 +53,7 @@ async def generate_plan_draft(
 
     entries_result = await db.execute(
         scoped_select(JournalEntry, ctx).with_only_columns(JournalEntry.shorthand)
-        .order_by(JournalEntry.created_at.desc())
+        .order_by(JournalEntry.created_at.desc(), JournalEntry.id)
         .limit(8)
     )
     recent_entries = [{"shorthand": r} for r in entries_result.scalars().all()]
@@ -61,14 +61,14 @@ async def generate_plan_draft(
     quests_result = await db.execute(
         scoped_select(Quest, ctx).with_only_columns(Quest.title)
         .where(Quest.status == QuestStatus.active)
-        .order_by(Quest.created_at.desc())
+        .order_by(Quest.created_at.desc(), Quest.id)
         .limit(10)
     )
     open_quests = list(quests_result.scalars().all())
 
     npcs_result = await db.execute(
         scoped_select(NpcEntry, ctx).with_only_columns(NpcEntry.name)
-        .order_by(NpcEntry.updated_at.desc())
+        .order_by(NpcEntry.updated_at.desc(), NpcEntry.id)
         .limit(15)
     )
     npcs = list(npcs_result.scalars().all())

@@ -57,6 +57,18 @@ app/api/routes/chat.py::list_sessions select:ChatSession
 app/api/routes/share.py::join_campaign get:Campaign
 app/api/routes/share.py::join_campaign select:CampaignMember
 
+# Job runtime (E0-Jobs.2): enqueue's idempotency and dependency lookups (the
+# found Job's Campaign is checked against ctx right after), the outbox and the
+# worker read Jobs by id with no request; the worker rebuilds the handler's
+# ctx with ctx_for.
+app/jobs/enqueue.py::_active_with_key select:Job
+app/jobs/enqueue.py::enqueue select:Job
+app/jobs/outbox.py::_released_dependents select:Job
+app/jobs/worker.py::_claim get:Job
+app/jobs/worker.py::_claim get:Job
+app/jobs/worker.py::_claim select:Job
+app/jobs/worker.py::_finish get:Job
+
 # Services called with a Campaign the route already checked; E0-Journal
 # (journal writes, reindex_entry) and E0-WorldCore move them onto a ctx.
 app/services/journal_service.py::create_journal_entry raw_sql:journal_entries

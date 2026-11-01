@@ -3,6 +3,7 @@ import { useParams, Link, useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useDeleteJournal } from "../hooks/useJournals";
 import { useNarration } from "../hooks/useNarration";
+import { useEffectiveRole } from "../hooks/useEffectiveRole";
 import { formatDate } from "../utils/formatDate";
 import * as api from "../services/api";
 import type { JournalEntry, TagType } from "../types";
@@ -67,6 +68,10 @@ export function EntryDetailPage() {
     queryFn: async () => (await api.getTagCategories(entry!.campaign_id)).data,
     enabled: !!entry?.campaign_id,
   });
+
+  // Delete and tag edits need GM (Owner or Co-GM) in the entry's Campaign
+  // (E0-Access.5); the server enforces it, this only hides the controls.
+  const { isGm } = useEffectiveRole(entry?.campaign_id);
 
   const refreshEntry = () => qc.invalidateQueries({ queryKey: ["journal", id] });
 
@@ -144,12 +149,14 @@ export function EntryDetailPage() {
         >
           ← Archive
         </Link>
-        <button
-          onClick={handleDelete}
-          className="text-sm text-danger hover:text-danger/80 transition-colors"
-        >
-          Delete
-        </button>
+        {isGm && (
+          <button
+            onClick={handleDelete}
+            className="text-sm text-danger hover:text-danger/80 transition-colors"
+          >
+            Delete
+          </button>
+        )}
       </div>
 
       {/* Date */}
@@ -205,12 +212,14 @@ export function EntryDetailPage() {
             >
               Entities
             </p>
-            <button
-              onClick={() => setAdding((v) => !v)}
-              className="text-xs text-primary hover:underline underline-offset-2"
-            >
-              {adding ? "Cancel" : "+ Add Tag"}
-            </button>
+            {isGm && (
+              <button
+                onClick={() => setAdding((v) => !v)}
+                className="text-xs text-primary hover:underline underline-offset-2"
+              >
+                {adding ? "Cancel" : "+ Add Tag"}
+              </button>
+            )}
           </div>
 
           {entry.tags.length > 0 && (
@@ -226,13 +235,15 @@ export function EntryDetailPage() {
                     {tag.tag_type ? TAG_LABELS[tag.tag_type] : tag.custom_category?.name}:
                   </span>
                   {tag.name}
-                  <button
-                    onClick={() => handleRemoveTag(tag.id)}
-                    className="opacity-50 hover:opacity-100 transition-opacity"
-                    title="Remove tag"
-                  >
-                    ×
-                  </button>
+                  {isGm && (
+                    <button
+                      onClick={() => handleRemoveTag(tag.id)}
+                      className="opacity-50 hover:opacity-100 transition-opacity"
+                      title="Remove tag"
+                    >
+                      ×
+                    </button>
+                  )}
                 </span>
               ))}
             </div>
@@ -242,7 +253,7 @@ export function EntryDetailPage() {
             <p className="text-sm text-muted-foreground">No tags yet.</p>
           )}
 
-          {adding && (
+          {isGm && adding && (
             <div className="rounded-lg border border-border bg-muted/20 p-3 flex flex-col gap-2">
               <div className="flex flex-col sm:flex-row gap-2">
                 <input

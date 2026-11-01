@@ -24,15 +24,16 @@ async def generate_draft_narrative(
     notes: str,
     config: LLMConfig | None = None,
     *,
-    gm_context: bool = True,
+    gm_context: bool,
 ) -> str:
     """The generation half of create_journal_entry, pulled out on its own so a
     narrative can be previewed and edited before anything is persisted (see
     POST /api/journals/generate-draft) — create_journal_entry calls this too
     when the caller doesn't already have an edited narrative to save.
 
-    `gm_context=False` (a caller who is not GM of the Campaign) leaves out
-    the GM-only context: no source-document canon and no Shorthand glossary,
+    `gm_context` is required (no default, so a new caller cannot leak by
+    forgetting it): False (a caller who is not GM of the Campaign) leaves out
+    the GM-only context, no source-document canon and no Shorthand glossary,
     so a Player's draft is built from their own notes only (E0-Access.5)."""
     from app.db.models.campaign import Campaign
     campaign_result = await db.execute(select(Campaign).where(Campaign.id == campaign_id))
@@ -80,7 +81,7 @@ async def create_journal_entry(
     config: LLMConfig | None = None,
     narrative: str | None = None,
     *,
-    gm_context: bool = True,
+    gm_context: bool,
 ) -> JournalEntry:
     """Persist a journal entry. If `narrative` isn't supplied (the one-step
     generate-and-save path, still supported for callers that skip the
@@ -89,7 +90,8 @@ async def create_journal_entry(
     generate_draft_narrative exactly as before. If it IS supplied — the
     normal interactive path now: generate a draft, let the user read/edit it,
     then save — no LLM call happens in this function at all. `gm_context`
-    is passed to generate_draft_narrative."""
+    (required: the caller is GM of the Campaign) is passed to
+    generate_draft_narrative."""
     if narrative is None:
         narrative = await generate_draft_narrative(db, user_id, campaign_id, notes, config, gm_context=gm_context)
 

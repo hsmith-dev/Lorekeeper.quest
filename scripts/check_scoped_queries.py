@@ -224,10 +224,12 @@ def registered_models(app_dir: Path) -> dict[str, str | None]:
             if not isinstance(node, ast.ClassDef):
                 continue
             for stmt in node.body:
-                if (isinstance(stmt, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "__tablename__"
-                                                         for t in stmt.targets)
-                        and isinstance(stmt.value, ast.Constant) and isinstance(stmt.value.value, str)):
-                    tables[node.name] = stmt.value.value
+                targets = stmt.targets if isinstance(stmt, ast.Assign) else (
+                    [stmt.target] if isinstance(stmt, ast.AnnAssign) else [])
+                value = getattr(stmt, "value", None)
+                if (any(isinstance(t, ast.Name) and t.id == "__tablename__" for t in targets)
+                        and isinstance(value, ast.Constant) and isinstance(value.value, str)):
+                    tables[node.name] = value.value
     return {name: tables.get(name) for name in names}
 
 
