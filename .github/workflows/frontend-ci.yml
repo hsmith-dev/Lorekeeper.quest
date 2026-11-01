@@ -1,0 +1,40 @@
+name: Frontend CI
+
+# Type-check + production build + the design-token / UI-primitive checks, on every
+# PR and every push to main. No path filter: a backend-only PR costs ~1 min here,
+# and a filtered-out frontend break is far more expensive.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: frontend-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: src/frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: src/frontend/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - name: Type-check and build (tsc && vite build)
+        run: npm run build
+      - name: Theme token contrast (WCAG AA)
+        run: node scripts/check-ui-tokens.mjs --contrast
+      - name: Semantic-token fallback for custom themes
+        run: node scripts/check-semantic-fallback.mjs
+      - name: UI primitive behaviour checks
+        run: node scripts/check-ui-primitives.mjs
