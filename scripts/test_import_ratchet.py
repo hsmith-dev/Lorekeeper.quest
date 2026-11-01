@@ -50,13 +50,14 @@ REQUIRED_CONTRACTS = {"layers": "layers", "domain": "forbidden", "clients": "for
                       "clients_callers": "forbidden", "models": "forbidden"}
 
 # app.access (AD-13) sits between services and schemas (E0-Access.2); app.jobs
-# (AD-2) between api and services (E0-Jobs.1).
-REQUIRED_LAYERS = ["app.api", "app.jobs", "app.services", "app.access", "app.schemas", "app.db", "app.core", "(app.domain)"]
+# (AD-2) between api and services (E0-Jobs.1); app.hooks (AD-17, the hook
+# handlers) between api and jobs (E0-Journal.1).
+REQUIRED_LAYERS = ["app.api", "app.hooks", "app.jobs", "app.services", "app.access", "app.schemas", "app.db", "app.core", "(app.domain)"]
 # The models contract, frozen whole: dropping a source module or a forbidden
 # package is a weakening and must show up here in review.
 FROZEN_MODEL_SOURCES = frozenset({
-    "app.api", "app.jobs", "app.clients", "app.services", "app.access", "app.schemas", "app.db", "app.core", "app.domain",
-    "app.main",
+    "app.api", "app.hooks", "app.jobs", "app.clients", "app.services", "app.access", "app.schemas", "app.db", "app.core",
+    "app.domain", "app.main",
 })
 FROZEN_MODEL_PACKAGES = frozenset({
     "torch", "torchaudio", "torchvision", "transformers", "sentence_transformers", "spacy", "whisper",
@@ -149,11 +150,11 @@ def test_contract_shapes():
     cp = contracts()
     assert values(cp, "importlinter:contract:layers", "layers") == REQUIRED_LAYERS
     assert values(cp, "importlinter:contract:domain", "source_modules") == ["app.domain"]
-    assert {"app.api", "app.jobs", "app.services", "app.access", "app.schemas", "app.db", "app.core",
+    assert {"app.api", "app.hooks", "app.jobs", "app.services", "app.access", "app.schemas", "app.db", "app.core",
             "app.clients", "app.main"} <= set(values(cp, "importlinter:contract:domain", "forbidden_modules"))
     assert values(cp, "importlinter:contract:clients", "source_modules") == ["app.clients"]
-    assert {"app.api", "app.jobs", "app.services", "app.access", "app.schemas", "app.db", "app.main"} <= set(
-        values(cp, "importlinter:contract:clients", "forbidden_modules"))
+    assert {"app.api", "app.hooks", "app.jobs", "app.services", "app.access", "app.schemas", "app.db",
+            "app.main"} <= set(values(cp, "importlinter:contract:clients", "forbidden_modules"))
     models = "importlinter:contract:models"
     assert set(values(cp, models, "source_modules")) == FROZEN_MODEL_SOURCES
     assert set(values(cp, models, "forbidden_modules")) == FROZEN_MODEL_PACKAGES
@@ -191,7 +192,10 @@ TODAY = {
                                     "from app.schemas import journal\nfrom app.clients import ml\n"),
     "access/context.py": ("from app.schemas import journal\nfrom app.db import base\nfrom app.core import config\n"
                           "from app.domain import embedding\n"),
-    "api/routes.py": "from app.services import journal_service\nfrom app.jobs import errors\n",
+    "api/routes.py": ("from app.services import journal_service\nfrom app.jobs import errors\n"
+                      "from app.hooks import extraction\n"),
+    "hooks/extraction.py": ("from app.jobs import errors\nfrom app.services import journal_service\n"
+                            "from app.access import context\nfrom app.core import config\n"),
     "jobs/errors.py": ("from app.services import journal_service\nfrom app.access import context\n"
                        "from app.core import config\nfrom app.domain import embedding\n"),
     "schemas/journal.py": "from app.domain import embedding\n",
@@ -207,7 +211,7 @@ def lint(tmp_path: Path, extra: dict[str, str | None] | None = None) -> subproce
     files = dict(TODAY)
     files.update(extra or {})
     pkg = tmp_path / "app"
-    for sub in ("", "api", "jobs", "services", "access", "schemas", "db", "core", "domain", "clients"):
+    for sub in ("", "api", "hooks", "jobs", "services", "access", "schemas", "db", "core", "domain", "clients"):
         (pkg / sub).mkdir(parents=True, exist_ok=True)
         (pkg / sub / "__init__.py").write_text("")
     for rel, body in files.items():
@@ -252,6 +256,13 @@ def test_layout_like_today_passes(tmp_path):
     ({"jobs/bad.py": "import torch\n"}, "AD-1 no model packages", "app.jobs.bad -> torch"),
     ({"clients/bad.py": "from app.jobs import errors\n"}, "AD-1 app.clients imports only", "app.clients.bad -> app.jobs"),
     ({"domain/bad.py": "from app.jobs import errors\n"}, "AD-1 app.domain imports no other app package", "app.domain.bad -> app.jobs"),
+    # app.hooks (E0-Journal.1): below api, above jobs.
+    ({"hooks/bad.py": "import app.api.routes\n"}, "AD-1 layers", "app.hooks.bad -> app.api"),
+    ({"jobs/bad.py": "from app.hooks import extraction\n"}, "AD-1 layers", "app.jobs.bad -> app.hooks"),
+    ({"services/bad.py": "from app.hooks import extraction\n"}, "AD-1 layers", "app.services.bad -> app.hooks"),
+    ({"core/bad.py": "from app.hooks import extraction\n"}, "AD-1 layers", "app.core.bad -> app.hooks"),
+    ({"hooks/bad.py": "import torch\n"}, "AD-1 no model packages", "app.hooks.bad -> torch"),
+    ({"domain/bad.py": "from app.hooks import extraction\n"}, "AD-1 app.domain imports no other app package", "app.domain.bad -> app.hooks"),
 ])
 def test_planted_violation_fails(tmp_path, plant, contract, offender):
     r = lint(tmp_path, plant)

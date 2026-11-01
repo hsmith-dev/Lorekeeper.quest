@@ -117,3 +117,6 @@ Stories were merged on green GitHub CI while the desktop was offline (owner deci
 - [ ] `docker compose -f docker-compose.prod.yml config -q`; on a prod bring-up a stored file comes through nginx end to end and `/_files/<key>` returns 404
 - [ ] Throwaway stack: `scripts/backup-db.sh` then `scripts/restore-db.sh` — files archive written, Live audio excluded unless opted in, backend + worker restart
 - [ ] Known: dev compose has no nginx, so `GET /api/files/{id}` returns an empty body in dev
+
+## E0-Journal.1 — Hook dispatcher on after_commit (PR #63)
+- [ ] Real worker with a `job_finished` handler registered: handler runs before the work horse exits (no `hook drain timed out` in logs)

@@ -37,6 +37,9 @@ run (app/jobs/outbox.py). For one `queued` row it:
    `next_run_at` has passed. Every outcome is written only while this
    attempt still owns the row (`running`, same `worker_id`, locked), so an
    attempt the reaper already took back cannot write a second outcome.
+   Every `done` or `failed` written (here or by the reaper) emits the
+   `job_finished` hook (app/core/hooks.py) with `refs={job_id, kind,
+   status}`; a requeue emits nothing.
 
 The stored message is always readable fixed text or an LLMError's `detail`,
 never an exception's own text. Logs carry job_id, kind and campaign_id (also
@@ -94,7 +97,7 @@ from sqlalchemy.pool import NullPool
 from app.access.context import CampaignContext, ctx_for
 from app.access.policy import ANON, GM, PLAYER, NotFound
 from app.clients.errors import ModelServiceUnavailable
-from app.core import llm_gate
+from app.core import hooks, llm_gate
 from app.core.config import get_settings
 from app.core.errors import LLMConfigError, LLMError, StructuredOutputError
 from app.core.logging import job_log_context
@@ -112,6 +115,9 @@ logger = logging.getLogger(__name__)
 # Delay before attempt n+1, indexed by attempts - 1 (AD-4: +10 s, then +60 s).
 RETRY_DELAYS_S: tuple[int, ...] = (10, 60)
 HEARTBEAT_INTERVAL_S: float = 10
+# How long a short-lived loop (a work horse's Job, a reaper pass) waits for
+# hook handlers (job_finished) before it ends: one handler's budget plus slack.
+HOOK_DRAIN_TIMEOUT_S: float = hooks.HANDLER_TIMEOUT_S + 5
 # How long the heartbeat and `job.report` wait for the row lock (the handler's
 # own session may hold it if it changed the Job row) before giving up.
 _LOCK_TIMEOUT = "2s"
@@ -213,8 +219,16 @@ async def _finish(db: AsyncSession, job_id: uuid.UUID, status: JobStatus, worker
     job.error_message = message
     if status == JobStatus.DONE:
         job.progress = 1.0
+    _emit_finished(db, job)
     await db.commit()
     return status
+
+
+def _emit_finished(db: AsyncSession, job: Job) -> None:
+    """`job_finished` (E0-Journal.1), dispatched once the terminal status
+    commits. A requeue for a retry is not finished and emits nothing."""
+    hooks.emit(db, hooks.HookEvent.JOB_FINISHED, campaign_id=job.campaign_id,
+               refs={"job_id": job.id, "kind": job.kind, "status": JobStatus(job.status)}, actor_ctx=None)
 
 
 async def _record_failure(db: AsyncSession, job_id: uuid.UUID, code: JobErrorCode, message: str,
@@ -691,6 +705,7 @@ async def _recover_running(db: AsyncSession, live: dict[str, str | None], now: d
             job.status = JobStatus.FAILED
             job.next_run_at = None
             job.finished_at = now
+            _emit_finished(db, job)
             result.failed.append(job.id)
             logger.warning("job interrupted on its last attempt; failed", extra=extra)
     # An ORM commit: a `failed` row releases its dependents (app/jobs/outbox.py).
@@ -843,7 +858,10 @@ class Reaper:
                 logger.exception("files.gc scheduling failed")
             return result
         finally:
-            await engine.dispose()
+            try:
+                await _drain_hooks()
+            finally:
+                await engine.dispose()
 
 
 # ── The RQ side ────────────────────────────────────────────────────────────
@@ -858,6 +876,15 @@ def _worker_id() -> str:
     return _WORKER_ID or f"{socket.gethostname()}:{os.getpid()}"
 
 
+async def _drain_hooks() -> None:
+    """Let job_finished handlers finish before this loop and its engine go,
+    bounded (HOOK_DRAIN_TIMEOUT_S). Never raises: the caller's cleanup runs."""
+    try:
+        await hooks.drain(timeout=HOOK_DRAIN_TIMEOUT_S)
+    except Exception:
+        logger.exception("hook drain failed")
+
+
 async def _perform(job_id: str) -> JobStatus | None:
     # Per RQ job: asyncio.run gives each call a new event loop, and asyncpg
     # connections and asyncio redis clients belong to the loop that opened them.
@@ -868,9 +895,12 @@ async def _perform(job_id: str) -> JobStatus | None:
     try:
         return await run_job(job_id, async_sessionmaker(engine, expire_on_commit=False), _worker_id())
     finally:
-        set_valkey(previous)
-        await valkey.aclose()
-        await engine.dispose()
+        try:
+            await _drain_hooks()
+        finally:
+            set_valkey(previous)
+            await valkey.aclose()
+            await engine.dispose()
 
 
 def perform(job_id: str) -> None:
@@ -886,6 +916,7 @@ class LorekeeperWorker(Worker):
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         load_kind_modules()
+        hooks.load_handlers()
         super().__init__(*args, **kwargs)
         global _WORKER_ID
         _WORKER_ID = self.name

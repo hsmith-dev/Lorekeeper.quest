@@ -12,6 +12,9 @@ from slowapi.middleware import SlowAPIMiddleware
 from app.core.limiter import limiter
 from app.access import VaryMiddleware, VisibilityError, visibility_exception_handler
 
+# Importing app.hooks registers the hook handlers and the visibility_changed bridge (AD-17).
+from app.hooks import HANDLERS as _HOOK_HANDLERS  # noqa: F401
+from app.core.hooks import HANDLER_TIMEOUT_S, drain as drain_hooks
 from app.core.config import get_settings
 from app.core.errors import LLMError, llm_exception_handler
 from app.core.logging import configure_logging
@@ -29,6 +32,9 @@ from app.api.deps import require_active_account, require_admin
 
 logger = logging.getLogger(__name__)
 
+# One handler's budget plus slack (app/core/hooks.py).
+HOOK_DRAIN_TIMEOUT_S = HANDLER_TIMEOUT_S + 5
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -40,6 +46,8 @@ async def lifespan(app: FastAPI):
     load_embedding_model()
     yield
     logger.info("Shutting down Lorekeeper API")
+    # Let after-commit hook handlers (they only enqueue) finish first.
+    await drain_hooks(timeout=HOOK_DRAIN_TIMEOUT_S)
     await close_valkey()
 
 
