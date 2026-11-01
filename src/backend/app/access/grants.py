@@ -54,6 +54,7 @@ from app.domain.enums import CampaignRole
 logger = logging.getLogger(__name__)
 
 GRANT_POLL_S = 15
+PUBLISH_TIMEOUT_S = 2
 CHANNEL_PREFIX = "access:"
 OWNER_GRANT = "owner"
 PENDING_KEY = "lorekeeper.access.grant_changed"
@@ -72,7 +73,7 @@ def grant_channel(campaign_id: uuid.UUID, grant_id: uuid.UUID | None) -> str:
 async def publish_grant_change(campaign_id: uuid.UUID, grant_id: uuid.UUID | None) -> None:
     """Publish on the grant's channel now. Callers queue it (the mutators
     below) so it runs after commit. No Valkey client: a no-op. A Valkey error
-    is logged, never raised."""
+    or a publish slower than PUBLISH_TIMEOUT_S is logged, never raised."""
     from app.core.valkey_client import get_valkey
 
     try:
@@ -81,7 +82,7 @@ async def publish_grant_change(campaign_id: uuid.UUID, grant_id: uuid.UUID | Non
         return
     channel = grant_channel(campaign_id, grant_id)
     try:
-        await client.publish(channel, "changed")
+        await asyncio.wait_for(client.publish(channel, "changed"), PUBLISH_TIMEOUT_S)
     except Exception:
         logger.warning(json.dumps({"event": "grant_publish_failed", "channel": channel}), exc_info=True)
 
@@ -203,28 +204,47 @@ async def campaign_grants_removed(db: AsyncSession, campaign_id: uuid.UUID) -> N
         _queue(db, campaign_id, grant_id)
 
 
+def _unbumped_expired(token: str) -> list:
+    T = CampaignShareToken
+    return [T.token == token, T.revoked.is_(False), T.expires_at.is_not(None),
+            T.expires_at <= sa.func.now(), T.updated_at <= T.expires_at]
+
+
 async def bump_expired_share_token(db: AsyncSession, token: str) -> bool:
     """The lazy expiry bump, at most once per token: an expired, non-revoked
     token not yet bumped (`updated_at <= expires_at`) gets `access_epoch + 1`
-    and `updated_at` past `expires_at`, then the session commits and the
-    publish runs. Returns whether it bumped. Called by
-    `share.resolve_share_token` when no live token matched."""
+    and `updated_at` past `expires_at`, and the publish runs after that
+    commits. Returns whether it bumped. Called by `share.resolve_share_token`
+    when no live token matched.
+
+    A read-only SELECT in the caller's session finds the candidate; only then
+    does the conditional UPDATE run and commit in its own session on
+    `db.bind`. The caller's session is never written or committed, and any
+    error is logged and answered False (the caller still says not_found)."""
     T = CampaignShareToken
-    row = (await db.execute(
-        sa.update(T)
-        .where(T.token == token, T.revoked.is_(False), T.expires_at.is_not(None),
-               T.expires_at <= sa.func.now(), T.updated_at <= T.expires_at)
-        # greatest(): the bumped row never matches `updated_at <= expires_at` again.
-        .values(access_epoch=T.access_epoch + 1,
-                updated_at=sa.func.greatest(sa.func.now(), T.expires_at + sa.text("interval '1 microsecond'")))
-        .returning(T.id, T.campaign_id)
-        .execution_options(synchronize_session=False)
-    )).first()
-    if row is None:
+    try:
+        found = (await db.execute(sa.select(T.id).where(*_unbumped_expired(token)))).first()
+        if found is None:
+            return False
+        async with AsyncSession(bind=db.bind, expire_on_commit=False) as own:
+            row = (await own.execute(
+                sa.update(T)
+                .where(*_unbumped_expired(token))
+                # greatest(): the bumped row never matches `updated_at <= expires_at` again.
+                .values(access_epoch=T.access_epoch + 1,
+                        updated_at=sa.func.greatest(sa.func.now(),
+                                                    T.expires_at + sa.text("interval '1 microsecond'")))
+                .returning(T.id, T.campaign_id)
+                .execution_options(synchronize_session=False)
+            )).first()
+            if row is None:
+                return False  # another request bumped it first
+            _queue(own, row.campaign_id, row.id)
+            await own.commit()
+        return True
+    except Exception:
+        logger.warning(json.dumps({"event": "share_expiry_bump_failed"}), exc_info=True)
         return False
-    _queue(db, row.campaign_id, row.id)
-    await db.commit()
-    return True
 
 
 # ── grant_watch ────────────────────────────────────────────────────────────
@@ -268,6 +288,24 @@ async def _poll(bind: Any, ctxs: Sequence[CampaignContext]) -> str | None:
         logger.warning(json.dumps({"event": "grant_watch_poll_failed"}), exc_info=True)
         return FIRED_POLL_FAILED
     return None
+
+
+async def grant_changed(*ctxs: CampaignContext, bind: Any = None) -> bool:
+    """One check of the ctxs' grants, the same as a `grant_watch` poll: True
+    when one is missing or changed, or the check cannot run (fail closed)."""
+    if not ctxs:
+        raise ValueError("grant_changed: needs at least one ctx")
+    for ctx in ctxs:
+        _check_watchable(ctx)
+    return await _poll(_default_bind(bind), ctxs) is not None
+
+
+def _default_bind(bind: Any) -> Any:
+    if bind is not None:
+        return bind
+    from app.db.session import AsyncSessionLocal
+
+    return AsyncSessionLocal.kw["bind"]
 
 
 async def _subscribe(channels: Sequence[str]) -> Any | None:
@@ -340,10 +378,7 @@ async def grant_watch(*ctxs: CampaignContext, bind: Any = None) -> str:
         raise ValueError("grant_watch: needs at least one ctx")
     for ctx in ctxs:
         _check_watchable(ctx)
-    if bind is None:
-        from app.db.session import AsyncSessionLocal
-
-        bind = AsyncSessionLocal.kw["bind"]
+    bind = _default_bind(bind)
     channels = {grant_channel(ctx.campaign_id, ctx.grant_id) for ctx in ctxs}
     pubsub = await _subscribe(sorted(channels))  # before the first poll: no change slips between
     try:

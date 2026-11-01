@@ -223,6 +223,30 @@ async def test_live_unknown_and_revoked_tokens_are_never_bumped(db, published):
     assert (await _fresh(db, CampaignShareToken, revoked.id)).access_epoch == 0
 
 
+async def test_a_share_token_miss_never_commits_the_callers_session(db, published):
+    c, owner = await _campaign(db)
+    now = datetime.now(timezone.utc)
+    expired = await _token(db, c, owner, expires_at=now - timedelta(minutes=1), updated_at=now - timedelta(hours=1))
+    campaign_id, owner_id, expired_id, expired_token = c.id, owner.id, expired.id, expired.token
+    for token in ("no-such-token", expired_token):
+        pending_id = uuid.uuid4()
+        db.add(Campaign(id=pending_id, user_id=owner_id, name="Pending", genre=Genre.fantasy))
+        with pytest.raises(NotFound):
+            await resolve_share_token(db, token)
+        await db.rollback()  # the pending row was never committed by the miss
+        assert await db.get(Campaign, pending_id) is None
+    assert published == [(campaign_id, expired_id)]  # the bump still committed, in its own session
+
+
+async def test_a_failing_expiry_bump_is_still_the_404(db, monkeypatch, caplog):
+    async def boom(*a, **kw):
+        raise ConnectionError("db down")
+
+    monkeypatch.setattr(db, "execute", boom)
+    assert await grants.bump_expired_share_token(db, "whatever") is False
+    assert "share_expiry_bump_failed" in caplog.text
+
+
 async def test_share_ctx_carries_the_token_id(db):
     c, owner = await _campaign(db)
     t = await _token(db, c, owner)
@@ -268,6 +292,16 @@ async def test_publish_goes_to_the_grant_channel(db, valkey):
 
 async def test_publish_without_valkey_or_with_a_failing_one_never_raises(no_valkey, caplog, monkeypatch):
     await publish_grant_change(uuid.uuid4(), uuid.uuid4())  # no client: a no-op
+
+    class Hung:
+        async def publish(self, *a):
+            await asyncio.sleep(30)
+
+    monkeypatch.setattr(grants, "PUBLISH_TIMEOUT_S", 0.05)
+    valkey_client.set_valkey(Hung())
+    await asyncio.wait_for(publish_grant_change(uuid.uuid4(), uuid.uuid4()), 2)  # times out, logged
+    assert "grant_publish_failed" in caplog.text
+    caplog.clear()
 
     class Down:
         async def publish(self, *a):
@@ -418,10 +452,16 @@ async def _change_in_own_session(db, fn):
         await s.commit()
 
 
-async def _stream_closed(db, client, monkeypatch, user, campaign_id, during):
+def _chat_body(campaign_id, **extra) -> dict:
+    body = {"message": "Tell me about the lich.", **extra}
+    if campaign_id:
+        body["campaign_id"] = str(campaign_id)
+    return body
+
+
+async def _stream_closed(db, client, monkeypatch, user, campaign_id, during, **extra):
     state = _scripted_stream(monkeypatch, during)
-    body = {"message": "Tell me about the lich.", "campaign_id": str(campaign_id)} if campaign_id else \
-        {"message": "Tell me about the lich."}
+    body = _chat_body(campaign_id, **extra)
     r = await asyncio.wait_for(client.post("/api/chat/stream", headers=bearer(user), json=body), 8)
     assert r.status_code == 200, r.text
     events = _events(r.text)
@@ -497,10 +537,104 @@ async def test_campaignless_stream_watches_the_co_gm_grants(db, client, monkeypa
     await _stream_closed(db, client, monkeypatch, co_gm, None, demote)
 
 
+async def test_campaign_delete_mid_stream_closes_the_stream(db, client, monkeypatch, valkey):
+    monkeypatch.setattr(grants, "GRANT_POLL_S", 30)  # the owner channel's message closes it
+    c, owner = await _campaign(db)
+    await _fake_llm_for(db, owner)
+    # A committed session: the request inserts nothing that would lock the Campaign row.
+    existing = ChatSession(user_id=owner.id, campaign_id=c.id, title="Lich", messages=[], message_count=0)
+    db.add(existing)
+    await db.commit()
+
+    async def delete_campaign():
+        async def fn(s):
+            await campaign_grants_removed(s, c.id)
+            await s.delete(await s.get(Campaign, c.id))
+        await _change_in_own_session(db, fn)
+
+    await _stream_closed(db, client, monkeypatch, owner, c.id, delete_campaign, session_id=str(existing.id))
+
+
+async def _demote_or_remove(db, member_id, change: str) -> None:
+    async def fn(s):
+        member = await s.get(CampaignMember, member_id)
+        if change == "demote":
+            await change_member_role(s, member, "player")
+        else:
+            await remove_member(s, member)
+    await _change_in_own_session(db, fn)
+
+
+def _no_llm_call(monkeypatch) -> list:
+    calls = []
+
+    async def fake(messages, config=None, **kwargs):
+        calls.append(1)
+        yield "MUST-NOT-STREAM"
+
+    monkeypatch.setattr(llm_provider, "stream_messages", fake)
+    return calls
+
+
+@pytest.mark.parametrize("change", ["demote", "remove"])
+async def test_grant_change_before_the_stream_starts_sends_only_the_error(db, client, monkeypatch, no_valkey,
+                                                                           change):
+    monkeypatch.setattr(grants, "GRANT_POLL_S", 30)  # only the start-of-stream check can catch it
+    c, _ = await _campaign(db)
+    co_gm, m = await _member(db, c, "co_gm")
+    await _fake_llm_for(db, co_gm)
+    calls = _no_llm_call(monkeypatch)
+    real_reserve = llm_provider.reserve_slot
+
+    async def reserve_after_change(cfg, *a, **kw):  # after _prepare_chat and the ctx it built
+        await _demote_or_remove(db, m.id, change)
+        return await real_reserve(cfg, *a, **kw)
+
+    monkeypatch.setattr(llm_provider, "reserve_slot", reserve_after_change)
+    r = await client.post("/api/chat/stream", headers=bearer(co_gm), json=_chat_body(c.id))
+    assert r.status_code == 200, r.text
+    assert _events(r.text) == [("error", NOT_FOUND)] and calls == []
+
+
+@pytest.mark.parametrize("change", ["demote", "remove"])
+async def test_campaignless_grant_lost_after_prep_sends_only_the_error(db, client, monkeypatch, no_valkey, change):
+    from app.api.routes import chat as chat_routes
+
+    c, _ = await _campaign(db)
+    co_gm, m = await _member(db, c, "co_gm")
+    await _fake_llm_for(db, co_gm)
+    calls = _no_llm_call(monkeypatch)
+    real_prepare = chat_routes._prepare_chat
+
+    async def prepare_then_change(*args, **kwargs):  # the role map said gm; the grant is gone or demoted now
+        prep = await real_prepare(*args, **kwargs)
+        await _demote_or_remove(db, m.id, change)
+        return prep
+
+    monkeypatch.setattr(chat_routes, "_prepare_chat", prepare_then_change)
+    r = await client.post("/api/chat/stream", headers=bearer(co_gm), json=_chat_body(None))
+    assert r.status_code == 200, r.text
+    assert _events(r.text) == [("error", NOT_FOUND)] and calls == []
+
+
 async def test_unchanged_stream_completes_and_persists(db, client, monkeypatch, valkey):
+    from app.api.routes import chat as chat_routes
+
     c, _ = await _campaign(db)
     player, _ = await _member(db, c, "player")
     await _fake_llm_for(db, player)
+    watch_state = {"started": False, "cancelled": False}
+    real_watch = chat_routes.grant_watch
+
+    async def recording_watch(*ctxs, **kwargs):
+        watch_state["started"] = True
+        try:
+            return await real_watch(*ctxs, **kwargs)
+        except asyncio.CancelledError:
+            watch_state["cancelled"] = True
+            raise
+
+    monkeypatch.setattr(chat_routes, "grant_watch", recording_watch)
 
     async def fake(messages, config=None, **kwargs):
         for part in ("One ", "two."):
@@ -512,17 +646,41 @@ async def test_unchanged_stream_completes_and_persists(db, client, monkeypatch, 
                           json={"message": "Hello", "campaign_id": str(c.id)})
     events = _events(r.text)
     assert [e for e, _ in events] == ["meta", "delta", "delta", "done"] and events[-1][1] == {"reply": "One two."}
+    assert watch_state == {"started": True, "cancelled": True}  # the watch ends with the stream
+
+
+async def test_a_failing_watch_closes_the_stream_and_is_logged(db, client, monkeypatch, no_valkey, caplog):
+    from app.api.routes import chat as chat_routes
+
+    c, _ = await _campaign(db)
+    player, _ = await _member(db, c, "player")
+    await _fake_llm_for(db, player)
+
+    async def broken_watch(*ctxs, **kwargs):
+        raise RuntimeError("watch broke")
+
+    async def fake(messages, config=None, **kwargs):
+        yield "first "
+        await asyncio.sleep(10)
+        yield "AFTER"
+
+    monkeypatch.setattr(chat_routes, "grant_watch", broken_watch)
+    monkeypatch.setattr(llm_provider, "stream_messages", fake)
+    r = await asyncio.wait_for(client.post("/api/chat/stream", headers=bearer(player), json=_chat_body(c.id)), 8)
+    assert [e for e, _ in _events(r.text)][-1] == "error" and "AFTER" not in r.text
+    assert "grant_watch_failed" in caplog.text
 
 
 # ── Routes: removed JWT, revocation ────────────────────────────────────────
 
-async def test_removed_member_with_a_valid_jwt_gets_404_everywhere(db, client):
+async def test_removed_member_with_a_valid_jwt_gets_404_everywhere(db, client, published):
     c, owner = await _campaign(db)
     player, m = await _member(db, c, "player")
     r = await client.get(f"/api/campaigns/{c.id}", headers=bearer(player))
     assert r.status_code == 200, r.text
     r = await client.delete(f"/api/campaigns/{c.id}/members/{m.id}", headers=bearer(owner))
     assert r.status_code == 204, r.text
+    assert published == [(c.id, m.id)]
     for path in ("", "/me", "/tag-categories"):
         hidden = await client.get(f"/api/campaigns/{c.id}{path}", headers=bearer(player))
         missing = await client.get(f"/api/campaigns/{MISSING}{path}", headers=bearer(player))
@@ -569,9 +727,29 @@ async def test_cache_keys_depend_on_audience_and_epoch(db):
     keys = [cache_key(x, 7, "journals", "list") for x in (gm, p, member_view, p_bumped)]
     assert len(set(keys)) == 4
     assert all(k.startswith(f"cache:{c.id}:7:") for k in keys)
-    assert keys[0] == f"cache:{c.id}:7:Gm:0:journals:list"
-    assert keys[1] == f"cache:{c.id}:7:Owner({player.id}):0:journals:list"
-    assert keys[3] == f"cache:{c.id}:7:Owner({player.id}):1:journals:list"
+    assert keys[0] == f"cache:{c.id}:7:gm:0:journals:list"
+    assert keys[1] == f"cache:{c.id}:7:owner.{player.id}:0:journals:list"
+    assert keys[2] == f"cache:{c.id}:7:members:0:journals:list"
+    assert keys[3] == f"cache:{c.id}:7:owner.{player.id}:1:journals:list"
+
+
+async def test_cache_key_parts_are_escaped_so_they_never_collide(db):
+    c, owner = await _campaign(db)
+    gm = await ctx_for(db, owner.id, c.id)
+    assert cache_key(gm, 1, "d", "a:b") != cache_key(gm, 1, "d", "a", "b")
+    assert cache_key(gm, 1, "d:a", "b") != cache_key(gm, 1, "d", "a", "b")
+    assert cache_key(gm, 1, "d", "a%3Ab") != cache_key(gm, 1, "d", "a:b")
+    assert cache_key(gm, 1, "d", "a:b").endswith(":d:a%3Ab")
+
+
+async def test_a_corrupt_cached_value_is_recomputed(db, valkey, caplog):
+    c, owner = await _campaign(db)
+    gm = await ctx_for(db, owner.id, c.id)
+    gen = await access_cache.cache_generation(valkey, c.id)
+    await valkey.set(cache_key(gm, gen, "x"), "{not json")
+    assert await cached_json(gm, "x", compute=lambda: _value({"ok": 1})) == {"ok": 1}
+    assert "cache_read_failed" in caplog.text
+    assert await cached_json(gm, "x", compute=lambda: _value({"ok": 2})) == {"ok": 1}  # overwritten
 
 
 async def test_cached_json_hits_and_invalidation_moves_the_generation(db, valkey):

@@ -10,8 +10,9 @@ existed. Only the share routes and `audience_ctx` build anon ctxs.
 
 Expiry is a grant change (E0-Access.10): the first resolve of an expired,
 non-revoked token bumps its `access_epoch` once (`grants.bump_expired_share_token`:
-one conditional UPDATE, then a commit and the `access:` publish), and still
-answers `not_found()`. A Share Link ctx carries `grant_id` = the token id, so
+a read-only SELECT, then one conditional UPDATE committed in its own session
+and the `access:` publish; the caller's session is never committed), and
+still answers `not_found()`. A Share Link ctx carries `grant_id` = the token id, so
 `grant_watch` can follow it.
 """
 from __future__ import annotations

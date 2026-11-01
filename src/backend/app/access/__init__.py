@@ -19,7 +19,7 @@ map (`register_visibility_kind`), the extension points
 (`register_stale_marker`, `register_visibility_listener`) and
 `mark_dependents_stale`. E0-Access.10 adds grant changes (`change_member_role`,
 `remove_member`, `revoke_share_token`, `campaign_grants_removed`,
-`publish_grant_change`, `grant_channel`, `grant_watch`, `GRANT_POLL_S`) and
+`publish_grant_change`, `grant_channel`, `grant_changed`, `grant_watch`, `GRANT_POLL_S`) and
 the cache key scheme (`cache_key`, `cache_generation`, `cached_json`,
 `invalidate_campaign_cache`, `CACHE_TTL_S`).
 """
@@ -35,8 +35,8 @@ from app.access.context import (
 )
 from app.access.cache import CACHE_TTL_S, cache_generation, cache_key, cached_json, invalidate_campaign_cache
 from app.access.grants import (
-    GRANT_POLL_S, campaign_grants_removed, change_member_role, grant_channel, grant_watch, publish_grant_change,
-    remove_member, revoke_share_token,
+    GRANT_POLL_S, campaign_grants_removed, change_member_role, grant_changed, grant_channel, grant_watch,
+    publish_grant_change, remove_member, revoke_share_token,
 )
 from app.access.identity import bearer_scheme, get_current_user
 from app.access.policy import (
@@ -70,6 +70,7 @@ __all__ = [
     "cached_json",
     "campaign_grants_removed",
     "change_member_role",
+    "grant_changed",
     "grant_channel",
     "grant_watch",
     "invalidate_campaign_cache",

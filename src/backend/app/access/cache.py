@@ -27,6 +27,7 @@ import time
 import uuid
 from typing import Any, Awaitable, Callable
 
+from app.access.audience import Audience, AudienceLevel
 from app.access.context import CampaignContext
 
 logger = logging.getLogger(__name__)
@@ -55,14 +56,27 @@ def campaign_pattern(campaign_id: uuid.UUID) -> str:
     return f"{KEY_PREFIX}{campaign_id}:*"
 
 
+def audience_token(audience: Audience) -> str:
+    """The key segment of an Audience: `gm`, `members`, `public` or `owner.<uuid>`."""
+    if audience.level is AudienceLevel.OWNER:
+        return f"owner.{audience.user_id}"
+    return audience.level.value
+
+
+def _escape(value: Any) -> str:
+    """`%` and `:` percent-escaped, so ("a:b",) and ("a", "b") never collide."""
+    return str(value).replace("%", "%25").replace(":", "%3A")
+
+
 def cache_key(ctx: CampaignContext, generation: int | str, domain: str, *parts: Any) -> str:
-    """`cache:{campaign_id}:{generation}:{audience}:{access_epoch}:{domain}:…`."""
+    """`cache:{campaign_id}:{generation}:{audience}:{access_epoch}:{domain}:…`,
+    with the domain and parts escaped."""
     if not isinstance(ctx, CampaignContext):
         raise TypeError("cache_key: needs a CampaignContext")
     if not isinstance(domain, str) or not domain:
         raise ValueError("cache_key: domain must be a non-empty string")
-    fields = [str(ctx.campaign_id), str(generation), repr(ctx.audience), str(ctx.access_epoch), domain,
-              *(str(p) for p in parts)]
+    fields = [str(ctx.campaign_id), _escape(generation), audience_token(ctx.audience), str(ctx.access_epoch),
+              _escape(domain), *(_escape(p) for p in parts)]
     return KEY_PREFIX + ":".join(fields)
 
 
@@ -93,7 +107,11 @@ async def cached_json(ctx: CampaignContext, domain: str, *parts: Any,
                        exc_info=True)
         return await compute()
     if hit is not None:
-        return json.loads(hit)
+        try:
+            return json.loads(hit)
+        except ValueError:  # corrupt: recompute (and overwrite)
+            logger.warning(json.dumps({"event": "cache_read_failed", "campaign_id": str(ctx.campaign_id)}),
+                           exc_info=True)
     value = await compute()
     try:
         if await cache_generation(client, ctx.campaign_id) == generation:
