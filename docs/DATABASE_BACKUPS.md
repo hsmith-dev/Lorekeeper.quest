@@ -52,11 +52,17 @@ bytes only make sense together, so they are backed up and restored together:
   opt-in (the Live feature's setting writes it; until that ships an operator
   can create it by hand, see the quick reference). Everything else is
   included.
-* **Restore.** `scripts/restore-db.sh <dump> [files-archive]` restores the
-  database, then empties the volume and unpacks the archive into it (from a
-  one-off backend container, with the backend and the worker stopped). The
-  archive defaults to the one with the dump's timestamp; with none (a backup
-  from before stored files existed) the volume is left as it is.
+* **Restore.** `scripts/restore-db.sh <dump> [files-archive]` first checks
+  the archive (`gzip -t`, `tar -tzf`) and refuses a corrupt one before
+  touching anything. It then restores the database, empties the volume and
+  unpacks the archive into it (from a one-off backend container, with the
+  backend and the worker stopped; they are started again however the script
+  exits). Emptying the volume keeps every Campaign's `live_audio/`
+  directory: the archive leaves kept Live audio out unless the GM opted in,
+  so wiping it would lose audio no backup holds (an opted-in copy in the
+  archive still overwrites it on extract). The archive defaults to the one
+  with the dump's timestamp; with none (a backup from before stored files
+  existed) the volume is left as it is.
 
 **What this does NOT protect against:** losing the instance itself. The
 backups live on the same disk as the live database — if that disk, volume,

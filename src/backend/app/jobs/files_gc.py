@@ -72,30 +72,44 @@ async def _maybe_await(value: Any) -> Any:
     return value
 
 
-async def schedule_daily(session_factory: async_sessionmaker[AsyncSession], redis: Any, *,
-                         now: datetime | None = None) -> list[uuid.UUID]:
-    """Once per UTC day (module docstring): one `files.gc` Job per Campaign
-    with a directory. Returns the Job ids (empty when another pass already
-    did today's). `redis` is a sync or asyncio client."""
-    now = now or datetime.now(timezone.utc)
-    if not await _maybe_await(redis.set(day_key(now), "1", nx=True, ex=DAY_TTL_S)):
-        return []
+async def _schedule(session_factory: async_sessionmaker[AsyncSession]) -> list[uuid.UUID]:
     dirs = file_service.campaign_dirs()
     if not dirs:
         return []
     jobs: list[uuid.UUID] = []
     async with session_factory() as db:
         owners = await campaign_owners(db, created_before=None)
-        for cid in dirs:
-            owner_id = owners.get(cid)
-            if owner_id is None:
-                continue  # a deleted Campaign: another Campaign's Job sweeps its directory
+        targets = [cid for cid in dirs if cid in owners]
+        if not targets and owners:
+            # Only deleted Campaigns' directories: any Campaign's Job sweeps them.
+            targets = [next(iter(owners))]
+        for cid in targets:
             try:
-                ctx = await ctx_for(db, owner_id, cid)
+                ctx = await ctx_for(db, owners[cid], cid)
             except NotFound:
                 continue
             jobs.append(await enqueue(db, ctx, GC_KIND, {}, idempotency_key=gc_key(cid)))
         await db.commit()
+    return jobs
+
+
+async def schedule_daily(session_factory: async_sessionmaker[AsyncSession], redis: Any, *,
+                         now: datetime | None = None) -> list[uuid.UUID]:
+    """Once per UTC day (module docstring): one `files.gc` Job per Campaign
+    with a directory; when only deleted Campaigns have directories, one Job
+    for the first live Campaign, which sweeps them. Returns the Job ids (empty
+    when another pass already did today's). A failure deletes the day key, so
+    the next pass tries again. `redis` is a sync or asyncio client."""
+    now = now or datetime.now(timezone.utc)
+    key = day_key(now)
+    if not await _maybe_await(redis.set(key, "1", nx=True, ex=DAY_TTL_S)):
+        return []
+    try:
+        jobs = await _schedule(session_factory)
+    except BaseException:
+        # Today's pass did not happen: let the next reaper pass try again.
+        await _maybe_await(redis.delete(key))
+        raise
     if jobs:
         logger.info("files.gc scheduled for %d Campaigns", len(jobs))
     return jobs

@@ -87,14 +87,18 @@ async def visible_file(db: AsyncSession, ctx: CampaignContext, file_id: Any) -> 
 
 async def files_derived_from(db: AsyncSession, ref_id: uuid.UUID) -> list[uuid.UUID]:
     """Ids of every non-stale file with a `derived_sources` row naming
-    `ref_id` (any `ref_kind`: a Visibility kind such as `player_journal` may
-    differ from the stored `ref_kind`, the id does not). For the stale marker;
-    no ctx: it only finds what must stop being served."""
+    `ref_id` under any modelled `ref_kind` (SOURCE_KIND_MODELS; a Visibility
+    kind such as `player_journal` may differ from the stored `ref_kind`, the
+    id does not). The `ref_kind IN (...)` lets `ix_derived_sources_ref` serve
+    the lookup; a ref_kind with no model already makes its file GM-only, so
+    its staleness never matters. For the stale marker; no ctx: it only finds
+    what must stop being served."""
     return list((await db.execute(
         sa.select(StoredFile.id)
         .where(sa.not_(StoredFile.stale),
                sa.exists().where(DerivedSource.derived_type == StoredFile.kind,
                                  DerivedSource.derived_id == StoredFile.id,
+                                 DerivedSource.ref_kind.in_(list(SOURCE_KIND_MODELS)),
                                  DerivedSource.ref_id == ref_id))
         .order_by(StoredFile.id)
     )).scalars())

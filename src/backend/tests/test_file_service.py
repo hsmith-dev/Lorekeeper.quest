@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import mimetypes
 import os
 import time
 import uuid
@@ -232,8 +233,9 @@ async def test_put_tree_writes_one_row_by_rename(db, world, root):
                                               ["z/1/0.jpg", 3, hashlib.sha256(b"j10").hexdigest()]]}
     r = fs.accel_response(row, "z/0/0.jpg")
     assert r.headers["x-accel-redirect"] == f"/_files/{row.storage_key}/z/0/0.jpg"
-    assert r.headers["content-type"] == "image/jpeg" and r.headers["content-disposition"] == "inline"
-    assert fs.accel_response(row, "meta.json").headers["content-disposition"] == "attachment"
+    assert r.headers["content-type"] == "image/jpeg"
+    assert r.headers["content-disposition"] == 'inline; filename="0.jpg"'
+    assert fs.accel_response(row, "meta.json").headers["content-disposition"] == 'attachment; filename="meta.json"'
     for bad in ("../x", "/etc/passwd", "a\\b", "z/0/9.jpg", fs.MANIFEST_NAME, "z/../meta.json", "z//0.jpg", "",
                 "z/0/0.jpg\x00", None):
         with pytest.raises(NotFound):
@@ -344,7 +346,7 @@ async def test_the_marker_matches_on_the_id_whatever_the_visibility_kind(db, wor
 # ── Headers ────────────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("content_type, inline", [
-    ("audio/mpeg", True), ("audio/ogg", True), ("image/png", True), ("image/jpeg", True), ("application/pdf", True),
+    ("audio/mpeg", True), ("audio/ogg", True), ("image/png", True), ("image/jpeg", True), ("application/pdf", False),
     ("text/plain", True), ("application/zip", False), ("application/json", False), ("video/mp4", False),
 ])
 async def test_accel_response_headers(db, world, content_type, inline):
@@ -357,9 +359,18 @@ async def test_accel_response_headers(db, world, content_type, inline):
     assert r.headers["etag"] == f'"{hashlib.sha256(b"bytes").hexdigest()[:32]}-e7"'
     assert r.headers["x-content-type-options"] == "nosniff"
     assert r.headers["content-security-policy"] == "default-src 'none'; sandbox"
-    assert r.headers["content-disposition"] == ("inline" if inline else "attachment")
+    ext = mimetypes.guess_extension(content_type, strict=False) or ""
+    assert r.headers["content-disposition"] == (
+        f'{"inline" if inline else "attachment"}; filename="{KIND}-{row.id}{ext}"')
     with pytest.raises(NotFound):
         fs.accel_response(row, "a/subpath")
+
+
+def test_download_names_keep_only_safe_characters():
+    row = StoredFile(id=uuid.UUID(MISSING), kind=KIND)
+    assert fs.download_name(row, "application/x-weird") == f"{KIND}-{MISSING}"
+    assert fs.download_name(row, "image/png", "z/0/a b\"c.png") == "a_b_c.png"
+    assert fs.disposition("text/plain", 'x"; y=1') == 'inline; filename="x___y_1"'
 
 
 @pytest.mark.parametrize("stored", ["text/html", "image/svg+xml", "application/javascript", "garbage"])
@@ -371,7 +382,7 @@ async def test_an_active_row_is_served_as_an_octet_stream_attachment(world, root
                      size=8, sha256=hashlib.sha256(b"<script>").hexdigest())
     r = fs.accel_response(row)
     assert r.headers["content-type"] == "application/octet-stream"
-    assert r.headers["content-disposition"] == "attachment"
+    assert r.headers["content-disposition"] == f'attachment; filename="{KIND}-{row.id}.bin"'
 
 
 @pytest.mark.parametrize("key", [
@@ -586,8 +597,8 @@ async def test_gc_one_skips_what_no_longer_qualifies(db, world, root):
     assert stray.exists()
     # A live Campaign's directory is never swept as a deleted one.
     assert not await fs.gc_one(db, ctx, fs.GcCandidate("1:x", fs.CAMPAIGN_DIR, str(other.cid)))
-    with pytest.raises(fs.UnsafePath):
-        await fs.gc_one(db, ctx, fs.GcCandidate("2:x", fs.ORPHAN, f"{world.cid}/{KIND}/.."))
+    assert not await fs.gc_one(db, ctx, fs.GcCandidate("2:x", fs.ORPHAN, f"{world.cid}/{KIND}/.."))
+    assert not await fs.gc_one(db, ctx, fs.GcCandidate("1:x", fs.CAMPAIGN_DIR, "../etc"))
 
 
 async def test_schedule_daily_enqueues_once_per_day_per_campaign_directory(db, world, root, monkeypatch):
@@ -621,3 +632,122 @@ def test_nginx_serves_files_only_through_an_internal_location():
     assert headers["Content-Security-Policy"] == fs.CSP
     # A static-asset regex can never take a stored file (`^~`).
     assert nginx.https_locations().resolve(f"/_files/{MISSING}/x.js").uri == "/_files/"
+
+
+# ── Review follow-ups ──────────────────────────────────────────────────────
+
+def test_a_trailing_newline_is_never_a_valid_name(root):
+    with pytest.raises(fs.UnsafePath):
+        fs.check_subpath("a.jpg\n")
+    with pytest.raises(fs.UnsafePath):
+        fs.key_path(f"{MISSING}/{KIND}/{MISSING}\n")
+    assert fs.check_content_type("audio/mpeg\n") == "audio/mpeg"  # stored without it
+    (root / f"{MISSING}\n").mkdir()
+    (root / MISSING).mkdir()
+    assert fs.campaign_dirs() == [uuid.UUID(MISSING)]
+
+
+async def test_an_unsafe_old_entry_name_does_not_fail_the_gc_job(db, world, root):
+    kept = await _put(db, world, [ref(world.party)])
+    weird = root / str(world.cid) / KIND / "bad\\name"
+    weird.write_bytes(b"x")
+    os.utime(weird, (OLD, OLD))
+    ctx = await gm_ctx(db, world)
+    job_id = await enqueue(db, ctx, "files.gc", {}, idempotency_key=files_gc.gc_key(world.cid))
+    await db.commit()
+    job = (await db.execute(sa.select(Job).where(Job.id == job_id).execution_options(populate_existing=True))
+           ).scalar_one()
+    assert job.status == JobStatus.DONE, (job.status, job.error_code)
+    assert (root / kept.storage_key).exists()
+
+
+async def test_schedule_daily_clears_the_day_key_when_it_fails(db, world, root, monkeypatch):
+    await _put(db, world, [ref(world.party)])
+    redis = fakeredis.FakeRedis(server=fakeredis.FakeServer())
+    factory = async_sessionmaker(db.bind, expire_on_commit=False)
+    now = datetime(2026, 11, 2, 12, 0, tzinfo=timezone.utc)
+
+    async def boom(*args, **kwargs):
+        raise RuntimeError("database down")
+
+    monkeypatch.setattr(files_gc, "campaign_owners", boom)
+    with pytest.raises(RuntimeError):
+        await files_gc.schedule_daily(factory, redis, now=now)
+    assert not redis.exists(files_gc.day_key(now))
+    monkeypatch.undo()
+    monkeypatch.setattr(get_settings(), "files_root", str(root))
+    assert len(await files_gc.schedule_daily(factory, redis, now=now)) == 1
+
+
+async def test_schedule_daily_sweeps_deleted_campaigns_when_no_live_one_has_a_directory(db, world, root, monkeypatch):
+    dead = root / str(uuid.uuid4())
+    dead.mkdir()
+    os.utime(dead, (OLD, OLD))
+    first = next(iter(await files_gc.campaign_owners(db, created_before=None)))
+    redis = fakeredis.FakeRedis(server=fakeredis.FakeServer())
+    jobs = await files_gc.schedule_daily(async_sessionmaker(db.bind, expire_on_commit=False), redis)
+    assert len(jobs) == 1
+    job = (await db.execute(sa.select(Job).where(Job.id == jobs[0]).execution_options(populate_existing=True))
+           ).scalar_one()
+    assert job.campaign_id == first and job.status == JobStatus.DONE
+    assert not dead.exists()
+
+
+async def test_a_players_put_never_supersedes_the_gms_file(db, world):
+    gm_file = await _put(db, world, [ref(world.party)], cache_key="shared")
+    player = await player_ctx(db, world)
+    mine = await fs.put(db, player, world.cid, KIND, b"mine", "audio/mpeg", cache_key="shared",
+                        sources=[ref(world.party)])
+    await db.commit()
+    assert mine.audience_owner_id == world.player.id and mine.cache_key == f"{world.player.id}:shared"
+    again = await fs.put(db, player, world.cid, KIND, b"mine 2", "audio/mpeg", cache_key="shared",
+                         sources=[ref(world.party)])
+    await db.commit()
+    assert await _stale(db, mine.id) is True and await _stale(db, again.id) is False  # their own one is
+    assert await _stale(db, gm_file.id) is False
+    with pytest.raises(ValueError):
+        await fs.put(db, player, world.cid, KIND, b"x", "audio/mpeg", audience_owner_id=world.owner.id)
+
+
+async def test_a_reaper_pass_schedules_files_gc(db, world, monkeypatch):
+    import asyncio
+
+    from app.jobs import worker
+    from tests.conftest import TEST_DB_URL
+
+    monkeypatch.setattr(get_settings(), "database_url", TEST_DB_URL)
+    monkeypatch.setattr(get_settings(), "jobs_eager", False)  # leave the Job queued to look at
+    from app.jobs import outbox
+
+    await _put(db, world, [ref(world.party)])
+    connection = fakeredis.FakeRedis(server=fakeredis.FakeServer())
+    outbox.set_connection(connection)  # the Job's after-commit push
+    try:
+        reaper = worker.Reaper("files", connection=connection)
+        assert await asyncio.to_thread(reaper.tick) is not None
+    finally:
+        outbox.set_connection(None)
+    job = (await db.execute(sa.select(Job).where(Job.kind == "files.gc", Job.campaign_id == world.cid)
+                            .execution_options(populate_existing=True))).scalar_one()
+    assert job.idempotency_key == f"files.gc:{world.cid}"
+
+
+async def test_a_put_on_a_session_closed_without_commit_leaves_no_bytes(db, world, root):
+    factory = async_sessionmaker(db.bind, expire_on_commit=False)
+    ctx = await gm_ctx(db, world)
+    session = factory()
+    row = await fs.put(session, ctx, world.cid, KIND, b"x", "audio/mpeg", sources=[ref(world.party)])
+    path = root / row.storage_key
+    assert path.is_file()
+    await session.close()
+    assert not path.exists()
+
+
+async def test_read_bytes_refuses_bytes_changed_on_disk(db, world, root, caplog):
+    row = await _put(db, world, [ref(world.party)], data=b"original")
+    player = await player_ctx(db, world)
+    assert await fs.read_bytes(db, player, row.id) == b"original"
+    (root / row.storage_key).write_bytes(b"tampered")
+    with caplog.at_level(logging.WARNING, logger="app.services.file_service"), pytest.raises(NotFound):
+        await fs.read_bytes(db, player, row.id)
+    assert "file_hash_mismatch" in caplog.text

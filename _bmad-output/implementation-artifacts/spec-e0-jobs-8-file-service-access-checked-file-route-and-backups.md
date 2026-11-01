@@ -2,13 +2,34 @@
 title: 'E0-Jobs.8: File service, access-checked file route and backups'
 type: 'feature'
 created: '2026-11-01'
-status: 'in-review'
+status: 'done'
 baseline_revision: '4548731b8a7ea88d17d89ccc5b0e3b1f68711586'
 review_loop_iteration: 0
 followup_review_recommended: false
 context: []
 warnings: ['oversized']
-deferred: []
+deferred:
+  - summary: >-
+      Two concurrent puts with the same cache_key may give the second writer an IntegrityError.
+    evidence: |-
+      The supersede UPDATE cannot see the other transaction's uncommitted fresh row, and uq_stored_files_cache_key_fresh then fails one insert. Settle with a two-session concurrency test on Postgres.
+    location: >-
+      src/backend/app/services/file_service.py (_insert)
+    severity: medium (unverified)
+  - summary: >-
+      In dev compose (no nginx) GET /api/files/{id} returns an empty 200, so files cannot be viewed in dev.
+    evidence: |-
+      docker-compose.yml mounts files_data only in backend and worker; X-Accel-Redirect needs nginx. A dev fallback that streams bytes would be new surface.
+    location: >-
+      docker-compose.yml
+    severity: medium
+  - summary: >-
+      backup-db.sh / restore-db.sh file handling and compose volume wiring have no automated test.
+    evidence: |-
+      No test runs either script or asserts the files_data mounts; a typo in the archive-name derivation would only show in a real restore.
+    location: >-
+      scripts/backup-db.sh, scripts/restore-db.sh, docker-compose.prod.yml
+    severity: medium
 ---
 
 <intent-contract>
@@ -88,6 +109,45 @@ deferred: []
 
 ## Review Triage Log
 
+### 2026-11-01 — Review pass
+- verdicts: 35 findings — high 0, medium 9, low 18, false 6, maybe-false 2
+- findings:
+  - `[medium]` `[patch]` Blind: restore empties the volume and so deletes Live audio the backup left out — restore now keeps `*/live_audio` directories; doc says so.
+  - `[low]` `[reject]` Blind: rows whose bytes are missing after a restore are never removed — they answer the uniform 404; auto-deleting rows on missing bytes would also fire on a transient mount problem, so the fix is riskier than the 404.
+  - `[medium]` `[patch]` Blind: a failed restore leaves backend and worker stopped — EXIT trap restarts them.
+  - `[low]` `[patch]` Blind: deleted Campaigns' directories never swept when no live Campaign has a directory — schedule_daily enqueues one Job for the first live Campaign in that case.
+  - `[medium]` `[patch]` Blind: the day key is set before work, so a DB error skips gc for the day — key deleted on failure.
+  - `[low]` `[reject]` Blind: gc cost grows with file count (rows reloaded per candidate) — self-hosted Campaigns hold few rows (a tile tree is one row); `done` is advanced by run_cursor.
+  - `[medium]` `[patch]` Blind: stale-marker query filters on ref_id alone and cannot use `(ref_kind, ref_id)` — now `ref_kind IN SOURCE_KIND_MODELS` (other kinds already make the file GM-only).
+  - `[maybe-false]` `[defer]` Blind: two concurrent puts with the same cache_key give the second an IntegrityError — needs a concurrency test on real Postgres; if true medium (deferred).
+  - `[low]` `[patch]` Blind: Content-Disposition has no filename — adds `filename="<kind>-<id><ext>"`.
+  - `[low]` `[reject]` Blind: charset dropped from text/plain — no text producer exists yet; keeping parameters means parsing and whitelisting them.
+  - `[maybe-false]` `[patch]` Blind: inline PDF probably blank under `CSP: sandbox` in Chromium — PDF removed from the inline list (a deletion; downloads always work).
+  - `[low]` `[reject]` Blind: If-Range against nginx with `etag off` returns full 200 — browsers seek with plain Range; only resumed downloads send If-Range.
+  - `[low]` `[reject]` Blind: accel_response stats the file on the event loop — a few stat calls, no reads for plain files; the manifest read is cached.
+  - `[low]` `[reject]` Blind: nightly full tar of the volume on the same disk — ops sizing; Tier 2 in the doc already covers offsite copies.
+  - `[low]` `[patch]` Blind: missing tests (reaper wiring, read_bytes mismatch) — added (see VG rows); script tests deferred (VG row).
+  - `[medium]` `[defer]` Blind: dev compose has no nginx, so a 200 reaches the browser empty in dev — a dev byte-serving fallback is new surface; deferred.
+  - `[low]` `[patch]` Blind: `_campaign_dir_path` checks the root, not the path — now checks the path.
+  - `[low]` `[patch]` Blind: gc ORPHAN calls `_entry_path` before the Campaign check (UnsafePath) — grouped with Edge row 3.
+  - `[low]` `[reject]` Blind: doc lines exceed the wrap width — cosmetic.
+  - `[medium]` `[patch]` VG: no test that a Reaper pass schedules files.gc — test added.
+  - `[medium]` `[patch]` VG: closing a session with an uncommitted put not tested — test added.
+  - `[low]` `[patch]` VG: read_bytes hash-mismatch branch untested — test added.
+  - `[medium]` `[defer]` VG: backup/restore scripts and compose volume wiring have no automated check — needs Docker; deferred (desktop check listed).
+  - `[low]` `[patch]` VG other: day key set before work — grouped with Blind row 5.
+  - `[low]` `[patch]` VG other: deleted-only directories never swept — grouped with Blind row 4.
+  - `[medium]` `[patch]` Edge: regexes use `.match` with `$`, so a trailing newline passes subpath/key validation — `.fullmatch` everywhere, test added.
+  - `[low]` `[patch]` Edge: a `<uuid>\n` directory makes campaign_dirs raise — fixed by fullmatch.
+  - `[low]` `[patch]` Edge: an orphan with a backslash in its name fails every gc step — gc_one returns False on UnsafePath.
+  - `[low]` `[patch]` Edge: day key set before work — grouped with Blind row 5.
+  - `[low]` `[patch]` Edge: deleted-only directories never swept — grouped with Blind row 4.
+  - `[low]` `[defer]` Edge: concurrent same cache_key IntegrityError — grouped with Blind row 8.
+  - `[medium]` `[patch]` Edge: a Player put with a GM file's cache_key supersedes it — non-GM puts are narrowed to themselves and supersede only rows with the same audience_owner_id; because the unique index has no owner column (no migration allowed), an owned file stores its cache_key as `<owner id>:<cache_key>`.
+  - `[medium]` `[patch]` Edge: corrupt archive found only after the volume is emptied — archive verified before the prompt.
+  - `[false]` `[reject]` Intent: nginx runtime (accel headers, internal 404) never exercised — verified on the desktop with real nginx 1.27: ETag, Vary, nosniff, CSP, Content-Type, Content-Disposition survive; direct `/_files/` 404; `..` in X-Accel 404.
+  - `[false]` `[reject]` Intent: staleness on any change, not only downgrades — the stale marker gets no old/new value; marking on every change fails closed, as the spec states.
+
 ## Design Notes
 
 - CI-8 forbids `select(StoredFile)`/`select(DerivedSource)` outside `app/access/`, so reads live in `app/access/files.py`; `file_service` writes with `insert`/`update`/`delete` and the ORM, and enumerates rows through `scoped_select` with the Owner ctx.
@@ -101,3 +161,32 @@ deferred: []
 - `cd src/backend && python -m pytest tests/test_file_service.py tests/ev4 tests/access -q` -- expected: pass (CI, real Postgres).
 - `python scripts/check_scoped_queries.py` and `lint-imports` -- expected: clean.
 - `docker compose -f docker-compose.prod.yml config -q` -- expected: valid.
+
+## Auto Run Result
+
+Status: done
+
+**Summary:** `app/services/file_service.py` owns the `files_data` volume (`put`, `put_tree`, `open`, `read_bytes`, `delete`, `accel_response`, the stale marker registered with `register_stale_marker`, gc helpers). `app/access/files.py` holds every `stored_files`/`derived_sources` read: `file_sources` loads ALL of a file's source rows, and `visible_file` requires both the SQL (`scoped_get`) and Python (`audience_of`) checks. `GET /api/files/{file_id}` answers an empty 200 with `X-Accel-Redirect` and safe headers (nosniff, sandbox CSP, Content-Disposition with filename, no inline HTML/SVG/XML/JS/PDF), 304 on a matching ETag, and the uniform 404 otherwise. `delete` removes the `derived_sources` rows. `files.gc` is a cursor Job scheduled daily by the reaper. nginx has an internal `^~ /_files/` location; `files_data` is rw in backend/worker, ro in nginx. Backups archive `files_data` after the dump (Live audio only with the per-Campaign opt-in marker); restore verifies the archive, keeps `live_audio`, restarts services on exit.
+
+**Files changed:**
+- `src/backend/app/services/file_service.py` -- new: the volume owner.
+- `src/backend/app/access/files.py` -- new: loader and double visibility check.
+- `src/backend/app/api/routes/files.py`, `app/main.py` -- the file route.
+- `src/backend/app/jobs/files_gc.py`, `registry.py`, `worker.py` -- `files.gc` kind, handler, daily scheduling.
+- `src/backend/app/core/config.py` -- `files_root`.
+- `nginx/locations.conf`, `docker-compose.yml`, `docker-compose.prod.yml`, `src/backend/Dockerfile.prod` -- internal location and volume.
+- `scripts/backup-db.sh`, `scripts/restore-db.sh`, `docs/DATABASE_BACKUPS.md` -- backups of stored files.
+- `src/backend/tests/test_file_service.py`, `tests/ev4/probes/files.py`, `tests/conftest.py` -- tests, EV-4 probes, temp FILES_ROOT.
+
+**Review:** 35 findings. Patched 21 rows (9 medium entries, the rest low/maybe-false). Deferred 3 (concurrent cache_key IntegrityError, unverified; no dev byte serving without nginx; no automated test of the backup scripts or compose mounts). Rejected 9 lows and 2 false (see the triage log for each reason).
+
+**Follow-up review:** true. Patched entries at medium: 9 (no high), so "two or more medium" applies. Specific unverified risk: the owner-namespaced `cache_key` (`<owner id>:<key>`) introduced by the patch changes what callers must pass to look a file up by key, and it was not re-reviewed.
+
+**Verification:** Implementer ran the full backend suite against a throwaway local Postgres (1645 passed, 89 skipped, EV-4 0 leaks) before the patches, then `tests/test_file_service.py` + the files probes after them (85 passed); `check_scoped_queries.py`, `lint-imports`, ruff clean. Real nginx 1.27 on the desktop (throwaway containers, removed): ETag, Vary, nosniff, CSP, Content-Type, Content-Disposition survive the X-Accel redirect; a direct `/_files/...` request is 404; `..` in X-Accel-Redirect is 404. GitHub CI on PR #62 is the gate.
+
+**Needs desktop verification:**
+- `docker compose -f docker-compose.prod.yml config -q` -- valid.
+- Prod bring-up: `GET /api/files/{id}` through nginx returns the bytes for a GM; `curl -k https://<host>/_files/<key>` is 404.
+- `scripts/backup-db.sh` then `scripts/restore-db.sh <dump>` on a throwaway stack: `lorekeeper_files_*.tar.gz` written next to the dump, `live_audio` excluded without `.backup-live-audio`, restore brings files back and restarts backend and worker.
+
+**Residual risks:** concurrent same-`cache_key` puts (deferred); dev compose cannot show file bytes; any Visibility change of a source (upgrades included) marks its files stale.

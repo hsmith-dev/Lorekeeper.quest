@@ -22,8 +22,10 @@ half of one.
 
 **Rows.** `put`/`put_tree` insert one `stored_files` row and one
 `derived_sources` row per source in the caller's transaction (they never
-commit). A `cache_key` already held by a fresh file of the same Campaign and
-kind marks that file stale (superseded) first. The bytes written for a row
+commit). A `cache_key` already held by a fresh file of the same Campaign,
+kind and `audience_owner_id` marks that file stale (superseded) first. A
+non-GM ctx always stores its own file (`audience_owner_id` = its user), and
+an owned file's stored `cache_key` is `<owner id>:<cache_key>`. The bytes written for a row
 that never commits are unlinked when the transaction (or the savepoint) rolls
 back; `delete` removes the rows in the caller's transaction and unlinks the
 bytes only after the root transaction commits.
@@ -41,7 +43,7 @@ stale, in the same transaction. A non-GM never gets a stale file
 
 **GC.** The `files.gc` Job (app/jobs/files_gc.py) walks `gc_candidates` for
 one Campaign with `run_cursor`: superseded files (stale, with a fresh file
-holding the same `cache_key`), row-less entries in the Campaign's directory
+holding the same `cache_key` and owner), row-less entries in the Campaign's directory
 older than GC_GRACE, and the directories of deleted Campaigns older than
 GC_GRACE. A file made stale by a downgrade is not superseded: the GM can
 still fetch it, so it stays until it is regenerated or deleted.
@@ -114,9 +116,10 @@ _ACTIVE_TYPES = frozenset({
     "application/x-javascript", "text/jscript", "text/x-javascript",
 })
 _ACTIVE_EXTENSIONS = frozenset({".html", ".htm", ".xhtml", ".xht", ".svg", ".svgz", ".xml", ".js", ".mjs", ".cjs"})
-# Served inline: audio, raster images, PDF and plain text. Everything else is an attachment.
+# Served inline: audio, raster images and plain text. Everything else (PDF
+# included: Chromium will not render a PDF under `CSP: sandbox`) is an attachment.
 _INLINE_TYPES = frozenset({
-    "application/pdf", "text/plain", "image/png", "image/jpeg", "image/gif", "image/webp", "image/avif",
+    "text/plain", "image/png", "image/jpeg", "image/gif", "image/webp", "image/avif",
     "image/bmp",
 })
 # Content types of tree entries, by extension (anything else: octet-stream).
@@ -156,7 +159,7 @@ def _plain(value: Any, what: str) -> str:
 def key_path(storage_key: str) -> Path:
     """The path of a validated `{campaign_id}/{kind}/{uuid}` key under files_root."""
     key = _plain(storage_key, "storage_key")
-    if not _KEY_RE.match(key):
+    if not _KEY_RE.fullmatch(key):
         raise UnsafePath("storage_key is not {campaign_id}/{kind}/{uuid}")
     path = files_root() / key
     _check_under_root(path)
@@ -170,13 +173,13 @@ def check_subpath(subpath: Any) -> str:
     if len(sub) > _MAX_SUBPATH_LEN:
         raise UnsafePath("subpath is too long")
     parts = sub.split("/")
-    if len(parts) > _MAX_SUBPATH_DEPTH or not all(_SEGMENT_RE.match(p) for p in parts):
+    if len(parts) > _MAX_SUBPATH_DEPTH or not all(_SEGMENT_RE.fullmatch(p) for p in parts):
         raise UnsafePath("subpath has an invalid segment")
     return sub
 
 
 def _check_kind(kind: Any) -> str:
-    if not isinstance(kind, str) or not _KIND_RE.match(kind):
+    if not isinstance(kind, str) or not _KIND_RE.fullmatch(kind):
         raise ValueError(f"file kind must match {_KIND}, got {kind!r}")
     return kind
 
@@ -204,7 +207,7 @@ def check_content_type(content_type: Any) -> str:
     if not isinstance(content_type, str):
         raise ValueError("content_type must be a str")
     base = _base_type(content_type)
-    if not _CONTENT_TYPE_RE.match(base):
+    if not _CONTENT_TYPE_RE.fullmatch(base):
         raise ValueError(f"content_type {content_type!r} is not type/subtype")
     if is_active_type(base):
         raise ValueError(f"content_type {base!r} is refused: HTML, SVG, XML, XHTML and JS are never stored")
@@ -216,14 +219,31 @@ def check_content_type(content_type: Any) -> str:
 def served_content_type(content_type: str) -> str:
     """What a response says: the type, unless it is malformed or active."""
     base = _base_type(content_type or "")
-    if not _CONTENT_TYPE_RE.match(base) or is_active_type(base) or base == TREE_CONTENT_TYPE:
+    if not _CONTENT_TYPE_RE.fullmatch(base) or is_active_type(base) or base == TREE_CONTENT_TYPE:
         return OCTET_STREAM
     return base
 
 
-def disposition(content_type: str) -> str:
+_FILENAME_UNSAFE_RE = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def download_name(file: StoredFile, content_type: str, subpath: str | None = None) -> str:
+    """`<kind>-<file id><ext>` (ext guessed from the served type), or a tree
+    entry's own name; only [A-Za-z0-9._-] characters."""
+    if subpath is not None:
+        name = subpath.rsplit("/", 1)[-1]
+    else:
+        ext = mimetypes.guess_extension(_base_type(content_type), strict=False) or ""
+        name = f"{file.kind}-{file.id}{ext}"
+    return _FILENAME_UNSAFE_RE.sub("_", name) or "file"
+
+
+def disposition(content_type: str, filename: str | None = None) -> str:
     base = _base_type(content_type)
-    return "inline" if base.startswith("audio/") or base in _INLINE_TYPES else "attachment"
+    value = "inline" if base.startswith("audio/") or base in _INLINE_TYPES else "attachment"
+    if filename is not None:
+        value += f'; filename="{_FILENAME_UNSAFE_RE.sub("_", filename)}"'
+    return value
 
 
 def tree_content_type(subpath: str) -> str:
@@ -397,15 +417,34 @@ def _write_tree(path: Path, entries: list[tuple[str, bytes]], manifest: bytes) -
         raise
 
 
+def _owner_for(ctx: CampaignContext, audience_owner_id: Any) -> uuid.UUID | None:
+    """The file's `audience_owner_id`: as given for a GM; for anyone else it
+    must be None or the ctx's own user, and is always that user (a Player's
+    file is theirs, and can never supersede a GM's or another Player's)."""
+    owner_id = None if audience_owner_id is None else _as_uuid(audience_owner_id, "audience_owner_id")
+    if ctx.role == GM:
+        return owner_id
+    if owner_id is not None and owner_id != ctx.user_id:
+        raise ValueError("audience_owner_id: a non-GM ctx may only store its own files")
+    return ctx.user_id
+
+
 async def _insert(db: AsyncSession, ctx: CampaignContext, campaign_id: uuid.UUID, kind: str, key: str,
                   content_type: str, size: int, sha: str, cache_key: str | None,
                   sources: list[tuple[str, uuid.UUID, str | None]], audience_owner_id: uuid.UUID | None) -> StoredFile:
+    if cache_key is not None and audience_owner_id is not None:
+        # An owned file's cache_key is namespaced by its owner: the unique
+        # index (campaign, kind, cache_key) among fresh files has no owner
+        # column, and one owner's key must never collide with another's.
+        cache_key = _short_str(f"{audience_owner_id}:{cache_key}", "cache_key (with its owner)", 128)
     if cache_key is not None:
-        # The fresh holder of this cache_key is superseded (files.gc removes it).
+        # The fresh holder of this cache_key with the same owner is superseded
+        # (files.gc removes it); another owner's file is never touched.
         await db.execute(
             sa.update(StoredFile)
             .where(StoredFile.campaign_id == campaign_id, StoredFile.kind == kind,
-                   StoredFile.cache_key == cache_key, sa.not_(StoredFile.stale))
+                   StoredFile.cache_key == cache_key, sa.not_(StoredFile.stale),
+                   StoredFile.audience_owner_id.is_not_distinct_from(audience_owner_id))
             .values(stale=True)
         )
     row = StoredFile(id=uuid.uuid4(), campaign_id=campaign_id, kind=kind, storage_key=key, content_type=content_type,
@@ -446,7 +485,7 @@ async def put(db: AsyncSession, ctx: CampaignContext, campaign_id: uuid.UUID | s
     data = bytes(data)
     triples = _source_triples(sources)
     cache_key = None if cache_key is None else _short_str(cache_key, "cache_key", 128)
-    owner_id = None if audience_owner_id is None else _as_uuid(audience_owner_id, "audience_owner_id")
+    owner_id = _owner_for(ctx, audience_owner_id)
     key = new_storage_key(cid, kind)
     path = key_path(key)
     sha = hashlib.sha256(data).hexdigest()
@@ -509,7 +548,7 @@ async def put_tree(db: AsyncSession, ctx: CampaignContext, kind: str, files: Ite
     entries = _tree_entries(files)
     triples = _source_triples(sources)
     cache_key = None if cache_key is None else _short_str(cache_key, "cache_key", 128)
-    owner_id = None if audience_owner_id is None else _as_uuid(audience_owner_id, "audience_owner_id")
+    owner_id = _owner_for(ctx, audience_owner_id)
     manifest = manifest_bytes((sub, len(data), hashlib.sha256(data).hexdigest()) for sub, data in entries)
     total = sum(len(data) for _sub, data in entries)
     key = new_storage_key(cid, kind)
@@ -549,7 +588,7 @@ def read_manifest(file: StoredFile) -> dict[str, tuple[int, str]] | None:
         listed = json.loads(raw)["files"]
         out = {}
         for sub, size, sha in listed:
-            if check_subpath(sub) != sub or not isinstance(size, int) or not _SHA_RE.match(str(sha)):
+            if check_subpath(sub) != sub or not isinstance(size, int) or not _SHA_RE.fullmatch(str(sha)):
                 return None
             out[sub] = (size, sha)
     except (ValueError, KeyError, TypeError):
@@ -658,8 +697,8 @@ def accel_response(file: StoredFile, subpath: str | None = None, *, access_epoch
                    request: Request | None = None) -> Response:
     """The empty-bodied response nginx turns into the bytes: `X-Accel-Redirect:
     /_files/<storage_key>[/<subpath>]`, the content type (octet-stream for an
-    active one), `Content-Disposition` (inline only for audio, raster images,
-    PDF and plain text), `Cache-Control: private, no-cache`, the epoch ETag,
+    active one), `Content-Disposition` (inline only for audio, raster images
+    and plain text; with a filename), `Cache-Control: private, no-cache`, the epoch ETag,
     `nosniff` and a sandboxing CSP. A matching If-None-Match gets 304 with no
     accel header. Anything that cannot be served is `not_found()`."""
     target = resolve(file, subpath)
@@ -669,7 +708,8 @@ def accel_response(file: StoredFile, subpath: str | None = None, *, access_epoch
     return Response(status_code=200, content=b"", headers={
         "X-Accel-Redirect": target.accel,
         "Content-Type": target.content_type,
-        "Content-Disposition": disposition(target.content_type),
+        "Content-Disposition": disposition(target.content_type,
+                                           download_name(file, target.content_type, subpath)),
         "Cache-Control": CACHE_CONTROL,
         "ETag": tag,
         "X-Content-Type-Options": "nosniff",
@@ -737,7 +777,7 @@ def campaign_dirs() -> list[uuid.UUID]:
     out = []
     with os.scandir(root) as it:
         for entry in it:
-            if _UUID_RE.match(entry.name) and entry.is_dir(follow_symlinks=False):
+            if _UUID_RE.fullmatch(entry.name) and entry.is_dir(follow_symlinks=False):
                 out.append(uuid.UUID(entry.name))
     return sorted(out)
 
@@ -759,7 +799,7 @@ def _scan(campaign_id: uuid.UUID, live: set[str], cutoff: float) -> tuple[list[s
         return dead, entries
     with os.scandir(root) as it:
         for entry in it:
-            if (_UUID_RE.match(entry.name) and entry.name not in live and entry.is_dir(follow_symlinks=False)
+            if (_UUID_RE.fullmatch(entry.name) and entry.name not in live and entry.is_dir(follow_symlinks=False)
                     and _old(entry, cutoff)):
                 dead.append(entry.name)
     cdir = root / str(campaign_id)
@@ -768,7 +808,7 @@ def _scan(campaign_id: uuid.UUID, live: set[str], cutoff: float) -> tuple[list[s
     with os.scandir(cdir) as kinds:
         for kind in kinds:
             # Files here (the `.backup-live-audio` opt-in marker) are not entries.
-            if not _KIND_RE.match(kind.name) or not kind.is_dir(follow_symlinks=False):
+            if not _KIND_RE.fullmatch(kind.name) or not kind.is_dir(follow_symlinks=False):
                 continue
             with os.scandir(kind.path) as items:
                 for item in items:
@@ -781,7 +821,7 @@ def _entry_path(rel: str) -> Path:
     """The path of `{campaign_id}/{kind}/{name}` (any name: row-less entries
     include temporary ones), its parent checked under files_root."""
     parts = rel.split("/")
-    if (len(parts) != 3 or not _UUID_RE.match(parts[0]) or not _KIND_RE.match(parts[1])
+    if (len(parts) != 3 or not _UUID_RE.fullmatch(parts[0]) or not _KIND_RE.fullmatch(parts[1])
             or parts[2] in ("", ".", "..") or any(c in parts[2] for c in "\\\x00")):
         raise UnsafePath(f"not a Campaign entry: {rel!r}")
     path = files_root() / rel
@@ -790,16 +830,17 @@ def _entry_path(rel: str) -> Path:
 
 
 def _campaign_dir_path(cid: str) -> Path:
-    if not _UUID_RE.match(cid):
+    if not _UUID_RE.fullmatch(cid):
         raise UnsafePath(f"not a Campaign directory: {cid!r}")
     path = files_root() / cid
-    _check_under_root(files_root())
+    _check_under_root(path)
     return path
 
 
 def _superseded(rows: list[StoredFile]) -> list[StoredFile]:
-    fresh = {(r.kind, r.cache_key) for r in rows if not r.stale and r.cache_key is not None}
-    return [r for r in rows if r.stale and r.cache_key is not None and (r.kind, r.cache_key) in fresh]
+    fresh = {(r.kind, r.cache_key, r.audience_owner_id) for r in rows if not r.stale and r.cache_key is not None}
+    return [r for r in rows if r.stale and r.cache_key is not None
+            and (r.kind, r.cache_key, r.audience_owner_id) in fresh]
 
 
 async def gc_candidates(db: AsyncSession, ctx: CampaignContext, *, now: datetime | None = None) -> list[GcCandidate]:
@@ -830,7 +871,10 @@ async def gc_one(db: AsyncSession, ctx: CampaignContext, item: GcCandidate, *, n
         await delete(db, ctx, row)
         return True
     if item.action == ORPHAN:
-        path = _entry_path(item.target)
+        try:
+            path = _entry_path(item.target)
+        except UnsafePath:
+            return False  # a name we would never write: left alone, never fails the Job
         if not item.target.startswith(f"{ctx.campaign_id}/"):
             return False
         if item.target in {r.storage_key for r in await campaign_files(db, ctx)}:
@@ -843,7 +887,10 @@ async def gc_one(db: AsyncSession, ctx: CampaignContext, item: GcCandidate, *, n
         await asyncio.to_thread(_remove, path)
         return True
     if item.action == CAMPAIGN_DIR:
-        path = _campaign_dir_path(item.target)
+        try:
+            path = _campaign_dir_path(item.target)
+        except UnsafePath:
+            return False
         if item.target in {str(cid) for cid in await campaign_owners(db, created_before=None)}:
             return False
         if path.is_symlink() or not path.is_dir():
