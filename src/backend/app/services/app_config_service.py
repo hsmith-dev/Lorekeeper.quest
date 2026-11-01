@@ -26,5 +26,5 @@ async def is_open_access(db: AsyncSession) -> bool:
     """True when the platform runs unrestricted (see AppConfig's docstring).
     Consulted by registration (auth.py), the feature-route account gate
     (deps.require_active_account), and hosted-LLM access
-    (deps.get_user_llm_config)."""
+    (llm_config_service.resolve_llm_config)."""
     return (await get_app_config(db)).open_access_mode

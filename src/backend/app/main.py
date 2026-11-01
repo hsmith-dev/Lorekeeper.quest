@@ -12,6 +12,7 @@ from slowapi.middleware import SlowAPIMiddleware
 from app.core.limiter import limiter
 
 from app.core.config import get_settings
+from app.core.errors import LLMError, llm_exception_handler
 from app.core.logging import configure_logging
 from app.core.redis_client import init_redis, close_redis
 from app.services.nlp_service import load_nlp_model
@@ -55,6 +56,12 @@ def create_app() -> FastAPI:
     # ── Rate limiting ──────────────────────────────────────────────────────────
     app.state.limiter = limiter
     app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+    # ── Typed LLM errors ───────────────────────────────────────────────────────
+    # One LLMError -> {"detail", "code"} mapping for every route (see
+    # app/core/errors.py); more specific than the catch-all Exception handler
+    # below, so Starlette picks this one for the LLMError family.
+    app.add_exception_handler(LLMError, llm_exception_handler)
     app.add_middleware(SlowAPIMiddleware)
 
     # ── CORS ───────────────────────────────────────────────────────────────────

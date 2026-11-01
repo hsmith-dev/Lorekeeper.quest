@@ -27,8 +27,8 @@ from app.services.retrieval_service import hybrid_search_journal, RAG_RELEVANCE_
 from app.services.embedding_service import embed
 from app.services.source_service import retrieve_canon_context
 from app.services.shorthand_service import get_glossary
-from app.services.llm_provider import LLMConfig, is_hosted_default
-from app.services import billing_service
+from app.services.llm_provider import LLMConfig
+from app.services import llm_config_service
 
 router = APIRouter()
 
@@ -323,8 +323,7 @@ async def _persist_chat_turn(
     prep.session.message_count = len(prep.session.messages)
     flag_modified(prep.session, "messages")
     await db.commit()
-    if is_hosted_default(config):
-        await billing_service.record_hosted_usage(db, user, user_message, reply)
+    await llm_config_service.meter(db, user, config, user_message, reply)
 
 
 @router.post("/", response_model=ChatResponse)
