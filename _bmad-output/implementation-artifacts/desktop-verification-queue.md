@@ -63,3 +63,12 @@ Stories were merged on green GitHub CI while the desktop was offline (owner deci
 
 ## E0-QA.11 — EV-4 harness scaffolding (PR #34)
 - [ ] Sync the WHOLE repo (the harness reads `seeds/` and `nginx/` from the root), then run the docker test command with `python -m pytest -q tests/ev4`
+
+## E0-Platform.4 — `ml` lazy NLI + OCR under a resident-memory budget (PR #37)
+- [x] ~~Real NLI + OCR model sanity~~ — exercised during the CI image build: NLI scored "Mira died in the fire" vs "Mira greeted the party" contradiction 0.998; OCR read a rendered test image exactly
+- [ ] NLI on the 6 spike pairs (`spikes/cpu-benchmarks.md` §5) via `POST http://ml:8000/v1/nli`: contradiction ≥ 0.97 on Mira, black dagger, Grukk (Aldric pair is a known false positive); 50 pairs < 10 s
+- [ ] OCR: `curl -F file=@sample.png http://ml:8000/v1/ocr` matches `vision_service.extract_notes_from_image` on the same file
+- [ ] RSS: `/v1/status` `rss_bytes` + `docker stats ml` at boot, after first NLI, after first OCR; restart with `ML_RESIDENT_BUDGET_MB=1000`, call NLI then OCR → NLI evicted, RSS drops; tune `ML_NLI_COST_MB`/`ML_OCR_COST_MB`; peak < 2560m
+- [ ] Offline: `scripts/sidecar_smoke.sh ml`, then `/v1/nli` and `/v1/ocr` in a `--network none` container
+- [ ] First-call latency of NLI and OCR vs the 30 s `ML_TIMEOUT_S`
+- [ ] arm64: `docker buildx build --platform linux/arm64 src/services/ml`
