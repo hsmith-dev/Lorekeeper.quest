@@ -43,7 +43,8 @@ The reaper (E0-Jobs.4, `reap` / `Reaper`) runs every 30 s in every
 LorekeeperWorker, one pass at a time across workers (a Valkey lock). It
 requeues (or fails, `interrupted`) `running` rows whose heartbeat is over
 60 s old and that no live RQ worker is running, and re-pushes `queued` rows
-RQ does not hold once they are runnable: `next_run_at` passed (retries),
+RQ does not hold once they are runnable: `next_run_at` passed (retries;
+so a retry really waits its delay plus up to one interval),
 older than 60 s with no `next_run_at` (a lost push, a Valkey flush), or a
 dependent whose dependency ended by raw SQL or was deleted.
 
@@ -168,10 +169,10 @@ async def _owned(db: AsyncSession, job_id: uuid.UUID, worker_id: str) -> Job | J
         await db.rollback()
         return None
     if job.status != JobStatus.RUNNING or job.worker_id != worker_id:
-        current = JobStatus(job.status)
+        current, extra = JobStatus(job.status), _log_extra(job)
         await db.rollback()
         logger.warning("job outcome dropped: this attempt no longer owns the job (now %s)", current.value,
-                       extra={"job_id": str(job_id)})
+                       extra=extra)
         return current
     return job
 
@@ -521,8 +522,9 @@ def _live_workers(connection: Any) -> dict[str, str | None]:
     return {w.name: w.get_current_job_id() for w in Worker.all(connection=connection)}
 
 
-def _in_rq_queue(connection: Any, queue: str, job_id: uuid.UUID) -> bool:
-    return connection.lpos(RQQueue(queue, connection=connection).key, str(job_id)) is not None
+def _rq_queued_ids(connection: Any, queue: str) -> set[str]:
+    """The job ids waiting in one RQ queue's list (read once per pass)."""
+    return set(RQQueue(queue, connection=connection).get_job_ids())
 
 
 async def _recover_running(db: AsyncSession, live: dict[str, str | None], now: datetime,
@@ -573,7 +575,11 @@ async def _push_due(db: AsyncSession, connection: Any, live: dict[str, str | Non
     due (`next_run_at` passed, or none and older than QUEUED_GRACE_S), and
     not waiting on an active dependency (a terminal one, however it got
     there, or one deleted: the FK sets `depends_on_job_id` NULL). RQ holds a
-    Job when its id is in its queue's list or a live worker is running it."""
+    Job when its id is in its queue's list or a live worker is running it.
+
+    Every candidate is checked (RQ-held rows never use up the batch), and at
+    most REAPER_BATCH are pushed per pass. The pass stops at the first failed
+    push (Valkey trouble): the rest wait for the next pass."""
     from app.jobs.enqueue import repush  # lazy: app.jobs.enqueue -> outbox -> (lazily) this module
 
     dep = aliased(Job)
@@ -587,15 +593,17 @@ async def _push_due(db: AsyncSession, connection: Any, live: dict[str, str | Non
                       sa.and_(Job.next_run_at.is_(None),
                               Job.created_at <= now - timedelta(seconds=QUEUED_GRACE_S))))
         .order_by(Job.created_at, Job.id)
-        .limit(REAPER_BATCH)
     )).all()
     await db.rollback()  # no transaction held while talking to Valkey
-    running_now = {job_id for job_id in live.values() if job_id}
+    held = {job_id for job_id in live.values() if job_id}
+    for queue in {row.queue for row in rows}:
+        held |= _rq_queued_ids(connection, queue)
     for row in rows:
-        if str(row.id) in running_now or _in_rq_queue(connection, row.queue, row.id):
+        if str(row.id) in held:
             continue
-        if await repush(row.id, row.queue, row.kind, connection):
-            result.pushed.append(row.id)
+        if len(result.pushed) >= REAPER_BATCH or not await repush(row.id, row.queue, row.kind, connection):
+            break
+        result.pushed.append(row.id)
 
 
 async def reap(session_factory: async_sessionmaker[AsyncSession], connection: Any,
@@ -619,16 +627,21 @@ class Reaper:
     """Runs `reap` every REAPER_INTERVAL_S from a daemon thread of a
     LorekeeperWorker (every worker process has one), starting at once so a
     restart's leftovers are recovered early. A Valkey lock (SET NX with a TTL
-    just under the interval, never released early) lets one pass run per
-    interval across all workers and containers.
+    just under the interval, never released early) starts one pass per
+    interval across all workers and containers. A pass slower than the TTL
+    can overlap the next one; that is safe (running rows are taken with SKIP
+    LOCKED, and a second message for a Job only meets the claim).
 
-    The thread uses its own redis client and, per pass, its own event loop
-    and NullPool engine: nothing a work horse forked meanwhile goes on to use."""
+    The thread pushes on its own redis client and, per pass, uses its own
+    event loop and NullPool engine. Only the dependents a reaper-failed row
+    releases are pushed by the outbox, on its process-wide client (redis-py
+    resets its pool in a forked work horse)."""
 
     def __init__(self, name: str, interval_s: float | None = None, connection: Any = None):
         self._name = name
         self._interval = REAPER_INTERVAL_S if interval_s is None else interval_s
         self._connection = connection
+        self._owns_connection = connection is None
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, name="job-reaper", daemon=True)
 
@@ -645,7 +658,13 @@ class Reaper:
         return self
 
     def stop(self) -> None:
+        """Stop after the current pass (waiting a few seconds for it)."""
         self._stop.set()
+        if self._thread.is_alive():
+            self._thread.join(_HEARTBEAT_JOIN_S)
+        if self._owns_connection and self._connection is not None and not self._thread.is_alive():
+            self._connection.close()
+            self._connection = None
 
     def _run(self) -> None:
         while not self._stop.is_set():

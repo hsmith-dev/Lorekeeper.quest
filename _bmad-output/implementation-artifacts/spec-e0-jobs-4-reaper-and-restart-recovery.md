@@ -2,14 +2,21 @@
 title: 'E0-Jobs.4: Reaper and restart recovery'
 type: 'feature'
 created: '2026-11-01'
-status: 'in-review'
+status: 'done'
 baseline_revision: 'af726450a8fd852728585e345403f8fa7e785e98'
 review_loop_iteration: 0
-followup_review_recommended: false
+followup_review_recommended: true
 context:
   - '{project-root}/_bmad-output/implementation-artifacts/epic-5-context.md'
 warnings: ['oversized']
-deferred: []
+deferred:
+  - summary: >-
+      The reaper is a thread inside each RQ worker parent, which forks a work horse per Job; a lock held by that thread at fork time could in theory deadlock a horse.
+    evidence: |-
+      maybe-false. CPython 3.11 re-inits the import and logging locks at fork, redis-py resets its pool in a child (pid check), and the thread's asyncpg engine and event loop are never used by a horse. The desktop runs (about 12 Jobs with the reaper live, including kills and restarts) showed no hang. A soak test of thousands of short Jobs with the reaper ticking would settle it; the fallback is running the reaper in the WorkerPool parent or as its own process.
+    location: >-
+      src/backend/app/jobs/worker.py (Reaper, LorekeeperWorker.work)
+    severity: medium (unverified)
 ---
 
 <intent-contract>
@@ -81,6 +88,41 @@ deferred: []
 
 ## Review Triage Log
 
+### 2026-11-01 — Review pass
+- verdicts: 31 findings — high 0, medium 4, low 19, false 7, maybe-false 1
+- findings:
+  - `[medium]` `[patch]` VG: `_record_failure` ownership guard untested — added `taken_back` variants that raise retryable/terminal after the takeback; the row keeps the reaper's state.
+  - `[low]` `[patch]` VG: reaper's own connection never distinguished from the outbox global — added a two-FakeServer test.
+  - `[low]` `[patch]` VG: `repush` failure untested — added a test (with the stop-on-failure patch below).
+  - `[low]` `[reject]` Blind: live snapshot taken before LPOS lets a just-dequeued Job get a second message — harmless (claim lets one attempt run; a duplicate id message meets a deleted hash and is skipped); a fix needs re-snapshot logic that still leaves a window.
+  - `[false]` `[reject]` Blind: ownership by `worker_id` not attempt — the "worker alive, horse dead" row can only be re-claimed by that worker once its dead horse is gone; a worker never runs two horses, so no live earlier attempt exists to write late.
+  - `[low]` `[patch]` Blind: retry delays rounded up to the reaper cadence — documented in the module docstring (by design: E0-Jobs.4 says retries rely on the reaper).
+  - `[low]` `[patch]` Blind + Edge: slow pass can outlive the 25 s lock and overlap — documented as safe in `Reaper` (SKIP LOCKED, claim guard); the docstring's "one at a time" wording corrected.
+  - `[low]` `[patch]` Blind: one LPOS per candidate — held ids now read once per queue per pass (LRANGE).
+  - `[maybe-false]` `[defer]` Blind: thread in the RQ parent across horse forks could deadlock a horse — deferred (medium, unverified); settle with a soak test.
+  - `[low]` `[reject]` Blind: interruptions use up attempts; three deploys during a long Job fail it — the AC prescribes "requeued if attempts remain, or failed interrupted".
+  - `[low]` `[patch]` Blind: `Reaper.stop` neither joins nor closes — now joins (5 s) and closes the client it created.
+  - `[low]` `[patch]` Blind: test gaps (repush failure, failure-path late outcome, batch limit) — covered by the tests above; other queues/lock expiry/_run loop not worth extra tests.
+  - `[low]` `[reject]` Blind: the isolation fixture breaks parallel runs — the suite does not run in parallel (no xdist); the fixture only cancels rows other tests are done with.
+  - `[low]` `[patch]` Blind: new log lines lack `kind`/`campaign_id` — `_owned` uses `_log_extra(job)`, `repush` logs `kind`.
+  - `[low]` `[patch]` Blind: `connection or get_connection()` truthiness — now `is not None`.
+  - `[false]` `[reject]` Blind: spec missing from the diff — by design, the spec goes only to the edge-case layer.
+  - `[medium]` `[patch]` Edge: candidates limited to 500 before excluding RQ-held rows, so a large held backlog starves lost rows — the candidate select is unlimited (3 columns), held rows skipped, at most `REAPER_BATCH` pushed; test added.
+  - `[false]` `[reject]` Edge: live-held stale rows fill the recover batch — live-held rows are at most one per RQ worker, far below 500.
+  - `[medium]` `[patch]` Edge: a failing push per row could take 500 × 5 s — the pass now stops at the first failed push; test added.
+  - `[low]` `[reject]` Edge: duplicate push of a dependent whose after-commit push is in flight — needs a dependent older than 60 s and a race of milliseconds; a duplicate message is harmless (claim).
+  - `[low]` `[patch]` Edge: released dependents of a reaper-failed row push on the outbox global client — documented in the `Reaper` docstring (same Valkey; redis-py resets the pool in a forked child).
+  - `[low]` `[reject]` Edge: requeue with `next_run_at = now` has no backoff for a horse-killing Job — detection already spaces attempts by ≥ 60 s and `max_attempts` caps it at 3.
+  - `[low]` `[patch]` Edge claim: "nothing a forked horse uses" — docstring corrected (same patch as the release client).
+  - `[low]` `[patch]` Edge claim: "one pass at a time" — wording corrected (same patch as the lock).
+  - `[medium]` `[patch]` Edge claim: "none stays queued" under a large backlog — fixed by the unlimited candidate scan (same root cause as the batch finding).
+  - `[false]` `[reject]` Intent: the FLUSHALL/registry cases are tested at the pass level, not the live stack — the desktop proof ran the live stack (`FLUSHALL` with a real worker container) and the forking test runs real RQ.
+  - `[low]` `[reject]` Intent: the 30 s loop never runs for real in tests — the desktop proof logs show real ticks every 30 s ("job reaper: …" lines); a timed pytest would add 30 s+ for no extra signal.
+  - `[low]` `[patch]` Intent: the web-restart test disposed the engine before the Job started — now disposes it while the Job is `running`, and a reaper pass meanwhile leaves it alone.
+  - `[false]` `[reject]` Intent: the kill test kills the work horse, not the worker — the horse is the forked worker process that runs the Job; the desktop proof also stopped the whole worker container.
+  - `[false]` `[reject]` Intent: registry rule widened beyond "absent from the registry" — required: a killed horse leaves its parent registered, so the literal rule never recovers it (Design Notes).
+  - `[false]` `[reject]` Intent: code surface beyond worker.py/enqueue.py — the outbox connection argument and the wrapper guard are what make the re-push and "no duplicate done" work; compose is the story's restart concern.
+
 ## Design Notes
 
 - RQ's registry alone cannot detect a killed horse: the parent worker survives and stays registered. So "absent from the registry" is widened to "no live worker has this Job as its current job". A worker whose container was SIGKILLed drops out of the registry when its key expires (90 s TTL while busy).
@@ -93,3 +135,27 @@ deferred: []
 - `python -m pytest -q tests/jobs` (desktop container, `VALKEY_TEST_URL` set) -- expected: all pass, including the forking kill test.
 - full `python -m pytest -q` -- expected: no regressions.
 - `gh pr checks <n>` -- expected: all green.
+
+## Auto Run Result
+
+Status: done
+
+**Summary:** A reaper pass (`reap`) and thread (`Reaper`) in every non-burst `LorekeeperWorker`, one pass per 30 s across workers (Valkey lock). It requeues or fails (`interrupted`) dead `running` attempts and re-pushes runnable `queued` rows RQ does not hold (retries past `next_run_at`, lost pushes, Valkey flushes, dependents of raw-SQL-finished or deleted dependencies). The wrapper's outcome writes now only land while the attempt owns the row.
+
+**Files changed:**
+- `src/backend/app/jobs/worker.py` -- `_owned` guard on `_finish`/`_record_failure`; reaper (`reap`, `_recover_running`, `_push_due`, `Reaper`); `LorekeeperWorker.work` starts it.
+- `src/backend/app/jobs/enqueue.py` -- `repush` helper.
+- `src/backend/app/jobs/outbox.py` -- `push(..., connection=None)`.
+- `docker-compose.yml`, `docker-compose.prod.yml` -- worker `stop_grace_period: 60s`.
+- `src/backend/tests/jobs/test_reaper.py` -- new: every I/O matrix row (fakeredis and real Valkey), plus a real forked work horse SIGKILLed mid-Job.
+
+**Review:** 9 patches applied (`_record_failure` guard test; own-connection test; failed-push stops the pass + test; full candidate scan with held sets read once per queue and at most `REAPER_BATCH` pushes + test; docstrings for retry cadence, lock semantics and the outbox release client; `Reaper.stop` joins and closes its client; log fields; `is not None` connection check; web-restart test now restarts mid-run). 1 deferred (thread-and-fork, unverified). Rejected: see the triage log (false: ownership by attempt, live-row batch starvation, horse-vs-worker kill wording, widened registry rule; low and not worth the complexity: snapshot race, overlapping passes, duplicate dependent push, crash-loop backoff, test fixture under xdist, wider code surface, interruptions using attempts (the AC prescribes it); spec missing from the reviewer diff by design).
+
+**Follow-up review:** true. Patched entries: 3 medium (failure-path ownership guard test; candidate scan no longer starved by RQ-held rows; pass stops at the first failed push), 9 low, 0 high. Unverified risk: the reworked `_push_due` (unlimited candidate select, LRANGE held sets, stop on failed push) has had no review pass of its own.
+
+**Verification:**
+- Desktop container (own Postgres + Valkey): `pytest tests/jobs` 32/32 for the reaper on first pass; full suite 1367 passed, 4 skipped; `lint-imports` 5 kept; `check_scoped_queries` and `check_memory_budget` OK.
+- Real crash recovery on the desktop with `python -m app.jobs.worker` in a container (1 g limit): kill -9 of a work horse mid-Job → requeued `interrupted`, `done` on attempt 2 after ~68 s; `fail_once` retry → re-pushed when due, `done` on attempt 2; dependency row deleted → dependent released and `done`; dependency cancelled by raw SQL → dependent released and `done`, and the dependency's late outcome was dropped ("this attempt no longer owns the job"); `docker stop -t 60` mid-run → the 20 s Job finished in the grace period, the 150 s Job was killed, and after restart it was requeued and `done` on attempt 2; Valkey `FLUSHALL` with the worker down → re-pushed after 60 s, ran once. End state: 8 done, 1 cancelled (the raw-SQL dependency), 0 queued or running. Containers, network, image and files torn down.
+- GitHub CI on PR #55: green (re-run after the review patches).
+
+**Residual risks:** the thread-and-fork question (deferred); recovery latency is 60 s stale + up to 30 s tick (+ up to 90 s for a SIGKILLed container's RQ worker key to expire); worker healthcheck and worker logs in the admin log file stay out of scope, as E0-Jobs.3 recorded.

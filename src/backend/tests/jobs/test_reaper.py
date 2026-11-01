@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.access.context import ctx_for
 from app.core.config import get_settings
+from app.core.errors import StructuredOutputError
 from app.db.models import Campaign, Genre, Job, User
 from app.domain.enums import JobErrorCode, JobQueue, JobStatus
 from app.jobs import enqueue, outbox, registry, worker
@@ -48,6 +49,14 @@ async def taken_back(job, ctx, db):
         await other.execute(sa.update(Job).where(Job.id == job.id)
                             .values(status=JobStatus.QUEUED, worker_id=None, heartbeat_at=None))
         await other.commit()
+    if job.payload.get("then") == "retryable":
+        raise RuntimeError("late failure")
+    if job.payload.get("then") == "terminal":
+        raise StructuredOutputError("late", attempts=1, errors=[])
+
+
+async def slow(job, ctx, db):
+    await asyncio.sleep(1.5)
 
 
 async def crash_once(job, ctx, db):
@@ -60,6 +69,7 @@ async def crash_once(job, ctx, db):
 register(JobKind(name="test_r.count", queue=JobQueue.INTERACTIVE, timeout_s=5, handler=f"{__name__}:count"))
 register(JobKind(name="test_r.taken_back", queue=JobQueue.INTERACTIVE, timeout_s=5,
                  handler=f"{__name__}:taken_back"))
+register(JobKind(name="test_r.slow", queue=JobQueue.INTERACTIVE, timeout_s=10, handler=f"{__name__}:slow"))
 register(JobKind(name="test_r.crash_once", queue=JobQueue.INTERACTIVE, timeout_s=120,
                  handler=f"{__name__}:crash_once"))
 
@@ -324,28 +334,80 @@ async def test_stale_row_its_live_worker_is_still_running_is_left_alone(db, conn
         w.register_death()
 
 
-async def test_late_outcome_of_an_attempt_taken_back_is_dropped(db, monkeypatch):
+@pytest.mark.parametrize("then", [None, "retryable", "terminal"])
+async def test_late_outcome_of_an_attempt_taken_back_is_dropped(db, then):
     c = await _campaign(db)
-    row = await _job(db, c, "test_r.taken_back")
+    row = await _job(db, c, "test_r.taken_back", payload={"then": then})
     assert await run_job(row.id, _factory(db), "w") == JobStatus.QUEUED
     r = await _row(db, row.id)
-    assert r.status == JobStatus.QUEUED and r.finished_at is None  # no `done` over the reaper's requeue
+    # The reaper's requeue stands: no `done`, no `failed`, no new retry delay or code.
+    assert r.status == JobStatus.QUEUED and r.finished_at is None
+    assert r.next_run_at is None and r.error_code is None and r.worker_id is None
     assert await db.scalar(sa.select(User.id).where(User.email == f"r4-{row.id}@example.com")) is None
 
 
-async def test_web_restart_does_not_touch_a_job_the_worker_runs(db, conn, monkeypatch):
+async def test_reaper_pushes_on_its_own_connection(db, conn):
+    c = await _campaign(db)
+    row = await _job(db, c, age_s=120)
+    other = fakeredis.FakeRedis(server=fakeredis.FakeServer())
+    outbox.set_connection(other)  # the process-wide client points elsewhere
+    assert (await reap(_factory(db), conn)).pushed == [row.id]
+    assert _queued(conn) == [str(row.id)] and _queued(other) == []
+
+
+async def test_a_failed_push_stops_the_pass_and_the_next_pass_retries(db, conn, monkeypatch):
+    c = await _campaign(db)
+    rows = [await _job(db, c, age_s=300 - i) for i in range(3)]
+    real_push = outbox.push
+
+    def flaky(job_id, *a, **kw):
+        if job_id == rows[1].id:
+            raise redis.ConnectionError("valkey went away")
+        return real_push(job_id, *a, **kw)
+
+    monkeypatch.setattr(outbox, "push", flaky)
+    assert (await reap(_factory(db), conn)).pushed == [rows[0].id]
+    assert all((await _row(db, r.id)).status == JobStatus.QUEUED for r in rows)
+    monkeypatch.setattr(outbox, "push", real_push)
+    assert (await reap(_factory(db), conn)).pushed == [rows[1].id, rows[2].id]
+
+
+async def test_rows_rq_holds_never_use_up_the_batch(db, conn, monkeypatch):
+    monkeypatch.setattr(worker, "REAPER_BATCH", 1)
+    c = await _campaign(db)
+    ctx = await ctx_for(db, c.user_id, c.id)
+    held = await enqueue(db, ctx, "test_r.count", {}, idempotency_key=f"test:{uuid.uuid4().hex}")
+    await db.commit()
+    await _age(db, held, 600)  # older, and still waiting in RQ's list
+    lost = await _job(db, c, kind="test_r.count", age_s=120)
+    later = await _job(db, c, kind="test_r.count", age_s=90)
+    assert (await reap(_factory(db), conn)).pushed == [lost.id]  # at most one push per pass
+    assert (await reap(_factory(db), conn)).pushed == [later.id]
+
+
+async def test_web_restart_while_a_job_runs_does_not_touch_it(db, conn, monkeypatch):
     from tests.conftest import TEST_DB_URL
 
     web = create_async_engine(TEST_DB_URL)  # the "web" process that started the Job
     async with async_sessionmaker(web, expire_on_commit=False)() as s:
         c = await _campaign(s)
         ctx = await ctx_for(s, c.user_id, c.id)
-        job_id = await enqueue(s, ctx, "test_r.count", {}, idempotency_key=f"test:{uuid.uuid4().hex}")
+        job_id = await enqueue(s, ctx, "test_r.slow", {}, idempotency_key=f"test:{uuid.uuid4().hex}")
         await s.commit()
-    await web.dispose()  # web goes away; the message and the row stay
-    _drain(conn, monkeypatch)
-    assert (await _row(db, job_id)).status == JobStatus.DONE and RUNS[job_id] == 1
-    assert not await reap(_factory(db), conn)
+    monkeypatch.setattr(get_settings(), "database_url", TEST_DB_URL)
+    w = _InlineWorker([q.value for q in JobQueue], connection=conn)
+    t = threading.Thread(target=w.work, kwargs={"burst": True})
+    t.start()
+    for _ in range(100):
+        if (await _row(db, job_id)).status == JobStatus.RUNNING:
+            break
+        await asyncio.sleep(0.05)
+    assert (await _row(db, job_id)).status == JobStatus.RUNNING
+    await web.dispose()  # web restarts mid-run; the worker has its own engine
+    assert not await reap(_factory(db), conn)  # a running Job with a live worker is left alone
+    await asyncio.to_thread(t.join, 30)
+    r = await _row(db, job_id)
+    assert r.status == JobStatus.DONE and r.attempts == 1
 
 
 # ── The loop ───────────────────────────────────────────────────────────────

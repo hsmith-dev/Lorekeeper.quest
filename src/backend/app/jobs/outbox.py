@@ -107,7 +107,7 @@ def push(job_id: uuid.UUID, queue: JobQueue | str, kind: str, connection: Any = 
     (redis-py): call it off the event loop."""
     from rq import Queue
 
-    Queue(JobQueue(queue).value, connection=connection or get_connection()).enqueue(
+    Queue(JobQueue(queue).value, connection=connection if connection is not None else get_connection()).enqueue(
         PERFORM, str(job_id), job_id=str(job_id), result_ttl=0, job_timeout=rq_timeout(kind),
     )
 

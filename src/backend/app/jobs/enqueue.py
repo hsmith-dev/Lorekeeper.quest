@@ -198,7 +198,7 @@ async def repush(job_id: uuid.UUID, queue: JobQueue | str, kind: str, connection
         await asyncio.to_thread(outbox.push, job_id, queue, kind, connection)
     except Exception:
         logger.warning("job re-push failed; the reaper retries next tick", exc_info=True,
-                       extra={"job_id": str(job_id), "queue": str(queue)})
+                       extra={"job_id": str(job_id), "kind": kind, "queue": str(queue)})
         return False
     return True
 
