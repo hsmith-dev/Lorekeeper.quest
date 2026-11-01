@@ -14,7 +14,7 @@ Everything runs on your own machine. No OpenAI/Anthropic key needed (though brin
 
 ## Setup (Docker)
 
-**Requirements:** [Docker](https://docs.docker.com/get-docker/) with Compose (Docker Desktop on Windows/macOS, docker engine + compose plugin on Linux) · **16 GB RAM recommended** · ~15 GB free disk (images + one model). An NVIDIA GPU is optional but makes generation much faster — see [CPU vs GPU speed](#cpu-vs-gpu-speed) below.
+**Requirements:** [Docker](https://docs.docker.com/get-docker/) with Compose (Docker Desktop on Windows/macOS, docker engine + compose plugin on Linux) · **16 GB RAM recommended** · ~15 GB free disk (images + one model) · **PostgreSQL 15+ (16 recommended; bundled)**: the compose stack ships `pgvector/pgvector:pg16`; if you point `DATABASE_URL` at your own server, it must be PostgreSQL 15 or newer with the `vector` extension, or the upgrade stops at boot (see [docs/UPGRADING.md](./docs/UPGRADING.md)). An NVIDIA GPU is optional but makes generation much faster — see [CPU vs GPU speed](#cpu-vs-gpu-speed) below.
 
 Why 16 GB: measured on a running v1.1 stack, the backend (4 workers + embedding model) sits around 4 GB and the model server around 5 GB once the 7B model is loaded, so ~9 GB steady. Both spike during generation and at startup (backend ~8 GB, model server ~9 GB at peak), so the combined worst case is ~17 GB. The two peaks don't usually line up, so 16 GB (ideally with some swap) is the practical baseline; 8 GB is not enough. The newer `worker` and `ml` services (capped at 1 GB and 2.5 GB by `WORKER_MEM_LIMIT` and `ML_MEM_LIMIT`) haven't been re-measured yet; that comes with the memory-budget work (E0-Platform.7).
 

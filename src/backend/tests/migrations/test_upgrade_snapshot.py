@@ -18,11 +18,22 @@ F2-jobs-files (cf62d979bc8a, E0-Jobs.1) only creates four empty tables; its
 check below pins their indexes, and test_cf62d979bc8a_downgrade_drops_its_tables
 proves its downgrade removes exactly those tables.
 
+F3-world (03c0b504f1d1, E0-WorldCore.2) creates the seven World Model
+tables and copies every seeded NPC and Quest into `entities`. Its checks
+below compare every copied field with the seed, prove every copy is GM-only
+and the faction NPC became a Faction, and pin the history rows, the default
+relationship types, the backfill row and the `SET NULL (col)` FKs.
+test_03c0b504f1d1_data_steps_are_idempotent re-applies its data steps and
+re-runs it through a downgrade; test_03c0b504f1d1_downgrade_drops_its_tables
+proves the downgrade removes exactly its tables and FKs.
+
 pytest collects tests/migrations/ before tests/test_*.py, so the module
 fixture rebuilds the clean session schema in teardown.
 """
 import asyncio
+import hashlib
 import importlib.util
+import uuid
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
@@ -61,6 +72,13 @@ f1_core = _load(
     "f1_core_revision",
     BACKEND_DIR / "migrations" / "versions" / "c95acb56c595_f1_core_roles_visibility_party_search.py",
 )
+F3_WORLD = "03c0b504f1d1"
+F3_TABLES = ("entities", "entity_aliases", "entity_mentions", "relationship_types", "entity_relationships",
+             "quest_steps", "entity_changes")
+f3_world = _load(
+    "f3_world_revision",
+    BACKEND_DIR / "migrations" / "versions" / "03c0b504f1d1_f3_world_entities_legacy_copy.py",
+)
 
 # Seed ids from scripts/make_snapshot.py.
 SEED_ID = "00000000-0000-4000-8000-000000000{}".format
@@ -76,15 +94,16 @@ SEEDED_COUNTS = {
     "shorthand_terms": 1,
     "tags": 1,
     "journal_tags": 1,
-    "npcs": 2,
+    "npcs": 3,  # a pc, an npc and a faction
     "quests": 2,
     "chat_sessions": 3,  # one per user
     "app_config": 1,  # seeded by 4b8f2d9e71c3
 }
 
-# The ON DELETE rule of every foreign key at head, as "table.column": rule.
-# A revision that adds or changes an FK must update this table, so the
-# deletion behaviour is a decision, not an accident.
+# The ON DELETE rule of every foreign key at head, as "table.column": rule,
+# or "table.(a, b)" for a composite FK. A revision that adds or changes an FK
+# must update this table, so the deletion behaviour is a decision, not an
+# accident.
 EXPECTED_FK_ON_DELETE = {
     "admin_messages.user_id": "CASCADE",
     "campaign_members.campaign_id": "CASCADE",
@@ -136,6 +155,35 @@ EXPECTED_FK_ON_DELETE = {
     "tag_categories.created_by_user_id": "CASCADE",
     "tags.custom_category_id": "CASCADE",
     "user_settings.user_id": "CASCADE",
+    # F3-world (E0-WorldCore.2): every Entity reference is the composite
+    # (campaign_id, x) -> entities(campaign_id, id). The nullable links are
+    # SET NULL (x), so campaign_id is never nulled (f3_set_null_links_keep_campaign_id).
+    "character_sheets.(campaign_id, pc_entity_id)": "SET NULL",
+    "chat_sessions.(campaign_id, npc_entity_id)": "SET NULL",
+    "entities.campaign_id": "CASCADE",
+    "entities.created_by_user_id": "SET NULL",
+    "entities.linked_user_id": "SET NULL",
+    "entities.(campaign_id, merged_into_id)": "SET NULL",
+    "entity_aliases.campaign_id": "CASCADE",
+    "entity_aliases.(campaign_id, entity_id)": "CASCADE",
+    "entity_changes.actor_user_id": "SET NULL",
+    "entity_changes.campaign_id": "CASCADE",
+    "entity_changes.(campaign_id, entity_id)": "CASCADE",
+    "entity_changes.reverted_change_id": "SET NULL",
+    "entity_changes.source_journal_id": "SET NULL",
+    "entity_mentions.campaign_id": "CASCADE",
+    "entity_mentions.(campaign_id, entity_id)": "CASCADE",
+    "entity_mentions.journal_id": "SET NULL",
+    "entity_relationships.campaign_id": "CASCADE",
+    # A relationship type in use cannot be deleted (E3.1 decides what happens to its edges).
+    "entity_relationships.(campaign_id, relationship_type_id)": "NO ACTION",
+    "entity_relationships.(campaign_id, source_entity_id)": "CASCADE",
+    "entity_relationships.(campaign_id, target_entity_id)": "CASCADE",
+    "entity_relationships.source_journal_id": "SET NULL",
+    "quest_steps.campaign_id": "CASCADE",
+    "quest_steps.(campaign_id, quest_entity_id)": "CASCADE",
+    "quest_steps.source_journal_id": "SET NULL",
+    "relationship_types.campaign_id": "CASCADE",
 }
 
 # ---------------------------------------------------------------------------
@@ -256,6 +304,9 @@ async def visibility_server_defaults_follow_ad12(conn: AsyncConnection) -> None:
         "session_plans": "'gm'::visibility",
         "source_documents": "'gm'::visibility",
         "shorthand_terms": "'gm'::visibility",
+        # F3-world (E0-WorldCore.2): the world starts GM-only.
+        "entities": "'gm'::visibility",
+        "entity_relationships": "'gm'::visibility",
     }
 
 
@@ -282,7 +333,9 @@ async def _f2_indexes(conn: AsyncConnection) -> dict[str, str]:
 @post_upgrade_check(F2_JOBS_FILES)
 async def f2_tables_exist_empty_with_their_indexes(conn: AsyncConnection) -> None:
     for table in F2_TABLES:
-        assert await conn.scalar(sa.text(f"SELECT count(*) FROM {table}")) == 0, table
+        # F3-world's backfill row is the one row any of them holds at head.
+        where = f" WHERE name <> '{f3_world.BACKFILL_NAME}'" if table == "data_backfills" else ""
+        assert await conn.scalar(sa.text(f"SELECT count(*) FROM {table}{where}")) == 0, table
     defs = await _f2_indexes(conn)
     assert set(defs) == {
         "uq_jobs_idempotency_key_active", "ix_jobs_campaign_status_created", "ix_jobs_status_queue_created",
@@ -302,6 +355,166 @@ async def f2_tables_exist_empty_with_their_indexes(conn: AsyncConnection) -> Non
         "SELECT column_default FROM information_schema.columns "
         "WHERE table_schema = current_schema() AND table_name = 'jobs' AND column_name = 'max_attempts'"
     )) == "3"
+
+
+# F3-world (E0-WorldCore.2): the legacy NPC/Quest copy.
+
+OWNER_ID = make_snapshot.OWNER
+CAMPAIGN_ID = make_snapshot.CAMPAIGN
+SEED_TS = "2026-01-01 12:00:00+00"
+_ROLE_MAP = {"pc": ("character", "pc"), "npc": ("character", "npc"), "monster": ("character", "creature"),
+             "faction": ("faction", None)}
+_STATUS_MAP = {"character": {"alive": "alive", "dead": "deceased", "unknown": "unknown"},
+               "faction": {"alive": "active", "dead": "disbanded", "unknown": "unknown"}}
+
+
+def f3_id(kind: str, key: str) -> str:
+    """The migration's deterministic id: md5('f3-world:<kind>:<key>')::uuid."""
+    return str(uuid.UUID(hashlib.md5(f"f3-world:{kind}:{key}".encode()).hexdigest()))
+
+
+def _ts(literal: str) -> str:
+    return literal.strip("'")
+
+
+def expected_seed_entities() -> list[tuple]:
+    """Every copied Entity the seed must produce, as `_entity_rows` returns them."""
+    rows = []
+    for i, (name, role, status, description, notes) in enumerate(make_snapshot._NPCS, start=1):
+        legacy = SEED_ID(f"70{i}")
+        type_, kind = _ROLE_MAP[role]
+        rows.append((f3_id("npc", legacy), CAMPAIGN_ID, type_, kind, name, description,
+                     _STATUS_MAP[type_][status], {}, notes, "gm", {}, None, None, None, legacy, None, OWNER_ID,
+                     SEED_TS, SEED_TS))
+    for i, (title, status, description, notes, updated_at) in enumerate(make_snapshot._QUESTS, start=1):
+        legacy = SEED_ID(f"80{i}")
+        updated = _ts(updated_at)
+        attributes = {}
+        if status == "completed":
+            # ISO 8601 UTC of quests.updated_at.
+            attributes = {"completed_at": updated.replace(" ", "T").replace("+00", ".000000Z")}
+        rows.append((f3_id("quest", legacy), CAMPAIGN_ID, "quest", None, title, description, status, attributes,
+                     notes, "gm", {}, None, None, None, None, legacy, OWNER_ID, SEED_TS, updated))
+    return sorted(rows)
+
+
+async def _entity_rows(conn: AsyncConnection) -> list[tuple]:
+    rows = (await conn.execute(sa.text(
+        "SELECT id::text, campaign_id::text, type, kind, name, description, status, attributes, gm_notes, "
+        "       visibility::text, field_visibility, linked_user_id::text, merged_into_id::text, "
+        "       deleted_at::text, legacy_npc_id::text, legacy_quest_id::text, created_by_user_id::text, "
+        "       to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') || '+00', "
+        "       to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') || '+00' "
+        "FROM entities ORDER BY id"
+    ))).all()
+    return sorted(tuple(r) for r in rows)
+
+
+@post_upgrade_check(F3_WORLD)
+async def every_npc_and_quest_has_exactly_one_entity_with_nothing_lost(conn: AsyncConnection) -> None:
+    assert await _entity_rows(conn) == expected_seed_entities()
+    # Exactly one Entity per legacy row, and no other Entity.
+    assert await conn.scalar(sa.text(
+        "SELECT count(*) FROM npcs n WHERE (SELECT count(*) FROM entities e WHERE e.legacy_npc_id = n.id) <> 1"
+    )) == 0
+    assert await conn.scalar(sa.text(
+        "SELECT count(*) FROM quests q WHERE (SELECT count(*) FROM entities e WHERE e.legacy_quest_id = q.id) <> 1"
+    )) == 0
+    assert await conn.scalar(sa.text(
+        "SELECT count(*) FROM entities WHERE legacy_npc_id IS NULL AND legacy_quest_id IS NULL")) == 0
+    # Field by field against the legacy rows themselves.
+    assert await conn.scalar(sa.text(
+        "SELECT count(*) FROM npcs n JOIN entities e ON e.legacy_npc_id = n.id "
+        "WHERE e.campaign_id <> n.campaign_id OR e.name <> n.name "
+        "   OR e.description IS DISTINCT FROM n.description OR e.gm_notes IS DISTINCT FROM n.notes "
+        "   OR e.created_by_user_id <> n.user_id OR e.created_at <> n.created_at OR e.updated_at <> n.updated_at"
+    )) == 0
+    assert await conn.scalar(sa.text(
+        "SELECT count(*) FROM quests q JOIN entities e ON e.legacy_quest_id = q.id "
+        "WHERE e.campaign_id <> q.campaign_id OR e.name <> q.title OR e.status <> q.status::text "
+        "   OR e.description IS DISTINCT FROM q.description OR e.gm_notes IS DISTINCT FROM q.notes "
+        "   OR e.created_by_user_id <> q.user_id OR e.created_at <> q.created_at OR e.updated_at <> q.updated_at"
+    )) == 0
+
+
+@post_upgrade_check(F3_WORLD)
+async def copied_entities_are_gm_only_and_the_faction_is_a_faction(conn: AsyncConnection) -> None:
+    assert (await conn.execute(sa.text(
+        "SELECT DISTINCT visibility::text, field_visibility FROM entities"))).all() == [("gm", {})]
+    faction = (await conn.execute(sa.text(
+        "SELECT type, kind, status FROM entities WHERE legacy_npc_id = :id"), {"id": SEED_ID("703")})).one()
+    assert tuple(faction) == ("faction", None, "disbanded")
+    completed_at = await conn.scalar(sa.text(
+        "SELECT attributes->>'completed_at' FROM entities WHERE legacy_quest_id = :id"), {"id": SEED_ID("802")})
+    assert completed_at == "2026-01-08T18:30:00.000000Z"
+
+
+@post_upgrade_check(F3_WORLD)
+async def legacy_npcs_and_quests_are_unchanged(conn: AsyncConnection) -> None:
+    npcs = (await conn.execute(sa.text(
+        "SELECT name, role::text, status::text, description, notes FROM npcs ORDER BY id"))).all()
+    assert [tuple(r) for r in npcs] == [tuple(n) for n in make_snapshot._NPCS]
+    quests = (await conn.execute(sa.text(
+        "SELECT title, status::text, description, notes, "
+        "       to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') || '+00' "
+        "FROM quests ORDER BY id"))).all()
+    assert [tuple(r) for r in quests] == [(t, st, d, n, _ts(u)) for t, st, d, n, u in make_snapshot._QUESTS]
+
+
+@post_upgrade_check(F3_WORLD)
+async def each_copy_has_one_migrated_history_row(conn: AsyncConnection) -> None:
+    rows = (await conn.execute(sa.text(
+        "SELECT ch.id::text, ch.entity_id::text, ch.op, ch.field, ch.old_value, ch.new_value, "
+        "       ch.actor_user_id::text, ch.source_journal_id, ch.created_at = e.created_at "
+        "FROM entity_changes ch JOIN entities e ON e.id = ch.entity_id ORDER BY ch.id"
+    ))).all()
+    expected = []
+    for row in expected_seed_entities():
+        entity_id, legacy_npc = row[0], row[14]
+        # No legacy id: a published Entity's history must not carry one.
+        new_value = {"from": "npcs"} if legacy_npc else {"from": "quests"}
+        expected.append((f3_id("migrated", entity_id), entity_id, "migrated", None, None, new_value, OWNER_ID,
+                         None, True))
+    assert sorted(tuple(r) for r in rows) == sorted(expected)
+
+
+@post_upgrade_check(F3_WORLD)
+async def every_campaign_has_the_default_relationship_types(conn: AsyncConnection) -> None:
+    rows = (await conn.execute(sa.text(
+        "SELECT id::text, campaign_id::text, key, label, inverse_label, hostile FROM relationship_types "
+        "ORDER BY key"))).all()
+    expected = sorted(
+        (f3_id("relationship_type", f"{CAMPAIGN_ID}:{key}"), CAMPAIGN_ID, key, label, inverse, hostile)
+        for key, label, inverse, hostile in f3_world.DEFAULT_RELATIONSHIP_TYPES)
+    assert sorted(tuple(r) for r in rows) == expected
+    assert {r[2] for r in rows} == {"ally_of", "enemy_of", "member_of", "located_in", "owns", "related_to"}
+    assert [r[2] for r in rows if r[5]] == ["enemy_of"]  # RC-13
+
+
+@post_upgrade_check(F3_WORLD)
+async def suggested_mentions_backfill_is_queued(conn: AsyncConnection) -> None:
+    rows = (await conn.execute(sa.text("SELECT name, status, cursor, job_id FROM data_backfills"))).all()
+    assert [tuple(r) for r in rows] == [("suggested_mentions_v1", "queued", None, None)]
+    # Nothing else of the world: no Mentions, aliases, edges or steps yet.
+    for table in ("entity_aliases", "entity_mentions", "entity_relationships", "quest_steps"):
+        assert await conn.scalar(sa.text(f"SELECT count(*) FROM {table}")) == 0, table
+
+
+@post_upgrade_check(F3_WORLD)
+async def f3_set_null_links_keep_campaign_id(conn: AsyncConnection) -> None:
+    defs = dict((await conn.execute(sa.text(
+        "SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint "
+        "WHERE conname IN ('fk_entities_merged_into', 'fk_character_sheets_pc_entity', "
+        "                  'fk_chat_sessions_npc_entity')"
+    ))).all())
+    assert defs == {
+        "fk_entities_merged_into": "FOREIGN KEY (campaign_id, merged_into_id) REFERENCES entities(campaign_id, id) "
+                                   "ON DELETE SET NULL (merged_into_id)",
+        "fk_character_sheets_pc_entity": "FOREIGN KEY (campaign_id, pc_entity_id) REFERENCES "
+                                         "entities(campaign_id, id) ON DELETE SET NULL (pc_entity_id)",
+        "fk_chat_sessions_npc_entity": "FOREIGN KEY (campaign_id, npc_entity_id) REFERENCES "
+                                       "entities(campaign_id, id) ON DELETE SET NULL (npc_entity_id)",
+    }
 
 
 # Every F1-core column, by table: (key columns, F1-core columns). The
@@ -380,21 +593,32 @@ async def _run_check(url: str, check: Check) -> None:
         await engine.dispose()
 
 
+_DELETE_RULES = {"a": "NO ACTION", "r": "RESTRICT", "c": "CASCADE", "n": "SET NULL", "d": "SET DEFAULT"}
+
+
+def fk_key(table: str, columns: list[str]) -> str:
+    """"table.column", or "table.(a, b)" for a composite FK."""
+    return f"{table}.{columns[0]}" if len(columns) == 1 else f"{table}.({', '.join(columns)})"
+
+
 async def _fk_rules(url: str) -> dict[str, set[str]]:
+    # pg_constraint, one row per FK constraint (information_schema joins by
+    # constraint name, which is unique only per table, and splits composites).
     engine = create_async_engine(url)
     try:
         async with engine.connect() as conn:
             rows = (await conn.execute(sa.text(
-                "SELECT kcu.table_name, kcu.column_name, rc.delete_rule "
-                "FROM information_schema.referential_constraints rc "
-                "JOIN information_schema.key_column_usage kcu "
-                "  ON kcu.constraint_schema = rc.constraint_schema "
-                " AND kcu.constraint_name = rc.constraint_name "
-                "WHERE rc.constraint_schema = 'public'"
+                "SELECT c.conrelid::regclass::text, "
+                "       array(SELECT a.attname FROM unnest(c.conkey) WITH ORDINALITY AS k(attnum, i) "
+                "             JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum "
+                "             ORDER BY k.i)::text[], "
+                "       c.confdeltype::text "
+                "FROM pg_constraint c "
+                "WHERE c.contype = 'f' AND c.connamespace = 'public'::regnamespace"
             ))).all()
             rules: dict[str, set[str]] = {}
-            for t, c, rule in rows:
-                rules.setdefault(f"{t}.{c}", set()).add(rule)
+            for t, cols, rule in rows:
+                rules.setdefault(fk_key(t, list(cols)), set()).add(_DELETE_RULES[rule])
             return rules
     finally:
         await engine.dispose()
@@ -571,7 +795,8 @@ async def _public_tables(conn: AsyncConnection) -> set[str]:
 
 
 def test_cf62d979bc8a_downgrade_drops_its_tables(upgraded_snapshot):
-    # Dev only (NFR-8): downgrading to F1-core removes exactly the four tables.
+    # Dev only (NFR-8): downgrading to F1-core removes exactly the four tables
+    # (and, on the way, F3-world's seven).
     cfg = alembic_config(TEST_DB_URL)
     at_head = asyncio.run(_with_conn(TEST_DB_URL, _public_tables))
     command.downgrade(cfg, F1_CORE)
@@ -581,9 +806,85 @@ def test_cf62d979bc8a_downgrade_drops_its_tables(upgraded_snapshot):
     finally:
         command.upgrade(cfg, "head")
     assert f1_version == F1_CORE
-    assert at_head - at_f1 == set(F2_TABLES)
+    assert at_head - at_f1 == set(F2_TABLES) | set(F3_TABLES)
     assert at_f1 <= at_head
     assert asyncio.run(_with_conn(TEST_DB_URL, _public_tables)) == at_head
+
+
+# F3-world: the rows the revision writes, by table, for the idempotency and
+# downgrade tests (data_backfills without its updated_at, which is now()).
+async def _f3_values(conn: AsyncConnection) -> dict[str, list]:
+    values = {}
+    for table in F3_TABLES:
+        values[table] = list((await conn.execute(sa.text(
+            f"SELECT to_jsonb(t) FROM {table} t ORDER BY id"))).scalars())
+    values["data_backfills"] = [tuple(r) for r in (await conn.execute(sa.text(
+        "SELECT name, status, cursor FROM data_backfills ORDER BY name"))).all()]
+    return values
+
+
+async def _legacy_values(conn: AsyncConnection) -> dict[str, list]:
+    return {table: list((await conn.execute(sa.text(f"SELECT to_jsonb(t) FROM {table} t ORDER BY id"))).scalars())
+            for table in ("npcs", "quests")}
+
+
+async def _reapply_f3_data_steps(conn: AsyncConnection) -> None:
+    await conn.run_sync(f3_world.apply_data_steps)
+    await conn.commit()
+
+
+def test_03c0b504f1d1_data_steps_are_idempotent(upgraded_snapshot):
+    # Re-applying the copy (as E0-WorldCore.6 will) and re-running the whole
+    # revision through a downgrade both give identical rows, ids included.
+    cfg = alembic_config(TEST_DB_URL)
+    before = asyncio.run(_with_conn(TEST_DB_URL, _f3_values))
+    assert len(before["entities"]) == 5 and len(before["entity_changes"]) == 5
+    command.stamp(cfg, F2_JOBS_FILES, purge=True)
+    try:
+        asyncio.run(_with_conn(TEST_DB_URL, _reapply_f3_data_steps))
+    finally:
+        command.stamp(cfg, "head", purge=True)
+    assert asyncio.run(_with_conn(TEST_DB_URL, _f3_values)) == before
+
+    command.downgrade(cfg, F2_JOBS_FILES)
+    command.upgrade(cfg, "head")
+    assert asyncio.run(_with_conn(TEST_DB_URL, _f3_values)) == before
+
+
+async def _deferred_fks(conn: AsyncConnection) -> list[str]:
+    return sorted((await conn.execute(sa.text(
+        "SELECT conname FROM pg_constraint WHERE contype = 'f' "
+        "AND conrelid IN ('character_sheets'::regclass, 'chat_sessions'::regclass) "
+        "AND conname IN ('fk_character_sheets_pc_entity', 'fk_chat_sessions_npc_entity')"
+    ))).scalars())
+
+
+def test_03c0b504f1d1_downgrade_drops_its_tables(upgraded_snapshot):
+    # Dev only (NFR-8): downgrading to F2-jobs-files removes exactly the seven
+    # tables, the two deferred FKs and the backfill row; npcs and quests are
+    # untouched.
+    cfg = alembic_config(TEST_DB_URL)
+    at_head = asyncio.run(_with_conn(TEST_DB_URL, _public_tables))
+    legacy = asyncio.run(_with_conn(TEST_DB_URL, _legacy_values))
+    assert asyncio.run(_with_conn(TEST_DB_URL, _deferred_fks)) == [
+        "fk_character_sheets_pc_entity", "fk_chat_sessions_npc_entity"]
+    command.downgrade(cfg, F2_JOBS_FILES)
+    try:
+        at_f2 = asyncio.run(_with_conn(TEST_DB_URL, _public_tables))
+        version = asyncio.run(_state(TEST_DB_URL))[0]
+        fks = asyncio.run(_with_conn(TEST_DB_URL, _deferred_fks))
+        backfills = asyncio.run(_with_conn(TEST_DB_URL, lambda c: c.scalar(sa.text(
+            "SELECT count(*) FROM data_backfills"))))
+        legacy_at_f2 = asyncio.run(_with_conn(TEST_DB_URL, _legacy_values))
+    finally:
+        command.upgrade(cfg, "head")
+    assert version == F2_JOBS_FILES
+    assert at_head - at_f2 == set(F3_TABLES)
+    assert at_f2 <= at_head
+    assert fks == []
+    assert backfills == 0
+    assert legacy_at_f2 == legacy
+    assert asyncio.run(_with_conn(TEST_DB_URL, _legacy_values)) == legacy
 
 
 def test_a3e7c1f9d258_backfills_shorthand(upgraded_snapshot):

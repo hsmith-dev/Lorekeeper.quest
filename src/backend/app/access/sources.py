@@ -156,7 +156,12 @@ def field_visible(model: type, row: Any, field: str | None, ctx: CampaignContext
         vis = (getattr(row, per_field, None) or {}).get(field)
         if vis is not None:
             kind = getattr(row, reg.kind_field) if reg.kind_field else None
-            if not visible_to(stored_audience(vis, getattr(row, reg.owner_field, None), kind), ctx):
+            owner_id = getattr(row, reg.owner_field) if reg.owner_field else None
+            try:
+                shown = visible_to(stored_audience(vis, owner_id, kind), ctx)
+            except ValueError:  # not a Visibility: fail closed
+                shown = False
+            if not shown:
                 return False
     return True
 

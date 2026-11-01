@@ -738,8 +738,9 @@ INSERT INTO public.journal_tags (journal_id, tag_id) VALUES ('00000000-0000-4000
 -- Data for Name: npcs; Type: TABLE DATA; Schema: public; Owner: -
 --
 
-INSERT INTO public.npcs (id, user_id, campaign_id, name, role, status, description, notes, created_at, updated_at) VALUES ('00000000-0000-4000-8000-000000000701', '00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-000000000101', 'Veyra', 'pc', 'alive', NULL, NULL, '2026-01-01 12:00:00+00', '2026-01-01 12:00:00+00');
+INSERT INTO public.npcs (id, user_id, campaign_id, name, role, status, description, notes, created_at, updated_at) VALUES ('00000000-0000-4000-8000-000000000701', '00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-000000000101', 'Veyra', 'pc', 'alive', 'A ranger from the eastern hills.', 'Secretly the heir to Brackenford.', '2026-01-01 12:00:00+00', '2026-01-01 12:00:00+00');
 INSERT INTO public.npcs (id, user_id, campaign_id, name, role, status, description, notes, created_at, updated_at) VALUES ('00000000-0000-4000-8000-000000000702', '00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-000000000101', 'The Millwright', 'npc', 'unknown', NULL, NULL, '2026-01-01 12:00:00+00', '2026-01-01 12:00:00+00');
+INSERT INTO public.npcs (id, user_id, campaign_id, name, role, status, description, notes, created_at, updated_at) VALUES ('00000000-0000-4000-8000-000000000703', '00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-000000000101', 'The Reed Guild', 'faction', 'dead', 'Smugglers who worked the ford.', 'Broken up by the party.', '2026-01-01 12:00:00+00', '2026-01-01 12:00:00+00');
 
 
 --
@@ -764,8 +765,8 @@ INSERT INTO public.npcs (id, user_id, campaign_id, name, role, status, descripti
 -- Data for Name: quests; Type: TABLE DATA; Schema: public; Owner: -
 --
 
-INSERT INTO public.quests (id, user_id, campaign_id, title, description, status, notes, created_at, updated_at) VALUES ('00000000-0000-4000-8000-000000000801', '00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-000000000101', 'Find the lost bell', NULL, 'active', NULL, '2026-01-01 12:00:00+00', '2026-01-01 12:00:00+00');
-INSERT INTO public.quests (id, user_id, campaign_id, title, description, status, notes, created_at, updated_at) VALUES ('00000000-0000-4000-8000-000000000802', '00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-000000000101', 'Clear the ford', NULL, 'completed', NULL, '2026-01-01 12:00:00+00', '2026-01-01 12:00:00+00');
+INSERT INTO public.quests (id, user_id, campaign_id, title, description, status, notes, created_at, updated_at) VALUES ('00000000-0000-4000-8000-000000000801', '00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-000000000101', 'Find the lost bell', 'The mill bell vanished a year ago.', 'active', NULL, '2026-01-01 12:00:00+00', '2026-01-01 12:00:00+00');
+INSERT INTO public.quests (id, user_id, campaign_id, title, description, status, notes, created_at, updated_at) VALUES ('00000000-0000-4000-8000-000000000802', '00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-000000000101', 'Clear the ford', NULL, 'completed', 'The goblin chief escaped.', '2026-01-01 12:00:00+00', '2026-01-08 18:30:00+00');
 
 
 --

@@ -32,10 +32,11 @@ from app.access import (
 from app.access import registry as reg
 from app.db.models import (
     Campaign, CampaignMember, CampaignShareToken, CharacterSheet, CharacterSheetTemplate, ChatSession,
-    DataBackfill, DerivedSource, Genre, Job, JournalEntry, JournalTag, NpcEntry, Quest, SessionPlan, ShorthandTerm,
+    DataBackfill, DerivedSource, Entity, EntityAlias, EntityChange, EntityMention, EntityRelationship, Genre, Job,
+    JournalEntry, JournalTag, NpcEntry, Quest, QuestStep, RelationshipType, SessionPlan, ShorthandTerm,
     SourceChunk, SourceDocument, StoredFile, Tag, TagCategory, User,
 )
-from app.domain.enums import CampaignRole, EntryKind, TagSourceField, Visibility
+from app.domain.enums import CampaignRole, EntryKind, MentionOrigin, MentionSourceField, TagSourceField, Visibility
 
 EXAMPLES = 200
 SETTINGS = settings(
@@ -64,6 +65,13 @@ FILE_TYPES = {"prop_file": ["journal", "prop_unmodelled"], "prop_entity_file": [
 file_kinds = st.sampled_from([*FILE_TYPES, "prop_unregistered"])
 ref_kinds = st.sampled_from(["journal", "prop_unmodelled", "prop_entity"])
 ref_fields = st.sampled_from([None, "narrative", "shorthand", "gm_notes"])
+# F3-world: a Visibility floor (NULL is none), per-field Visibilities, and the
+# entity_changes.field values the field rule distinguishes.
+floors = st.one_of(st.none(), visibilities)
+FIELD_NAMES = ["description", "status", "name", "attributes", "attributes.region"]
+field_visibilities = st.dictionaries(st.sampled_from(FIELD_NAMES), visibilities.map(lambda v: v.value), max_size=3)
+change_fields = st.sampled_from([None, *FIELD_NAMES, "gm_notes", "field_visibility", "field_visibility.status",
+                                 "visibility_floor", "visibility"])
 
 
 def _uid() -> str:
@@ -131,6 +139,9 @@ async def world(db) -> World:
 entry_spec = st.fixed_dictionaries({"campaign": campaigns, "visibility": visibilities, "kind": kinds,
                                     "author": authors})
 stored_spec = st.fixed_dictionaries({"campaign": campaigns, "visibility": visibilities, "author": authors})
+# An Entity; a row that links to it takes the Entity's Campaign (composite FKs).
+entity_spec = st.fixed_dictionaries({"campaign": campaigns, "visibility": visibilities, "author": authors,
+                                     "fv": field_visibilities})
 
 SPECS = {
     JournalEntry: entry_spec,
@@ -159,6 +170,17 @@ SPECS = {
             "ref_kind": ref_kinds, "entry": entry_spec, "ref_field": ref_fields, "missing": st.booleans(),
         }), min_size=0, max_size=3),
     }),
+    Entity: entity_spec,
+    RelationshipType: st.fixed_dictionaries({"campaign": campaigns}),
+    EntityRelationship: st.fixed_dictionaries({"src": entity_spec, "tgt": entity_spec, "visibility": visibilities,
+                                               "floor": floors}),
+    EntityAlias: st.fixed_dictionaries({"entity": entity_spec, "floor": floors}),
+    QuestStep: st.fixed_dictionaries({"entity": entity_spec}),
+    EntityMention: st.fixed_dictionaries({"entity": entity_spec, "entry": st.one_of(st.none(), entry_spec),
+                                          "source_field": st.sampled_from(list(MentionSourceField)),
+                                          "floor": floors}),
+    EntityChange: st.fixed_dictionaries({"entity": entity_spec, "field": change_fields,
+                                         "op": st.sampled_from(["update_field", "migrated", "create_entity"])}),
 }
 
 
@@ -204,6 +226,62 @@ async def _entry(db, w: World, s: dict) -> JournalEntry:
     return e
 
 
+async def _entity(db, w: World, s: dict, *, campaign: uuid.UUID | None = None, quest: bool = False) -> Entity:
+    e = Entity(campaign_id=campaign or w.cid(s["campaign"]), type="quest" if quest else "character",
+               kind=None if quest else "npc", name="n", status="active" if quest else "alive",
+               visibility=s["visibility"], field_visibility=dict(s["fv"]),
+               created_by_user_id=w.users[s["author"]].id)
+    db.add(e)
+    await db.flush()
+    return e
+
+
+async def _build_world(db, w: World, model, s: dict) -> Built | None:
+    """The F3-world models (E0-WorldCore.2), or None for any other model."""
+    if model is Entity:
+        e = await _entity(db, w, s)
+        return Built(e, e.campaign_id == w.a)
+    if model is RelationshipType:
+        rt = RelationshipType(campaign_id=w.cid(s["campaign"]), key=_uid(), label="l", inverse_label="i")
+        db.add(rt)
+        await db.flush()
+        return Built(rt, rt.campaign_id == w.a)
+    if model is EntityRelationship:
+        src = await _entity(db, w, s["src"])
+        tgt = await _entity(db, w, s["tgt"], campaign=src.campaign_id)
+        rt = RelationshipType(campaign_id=src.campaign_id, key=_uid(), label="l", inverse_label="i")
+        db.add(rt)
+        await db.flush()
+        edge = EntityRelationship(campaign_id=src.campaign_id, source_entity_id=src.id, target_entity_id=tgt.id,
+                                  relationship_type_id=rt.id, visibility=s["visibility"], visibility_floor=s["floor"])
+        db.add(edge)
+        await db.flush()
+        return Built(edge, edge.campaign_id == w.a, [src, tgt])
+    if model in (EntityAlias, QuestStep, EntityChange):
+        e = await _entity(db, w, s["entity"], quest=model is QuestStep)
+        if model is EntityAlias:
+            row = EntityAlias(campaign_id=e.campaign_id, entity_id=e.id, alias="A", normalized_alias=_uid(),
+                              visibility_floor=s["floor"])
+        elif model is QuestStep:
+            row = QuestStep(campaign_id=e.campaign_id, quest_entity_id=e.id, position=0, text="t")
+        else:
+            row = EntityChange(campaign_id=e.campaign_id, entity_id=e.id, op=s["op"], field=s["field"])
+        db.add(row)
+        await db.flush()
+        return Built(row, e.campaign_id == w.a, [e])
+    if model is EntityMention:
+        e = await _entity(db, w, s["entity"])
+        entry = await _entry(db, w, s["entry"]) if s["entry"] is not None else None
+        m = EntityMention(campaign_id=e.campaign_id, entity_id=e.id, journal_id=entry.id if entry else None,
+                          source_field=s["source_field"], origin=MentionOrigin.MANUAL, visibility_floor=s["floor"])
+        db.add(m)
+        await db.flush()
+        # An entry of another Campaign is never a source the ctx's Campaign reaches.
+        in_a = e.campaign_id == w.a and (entry is None or entry.campaign_id == w.a)
+        return Built(m, in_a, [entry, e])
+    return None
+
+
 async def _build(db, w: World, model, s: dict) -> Built:
     """Insert one row (and its parents) for spec `s`; return it with the oracle inputs."""
     uid = w.users[s["author"]].id if "author" in s else None
@@ -211,6 +289,9 @@ async def _build(db, w: World, model, s: dict) -> Built:
     if model is JournalEntry:
         e = await _entry(db, w, s)
         return Built(e, cid == w.a)
+    world_row = await _build_world(db, w, model, s)
+    if world_row is not None:
+        return world_row
     simple = {
         SessionPlan: lambda: SessionPlan(user_id=uid, campaign_id=cid, title="t", content="c",
                                          visibility=s["visibility"]),
