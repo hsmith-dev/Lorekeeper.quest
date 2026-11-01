@@ -1,0 +1,271 @@
+# STATUS DEFINITIONS:
+# ==================
+# Epic Status:
+#   - backlog: Epic not yet started
+#   - in-progress: Epic actively being worked on
+#   - done: All stories in epic completed
+
+# Story Status:
+#   - backlog: Story only exists in epic file
+#   - ready-for-dev: Story file created, ready for development
+#   - in-progress: Developer actively working on implementation
+#   - review: Implementation complete, ready for review
+#   - done: Story completed
+
+# Retrospective Status:
+#   - optional: Can be completed but not required
+#   - done: Retrospective has been completed
+
+# Action Item Status:
+#   - open: Committed during a retrospective, not yet addressed
+#   - in-progress: Actively being worked on
+#   - done: Completed
+
+# WORKFLOW NOTES:
+# ===============
+# - Epic transitions to 'in-progress' automatically when its first story starts (via build's sprint sync)
+# - Stories can be worked in parallel if team capacity allows
+# - Developer typically creates the next story after the previous one is 'done' to incorporate learnings
+# - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
+# - Retrospective appends its action items to action_items; the status view surfaces open ones
+generated: 10-31-2026 23:30
+last_updated: 10-31-2026 23:30
+project: Lorekeeper.quest
+project_key: NOKEY
+tracking_system: file-system
+story_location: _bmad-output/implementation-artifacts
+# EPIC ID MAP: sprint_plan.py needs numeric epic ids, so epic N below is the Nth epic of
+# _bmad-output/planning-artifacts/epics.md and story N-M is story <epic id>.M there.
+# Source parsed: _bmad-output/implementation-artifacts/epics-numeric-alias.md (regenerate it from epics.md before re-running).
+# Build order: _bmad-output/planning-artifacts/build-waves.md. Story 4-14 (E0-Access.14) is OPTIONAL, pending owner decision OD-1.
+#   epic-1 = E0a
+#   epic-2 = E0-QA
+#   epic-3 = E0-Platform
+#   epic-4 = E0-Access
+#   epic-5 = E0-Jobs
+#   epic-6 = E0-LLM
+#   epic-7 = E0-Journal
+#   epic-8 = E0-UX
+#   epic-9 = E0-WorldCore
+#   epic-10 = E1
+#   epic-11 = E2
+#   epic-12 = E3
+#   epic-13 = E4
+#   epic-14 = E5
+#   epic-15 = E6
+#   epic-16 = E7
+#   epic-17 = E8
+#   epic-18 = E9
+#   epic-19 = E10
+development_status:
+  epic-1: in-progress  # E0a
+  1-1-share-links-serve-only-player-visible-fields: done
+  1-2-exact-field-share-test-frontend-public-types-and-release-not: backlog
+  epic-1-retrospective: optional
+
+  epic-2: in-progress  # E0-QA
+  2-1-backend-ci-runs-on-main: done
+  2-2-dependency-licence-gate-for-python-and-npm-packages: done
+  2-3-one-github-pages-deployer: done
+  2-4-the-test-database-url-can-be-overridden-from-the-environment: backlog
+  2-5-tests-build-the-schema-from-alembic-migrations: backlog
+  2-6-migration-chain-gates-and-ci-with-no-path-filters: backlog
+  2-7-licence-register-and-strict-commercial-mode: backlog
+  2-8-the-licence-check-scans-the-docker-images-we-actually-ship: backlog
+  2-9-owner-confirms-or-replaces-the-three-licence-exceptions: backlog
+  2-10-structural-ci-gates-layers-model-packages-table-owners-enum: backlog
+  2-11-ev-4-harness-scaffolding-route-enumeration-actors-and-probe: backlog
+  2-12-demo-seed-and-the-shared-eval-script-scaffold: backlog
+  2-13-ev-4-probes-for-every-existing-route: backlog
+  2-14-ev-4-is-a-zero-leak-hard-gate-with-chat-and-captured-context: backlog
+  2-15-ev-5-benchmark-suite-and-the-x86-spike-re-run: backlog
+  epic-2-retrospective: optional
+
+  epic-3: backlog  # E0-Platform
+  3-1-dev-compose-ports-bind-to-localhost-by-default: backlog
+  3-2-cpu-only-torch-in-the-backend-image-closes-the-nvidia-wheel: backlog
+  3-3-ml-sidecar-for-embeddings-and-ner-with-its-client: backlog
+  3-4-ml-lazy-nli-and-ocr-under-a-resident-memory-budget: backlog
+  3-5-stt-sidecar-with-faster-whisper-and-voice-upload-switched-to: backlog
+  3-6-web-and-worker-image-without-models-async-client-wrappers-an: backlog
+  3-7-one-16-gb-profile-with-container-limits-gpu-override-and-sum: backlog
+  3-8-per-user-rate-limit-keying-in-slowapi-and-nginx: backlog
+  3-9-multi-arch-images-upgrade-safe-boot-and-oci-deploy: backlog
+  3-10-spike-5-and-spike-6-re-run-on-the-remote-x86-desktop-limits: backlog
+  epic-3-retrospective: optional
+
+  epic-4: backlog  # E0-Access
+  4-1-f1-core-migration-with-existing-members-migrated-to-player: backlog
+  4-2-campaigncontext-require_campaign-and-the-role-map: backlog
+  4-3-access-registry-audiences-scoped_select-and-audience_ctx: backlog
+  4-4-party-projections-and-a-uniform-404-on-existing-read-and-wri: backlog
+  4-5-per-campaign-permission-checks-replace-accessible_campaign_i: backlog
+  4-6-players-are-locked-out-of-gm-authoring-and-ai-routes-and-wri: backlog
+  4-7-party-only-search-and-retrieval-using-party_tsv-and-party_em: backlog
+  4-8-player-safe-chronicler-chat-with-sourceref-citations: backlog
+  4-9-set_visibility-the-only-visibility-writer: backlog
+  4-10-grant-changes-bump-access_epoch-and-close-open-streams: backlog
+  4-11-campaign-events-route-and-usecampaignevents: backlog
+  4-12-members-api-and-roles-in-sharing-members: backlog
+  4-13-analytics-and-export-cover-every-member-scoped-by-role: backlog
+  4-14-optional-pending-owner-decision-od-1-legacy-npcs-and-quests: backlog  # OPTIONAL, pending owner decision OD-1
+  epic-4-retrospective: optional
+
+  epic-5: backlog  # E0-Jobs
+  5-1-f2-jobs-files-revision-and-models: backlog
+  5-2-enqueue-with-outbox-push-and-the-kind-registry: backlog
+  5-3-lorekeeperworker-ctx-rebuild-llm-config-retries-and-the-work: backlog
+  5-4-reaper-and-restart-recovery: backlog
+  5-5-queue-priority-per-model-serialisation-cursor-backfills-and: backlog
+  5-6-core-pubsub-py-and-core-sse-py: backlog
+  5-7-job-routes-and-the-sse-stream: backlog
+  5-8-file-service-access-checked-file-route-and-backups: backlog
+  5-9-lib-sse-ts-usechat-migration-and-usejobstream: backlog
+  5-10-job-tray-job-rows-completion-notices-and-the-navbar-tray-con: backlog
+  epic-5-retrospective: optional
+
+  epic-6: backlog  # E0-LLM
+  6-1-typed-llm-errors-and-one-llm-config-resolver: backlog
+  6-2-one-priority-gate-for-the-local-llm-and-one-fixed-local-mode: backlog
+  6-3-backend-detection-and-prompt-budgets: backlog
+  6-4-complete_structured-with-schema-enforcement-and-at-most-two: backlog
+  6-5-deterministic-fake-llm-provider-and-the-ev-4-context-capture: backlog
+  6-6-act-on-spike-6-calibrate-prompt-budgets-decide-the-extractio: backlog
+  epic-6-retrospective: optional
+
+  epic-7: backlog  # E0-Journal
+  7-1-hook-dispatcher-on-after_commit: backlog
+  7-2-journal-writers-recompute-every-index-column: backlog
+  7-3-edit-and-delete-routes-with-player-rules-and-the-delete-cont: backlog
+  7-4-entry-edit-and-delete-ui-on-the-entry-detail-page: backlog
+  epic-7-retrospective: optional
+
+  epic-8: backlog  # E0-UX
+  8-1-semantic-colour-tokens-and-type-roles-in-all-six-themes: backlog
+  8-2-fix-destructive-text-contrast-migrate-hardcoded-colours-and: backlog
+  8-3-slideover-focus-trap-wide-and-full-screen-variants-push-head: backlog
+  8-4-segmentedcontrol-tabs-and-combobox-primitives: backlog
+  8-5-toast-emptystate-modelmissingnotice-and-shared-state-pattern: backlog
+  8-6-spoiler-safety-components-and-the-preview-shell: backlog
+  8-7-global-current-campaign-and-the-campaignswitcher: backlog
+  8-8-nav-restructure-route-redirects-unified-not-found-and-route: backlog
+  8-9-shortcut-registry-help-overlay-and-touch-target-audit: backlog
+  epic-8-retrospective: optional
+
+  epic-9: backlog  # E0-WorldCore
+  9-1-entity-type-registry-and-closed-set-enums: backlog
+  9-2-f3-world-migration-with-the-legacy-npc-quest-copy: backlog
+  9-3-apply_change-history-and-revert: backlog
+  9-4-name-matching-with-normalize_name-and-match_names: backlog
+  9-5-entity-api-with-gm-and-party-projections: backlog
+  9-6-legacy-npc-and-quest-adapters-and-old-link-resolver: backlog
+  9-7-suggested-mentions-backfill-and-mention-confirm-remove: backlog
+  9-8-journal-delete-detaches-the-entry-from-the-world: backlog
+  9-9-merge-two-entities: backlog
+  9-10-world-hub-entity-page-and-panel-with-bulk-publish: backlog
+  9-11-status-history-mentions-and-merge-on-the-entity-page: backlog
+  epic-9-retrospective: optional
+
+  epic-10: backlog  # E1
+  10-1-proposal-tables-and-per-op-payload-schemas: backlog
+  10-2-extraction-service-turns-an-entry-into-change-proposals: backlog
+  10-3-extraction-run-job-save-and-edit-hooks-and-delete-handling: backlog
+  10-4-proposals-api-checklist-read-apply-with-re-check-undo: backlog
+  10-5-review-checklist-core-with-grouped-items-staging-and-apply: backlog
+  10-6-checklist-at-scale-filters-keyboard-triage-and-local-drafts: backlog
+  10-7-post-save-card-reviews-queue-and-entry-mentions-strip: backlog
+  10-8-re-run-extraction-for-one-entry-or-backfill-the-whole-campai: backlog
+  10-9-seeded-demo-campaign-with-ev-1-labels: backlog
+  10-10-ev-1-extraction-eval-on-the-remote-gpu-desktop-and-ds-1: backlog
+  epic-10-retrospective: optional
+
+  epic-11: backlog  # E2
+  11-1-continuity-flag-and-canon-note-tables-and-canon-notes-as-a-r: backlog
+  11-2-continuity-service-shared-entity-pairs-nli-then-a-mandatory: backlog
+  11-3-continuity-check-job-after-extraction: backlog
+  11-4-show-continuity-flags-and-dismiss-them-with-a-reason: backlog
+  11-5-override-a-flag-with-a-canon-note-retcon: backlog
+  11-6-mark-proposals-that-contradict-canon: backlog
+  11-7-ev-2-continuity-eval-on-the-remote-gpu-desktop-and-ds-2: backlog
+  epic-11-retrospective: optional
+
+  epic-12: backlog  # E3
+  12-1-relationship-types-and-relationship-create-edit-and-end-api: backlog
+  12-2-graph-endpoint-filtered-by-access: backlog
+  12-3-relationships-section-in-the-entity-panel-with-add-edit-and: backlog
+  12-4-graph-canvas-with-a-settled-persisted-layout-and-live-update: backlog
+  12-5-toolbar-search-filters-legend-and-the-list-view: backlog
+  12-6-keyboard-navigation-announcements-reduced-motion-and-the-300: backlog
+  epic-12-retrospective: optional
+
+  epic-13: backlog  # E4
+  13-1-start-a-live-session-and-stream-audio-chunks-to-the-server: backlog
+  13-2-one-drainer-transcribes-chunks-into-captions-and-reports-bac: backlog
+  13-3-live-session-page-with-honest-captions-and-a-lag-meter: backlog
+  13-4-reconnect-or-refresh-resumes-the-same-live-session-with-noth: backlog
+  13-5-rolling-recap-of-the-session-so-far: backlog
+  13-6-tap-a-name-for-its-card-or-ask-the-chronicler-in-under-two-s: backlog
+  13-7-end-the-session-and-turn-the-full-transcript-into-a-draft-en: backlog
+  13-8-table-view-the-players-can-read-from-across-the-table: backlog
+  13-9-live-session-evaluation-caption-quality-rolling-recap-faithf: backlog
+  13-10-spike-4-decide-whether-offline-speaker-labels-ship: backlog
+  13-11-optional-offline-speaker-labels-as-a-job: backlog
+  epic-13-retrospective: optional
+
+  epic-14: backlog  # E5
+  14-1-draft-and-save-a-previously-on-recap-with-citations: backlog
+  14-2-keepsakes-page-and-the-previously-on-tab: backlog
+  14-3-ttsprovider-interface-build-editions-and-the-proper-noun-gua: backlog
+  14-4-kokoro-narrator-sidecar-for-the-agpl-build: backlog
+  14-5-narration-job-audio-cache-invalidation-and-the-party-audio-r: backlog
+  14-6-recapplayer-narrator-choice-and-table-play: backlog
+  14-7-ev-6-recap-faithfulness-narrator-listening-test-and-ds-5-rec: backlog
+  epic-14-retrospective: optional
+
+  epic-15: backlog  # E6
+  15-1-compute-an-npc-s-knowledge-and-scope-retrieval-to-it: backlog
+  15-2-a-gm-s-npc-conversation-streams-in-character-from-the-npc-s: backlog
+  15-3-npc-conversation-screen-with-honest-limits: backlog
+  15-4-copy-a-line-into-a-journal-draft-conversations-never-change: backlog
+  15-5-grant-or-hide-what-an-npc-knows: backlog
+  15-6-ev-3-measure-whether-npcs-leak-what-they-shouldn-t-know: backlog
+  15-7-let-players-talk-to-chosen-npcs-with-party-only-knowledge: backlog
+  epic-15-retrospective: optional
+
+  epic-16: backlog  # E7
+  16-1-portal-home-for-players-at-375-px: backlog
+  16-2-portal-search-and-the-read-only-share-link-portal: backlog
+  16-3-player-journals-private-by-default: backlog
+  16-4-link-a-player-to-their-pc-and-the-my-character-page: backlog
+  16-5-player-chronicler-limited-to-what-the-player-may-see: backlog
+  16-6-gm-bulk-visibility-from-list-views-with-derived-content-noti: backlog
+  16-7-preview-as-player-through-the-real-read-path: backlog
+  16-8-gm-triggered-extraction-of-a-player-journal-entry: backlog
+  16-9-ds-3-run-the-ev-4-zero-leak-gate-for-the-portal-and-the-port: backlog
+  epic-16-retrospective: optional
+
+  epic-17: backlog  # E8
+  17-1-book-model-built-through-the-visibility-layer: backlog
+  17-2-weasyprint-pdf-with-full-unicode-and-fpdf2-removed: backlog
+  17-3-epub3-builder-on-zipfile-and-jinja2-validated-by-epubcheck: backlog
+  17-4-chronicle-export-job-editions-download-and-staleness: backlog
+  17-5-chronicle-export-panel-on-keepsakes: backlog
+  epic-17-retrospective: optional
+
+  epic-18: backlog  # E9
+  18-1-campaign-stats-api-computed-per-recipient: backlog
+  18-2-opt-in-session-streaks-with-automatic-grace: backlog
+  18-3-achievements-and-milestones-with-idempotent-awards: backlog
+  18-4-stats-page-with-achievements-and-milestones: backlog
+  18-5-milestone-celebrations-and-personal-milestone-settings: backlog
+  epic-18-retrospective: optional
+
+  epic-19: backlog  # E10
+  19-1-upload-rename-replace-and-delete-maps: backlog
+  19-2-tile-large-maps-with-libvips-as-a-job-and-serve-tiles: backlog
+  19-3-pins-with-normalized-positions-and-visibility-rules: backlog
+  19-4-map-list-leaflet-viewer-and-the-keyboard-pinlist: backlog
+  19-5-gm-pin-placement-editing-and-moving: backlog
+  19-6-on-maps-and-place-on-a-map-from-a-location: backlog
+  19-7-offer-to-place-a-newly-approved-location-on-a-map-fr-55: backlog
+  epic-19-retrospective: optional
