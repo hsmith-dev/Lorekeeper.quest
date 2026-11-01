@@ -32,3 +32,12 @@ Stories were merged on green GitHub CI while the desktop was offline (owner deci
 - [ ] Record `waited_ms` from `llm_gate_granted` when a request waits behind a background Job (SPIKE-6 measurement itself is E0-Platform.10)
 - [ ] Disconnect frees the slot: drop an SSE chat client mid-stream → `ZCARD llm_gate:holders` is 0 within ~1 s
 - [ ] Known open items: no hard cap on slot hold time (a leaked Slot renews forever); short helper calls (autocomplete, query rewrite) can wait the full 60 s gate timeout
+
+## E0-Platform.3 — `ml` sidecar for embeddings and NER (PR #27)
+- [x] ~~Image build + in-image licence scan (amd64)~~ — covered in CI by the `image-licenses (ml)` matrix leg added in PR #27
+- [ ] arm64: `docker buildx build --platform linux/arm64 src/services/ml`
+- [ ] Offline health: `scripts/sidecar_smoke.sh ml` → `ml: healthy`
+- [ ] `docker compose -f docker-compose.prod.yml up -d ml` → healthy, no host port; backend reaches `http://ml:8000/v1/status`
+- [ ] Embedding parity on the 9 demo narratives: sidecar `/v1/embed` vs in-process `embedding_service.embed`, cosine ≥ 0.9999; `ML_REAL_MODELS=1 pytest src/services/ml/tests` inside the image
+- [ ] NER parity: sidecar spaCy 3.8.0 `/v1/ner` → tags vs backend `nlp_service.extract_tags` (3.7.x) on the same narratives
+- [ ] Memory: per-gunicorn-worker RSS vs the `ml` container (`docker stats`, `/v1/status` `rss_bytes`)
