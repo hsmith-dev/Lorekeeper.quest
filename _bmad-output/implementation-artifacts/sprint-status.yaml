@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 10-31-2026 23:30
-last_updated: 10-31-2026 22:16
+last_updated: 10-31-2026 22:20
 project: Lorekeeper.quest
 project_key: NOKEY
 tracking_system: file-system
@@ -60,7 +60,7 @@ story_location: _bmad-output/implementation-artifacts
 development_status:
   epic-1: in-progress  # E0a
   1-1-share-links-serve-only-player-visible-fields: done
-  1-2-exact-field-share-test-frontend-public-types-and-release-not: backlog
+  1-2-exact-field-share-test-frontend-public-types-and-release-not: done
   epic-1-retrospective: optional
 
   epic-2: in-progress  # E0-QA
