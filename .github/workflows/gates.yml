@@ -135,6 +135,14 @@ jobs:
             src/backend/requirements.txt
             src/backend/requirements-dev.txt
 
+      # app.main imports app.services.export_service, which loads WeasyPrint's
+      # system libraries at import (E0-QA.9): same packages as backend-tests.yml.
+      - name: Install system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libpango-1.0-0 libpangoft2-1.0-0 libharfbuzz0b fontconfig fonts-dejavu-core fonts-dejavu-extra
+
       # tests/conftest.py imports app.main, so the backend's runtime deps are
       # needed (CPU torch index, as in the images and the licence job).
       - name: Install dependencies

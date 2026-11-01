@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>{{ campaign.name }}</title>
+  <link rel="stylesheet" href="campaign.css">
+</head>
+<body>
+  <section class="campaign">
+    <h1 class="title">{{ campaign.name }}</h1>
+    <p class="meta genre">{{ genre_line }}</p>
+    {%- if campaign.description %}
+    <div class="text description">{{ campaign.description }}</div>
+    {%- endif %}
+  </section>
+  {%- for entry in entries %}
+  <section class="entry">
+    <h2 class="date">{{ entry.date }}</h2>
+    <p class="meta notes">Notes: {{ entry.shorthand }}</p>
+    <div class="text narrative">{{ entry.narrative }}</div>
+  </section>
+  {%- endfor %}
+</body>
+</html>

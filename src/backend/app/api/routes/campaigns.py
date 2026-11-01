@@ -136,7 +136,10 @@ async def export_campaign(
     )
     entries = list(entries_result.scalars().all())
 
-    safe_name = "".join(c if c.isalnum() or c in " -_" else "" for c in campaign.name).strip().replace(" ", "_") or "campaign"
+    # ASCII only: HTTP headers are Latin-1, so a name like "Ōkami" made the response a 500.
+    safe_name = "".join(
+        c if (c.isascii() and c.isalnum()) or c in " -_" else "" for c in campaign.name
+    ).strip().replace(" ", "_") or "campaign"
 
     if format == "markdown":
         content = build_campaign_markdown(campaign, entries)
