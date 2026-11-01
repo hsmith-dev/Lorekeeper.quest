@@ -1,3 +1,4 @@
+#!/usr/bin/env python
 """Retrieval evaluation harness: measures the RAG layer itself, separately
 from generation quality.
 
@@ -10,33 +11,49 @@ query set, reporting:
   - gate-holds      off-topic queries where NOTHING passes the gate
                     (higher = fewer confidently-cited bogus sources)
 
-The labeled set targets the demo campaign's seeded 9-session arc; each
-on-topic query names its expected entry by a distinctive shorthand
-substring. Positive queries deliberately mix paraphrase-style questions
-(dense retrieval's strength) with rare-proper-noun questions ("Veyra",
-"Karak Dun", "Dawnbreaker" — its known weakness, and full-text's strength).
+The labeled set targets the demo campaign (seeds/demo_campaign.json, its
+9-session arc); each on-topic query names its expected entry by a
+distinctive shorthand substring. Positive queries deliberately mix
+paraphrase-style questions (dense retrieval's strength) with
+rare-proper-noun questions ("Veyra", "Karak Dun", "Dawnbreaker" — its known
+weakness, and full-text's strength).
 
-Run inside the backend container:
-  docker compose -f docker-compose.prod.yml exec backend \
-      python scripts/eval_retrieval.py --campaign-id <uuid>
+Operating points are thresholds x {vector-only, hybrid}; the chosen point
+(default hybrid@0.65, the production RAG_RELEVANCE_MAX_DISTANCE) is marked.
+No LLM is called; --fake-llm and the other shared flags are accepted (see
+eval_common.build_parser).
+
+Run inside the backend container (seed first, see scripts/seed_demo.py):
+  docker compose -f docker-compose.prod.yml exec backend \\
+      python scripts/eval_retrieval.py --campaign-id <uuid> --out /tmp/RETRIEVAL_EVAL.md
+(copy docs/RETRIEVAL_EVAL.md to /tmp in the container first with
+`docker compose cp`, and copy it back out afterwards: the image has neither
+docs/RETRIEVAL_EVAL.md nor docs/EVAL_TEMPLATE.md).
 
 Results and the chosen production threshold are recorded in
 docs/RETRIEVAL_EVAL.md.
 """
 
+from __future__ import annotations
+
 import argparse
 import asyncio
 import sys
 import uuid
+from pathlib import Path
 
-sys.path.insert(0, "/app")
+_BACKEND_DIR = Path(__file__).resolve().parents[1]
+if str(_BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(_BACKEND_DIR))
+
+from scripts import eval_common  # noqa: E402  (first: sets HF_HUB_OFFLINE)
+from scripts.eval_common import Failure, ReportError, SeedError  # noqa: E402
 
 from sqlalchemy import select  # noqa: E402
 
-from app.db.session import AsyncSessionLocal  # noqa: E402
 from app.db.models.journal import JournalEntry  # noqa: E402
-from app.services.embedding_service import embed  # noqa: E402
-from app.services.retrieval_service import hybrid_search_journal  # noqa: E402
+from app.services import embedding_service  # noqa: E402
+from app.services.retrieval_service import RAG_RELEVANCE_MAX_DISTANCE, hybrid_search_journal  # noqa: E402
 
 # (query, [acceptable expected-entry shorthand substrings]) — a hit is any
 # expected entry appearing in the final top-3. Empty list = off-topic query
@@ -68,10 +85,24 @@ LABELED = [
     ("What's the weather like tomorrow?", []),
 ]
 
+DEFAULT_THRESHOLDS = "0.55,0.65,0.75"
+MODES = ("vector-only", "hybrid")
+COLUMNS = ["thresh", "mode", "hit@3", "gate-holds"]
+
+
+def point_label(threshold: float, mode: str) -> str:
+    return f"{mode}@{threshold:.2f}"
+
+
+DEFAULT_CHOSEN = point_label(RAG_RELEVANCE_MAX_DISTANCE, "hybrid")
+
 
 async def vector_only(db, query, campaign_id, threshold):
     """The pre-hybrid implementation: top-3 by cosine distance, gated."""
-    emb = embed(query)
+    try:
+        emb = embedding_service.embed(query)
+    except RuntimeError:  # no model loaded (--embeddings skip, or not cached)
+        return []
     distance = JournalEntry.embedding.cosine_distance(emb)
     res = await db.execute(
         select(JournalEntry, distance.label("d"))
@@ -89,48 +120,113 @@ async def hybrid(db, query, campaign_id, threshold):
     return [r.entry for r in results if r.used]
 
 
-async def evaluate(campaign_id: uuid.UUID, thresholds: list[float]) -> None:
-    # The app loads this at startup (main.py lifespan); a standalone script
-    # has to do it itself.
-    from app.services.embedding_service import load_embedding_model
-    load_embedding_model()
+RETRIEVERS = {"vector-only": vector_only, "hybrid": hybrid}
 
+
+def _short(entries) -> str:
+    return "; ".join(e.shorthand[:40] for e in entries) or "(nothing)"
+
+
+async def evaluate(db, campaign_id: uuid.UUID, thresholds: list[float], *,
+                   chosen: str = DEFAULT_CHOSEN) -> eval_common.ResultTable:
     positives = [(q, exp) for q, exp in LABELED if exp]
     negatives = [q for q, exp in LABELED if not exp]
+    points = [(point_label(t, m), (t, m)) for t in thresholds for m in MODES]
 
-    print(f"{len(positives)} on-topic + {len(negatives)} off-topic labeled queries\n")
-    header = f"{'thresh':>6} | {'mode':<11} | {'hit@3':>7} | {'gate-holds':>10}"
-    print(header)
-    print("-" * len(header))
+    async def run_point(point):
+        threshold, mode = point
+        fn = RETRIEVERS[mode]
+        label = point_label(threshold, mode)
+        failures: list[Failure] = []
+        hits = 0
+        for q, expected in positives:
+            used = await fn(db, q, campaign_id, threshold)
+            shorthands = " || ".join(e.shorthand for e in used)
+            if any(sub.lower() in shorthands.lower() for sub in expected):
+                hits += 1
+            else:
+                failures.append(Failure(label, q, " or ".join(expected), _short(used)))
+        holds = 0
+        for q in negatives:
+            used = await fn(db, q, campaign_id, threshold)
+            if not used:
+                holds += 1
+            else:
+                failures.append(Failure(label, q, "nothing passes the gate", _short(used)))
+        return {
+            "thresh": f"{threshold:.2f}", "mode": mode,
+            "hit@3": f"{hits}/{len(positives)}", "gate-holds": f"{holds}/{len(negatives)}",
+        }, failures
 
-    async with AsyncSessionLocal() as db:
-        for threshold in thresholds:
-            for mode, fn in (("vector-only", vector_only), ("hybrid", hybrid)):
-                hits = 0
-                for q, expected in positives:
-                    used = await fn(db, q, campaign_id, threshold)
-                    shorthands = " || ".join(e.shorthand for e in used)
-                    if any(sub.lower() in shorthands.lower() for sub in expected):
-                        hits += 1
-                holds = 0
-                for q in negatives:
-                    used = await fn(db, q, campaign_id, threshold)
-                    if not used:
-                        holds += 1
-                print(
-                    f"{threshold:>6.2f} | {mode:<11} | "
-                    f"{hits}/{len(positives):<5} | {holds}/{len(negatives)}"
-                )
-            print()
+    table = await eval_common.sweep(
+        points, run_point, columns=COLUMNS,
+        chosen=chosen,
+        chosen_marker="← production operating point",
+    )
+    # Only the chosen point's misses go in the report; the rest is noise.
+    if table.chosen is not None:
+        table.failures = [f for f in table.failures if f.point == table.chosen]
+    return table
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = eval_common.build_parser(__doc__)
+    p.add_argument("--thresholds", default=DEFAULT_THRESHOLDS,
+                   help="comma-separated vector-gate thresholds to sweep (default: %(default)s)")
+    p.add_argument("--chosen", default=DEFAULT_CHOSEN,
+                   help="operating point to mark, as <mode>@<threshold> (default: %(default)s)")
+    return p
+
+
+def parse_thresholds(raw: str) -> list[float]:
+    try:
+        thresholds = [float(t) for t in raw.split(",") if t.strip()]
+    except ValueError:
+        raise SeedError(f"--thresholds must be comma-separated numbers, got {raw!r}") from None
+    if not thresholds:
+        raise SeedError("--thresholds is empty")
+    return thresholds
+
+
+async def run(args: argparse.Namespace, *, embedding_model=None) -> eval_common.ResultTable:
+    thresholds = parse_thresholds(args.thresholds)
+    labels = [point_label(t, m) for t in thresholds for m in MODES]
+    if args.chosen not in labels:
+        raise SeedError(f"--chosen {args.chosen!r} is not a swept point; choose one of {labels}")
+    model = eval_common.install_embedding_model(args.embeddings, embedding_model)
+    if model is None:
+        print("warning: no embedding model; vector retrieval scores 0 and hybrid is lexical-only",
+              file=sys.stderr)
+    async with eval_common.open_session(args.database_url) as db:
+        data = await eval_common.load_campaign(
+            args.seed, db, args.campaign_id, owner_email=args.owner_email,
+            embedder=eval_common.seed_demo.embedder_from_model(model),
+        )
+        positives = sum(1 for _, exp in LABELED if exp)
+        print(f"campaign {data.id}: {len(data.entries)} entries; "
+              f"{positives} on-topic + {len(LABELED) - positives} off-topic labeled queries\n")
+        table = await evaluate(db, data.id, thresholds, chosen=args.chosen)
+    print(eval_common.format_table(table))
+    if args.out:
+        embed_name = "fake" if isinstance(model, eval_common.FakeEmbeddingModel) else (
+            "none" if model is None else eval_common.seed_demo.EMBEDDING_MODEL)
+        eval_common.write_report(
+            args.out, table, title="Retrieval Evaluation",
+            note=f"{len(data.entries)} entries; embeddings: `{embed_name}`; LLM: unused.",
+        )
+        print(f"\nwrote {args.out}")
+    return table
+
+
+def main(argv: list[str] | None = None, *, embedding_model=None) -> int:
+    args = build_parser().parse_args(argv)
+    try:
+        asyncio.run(run(args, embedding_model=embedding_model))
+    except (SeedError, ReportError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--campaign-id", required=True, type=uuid.UUID)
-    parser.add_argument(
-        "--thresholds", default="0.55,0.65,0.75,0.85,0.95",
-        help="comma-separated vector-gate thresholds to sweep",
-    )
-    args = parser.parse_args()
-    thresholds = [float(t) for t in args.thresholds.split(",")]
-    asyncio.run(evaluate(args.campaign_id, thresholds))
+    sys.exit(main())

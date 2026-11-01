@@ -46,3 +46,8 @@ Stories were merged on green GitHub CI while the desktop was offline (owner deci
 - [ ] Budget estimate ≥ real usage: send `fit`-built prompts (prose, transcript, entity list) to `lorekeeper` via `POST /api/chat` (`stream:false`); `estimate_messages(messages)` must be ≥ `prompt_eval_count`. Confirm the real context window (`ollama ps` / `POST /api/show`) with `OLLAMA_CONTEXT_LENGTH=4096` on the server
 - [ ] Detection: `detect_backend('http://100.119.62.5:11434')` → `ollama`; an OpenAI-compatible BYOK endpoint (KoboldCpp / llama.cpp server) → `openai_compat`; note what KoboldCpp's Ollama emulation returns
 - [ ] Known gap: compose `ollama` doesn't set `OLLAMA_CONTEXT_LENGTH` yet (E0-Platform.7)
+
+## E0-QA.12 — Demo seed and shared eval scaffold (PR #30)
+- [ ] Scaffold smoke vs desktop Ollama: `cd src/backend && python scripts/eval_common.py --database-url <url> --llm-url http://100.119.62.5:11434 --llm-model lorekeeper` → 4 windows, all `ok yes`
+- [ ] Seed a real DB twice: `python scripts/seed_demo.py --database-url <url> --embeddings require` → second run `created 0`, same Campaign id; also under `docker compose run --network none`
+- [ ] **Capstone-relevant:** re-measure retrieval on the rebuilt seed: `python scripts/eval_retrieval.py --database-url <url> --campaign-id <id> --embeddings require --out docs/RETRIEVAL_EVAL.md`. Target hybrid@0.65 = 14/16 ±1 hit@3 and **5/5 gate-holds**. Local Mac run got 4/5 (the off-topic "queen of the elven court?" passes the gate via rebuilt entry e09 "Sunless Throne"). If confirmed: re-publish the doc's numbers or reword e09. (The original 9 demo entries were never committed; the seed was rebuilt to match the eval's phrases.)

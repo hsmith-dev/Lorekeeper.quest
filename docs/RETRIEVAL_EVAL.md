@@ -2,8 +2,13 @@
 
 The RAG layer is evaluated separately from generation quality, using
 `src/backend/scripts/eval_retrieval.py` — a labeled query set run against the
-seeded demo campaign's 9-entry journal, sweeping the vector-relevance
-threshold and comparing retrieval modes.
+demo campaign in `seeds/demo_campaign.json` (the 9-entry demo arc plus 3 eval
+entries, 12 searched; seeded by `src/backend/scripts/seed_demo.py`), sweeping
+the vector-relevance threshold and comparing retrieval modes. The script is
+built on the shared eval scaffold (`scripts/eval_common.py`, report skeleton
+`docs/EVAL_TEMPLATE.md`). The results table below was measured on the
+original, uncommitted 9-entry campaign; a re-run on this seed is pending
+desktop verification.
 
 ## Method
 
@@ -21,6 +26,7 @@ threshold and comparing retrieval modes.
 
 ## Results (final configuration)
 
+<!-- eval:results -->
 ```
 thresh | mode        |  hit@3 | gate-holds
 -------------------------------------------
@@ -31,6 +37,7 @@ thresh | mode        |  hit@3 | gate-holds
   0.75 | vector-only | 15/16  | 4/5
   0.75 | hybrid      | 16/16  | 4/5
 ```
+<!-- /eval:results -->
 
 **Chosen: hybrid retrieval, vector gate at cosine distance ≤ 0.65.**
 At 0.75 hybrid reaches 16/16 — but the unrecorded-lore negative leaks
@@ -71,10 +78,36 @@ The two remaining on-topic misses at the operating point are pure-paraphrase
 questions whose expected entry sits at d≈0.71–0.73 with no strong lexical
 evidence — the deliberate price of a gate that never fabricates a citation.
 
+### Misses at the operating point (latest run)
+
+<!-- eval:failures -->
+_Written by the next run of `eval_retrieval.py --out docs/RETRIEVAL_EVAL.md`._
+<!-- /eval:failures -->
+
 ## Reproducing
 
+The two marked regions above (`eval:results`, `eval:failures`) are
+generated; `--out` rewrites only those and leaves the prose alone.
+
 ```bash
+# 1. Seed the demo campaign (idempotent; prints the campaign id). The image
+#    does not contain the repo's seeds/, so copy the file in first.
+docker compose -f docker-compose.prod.yml cp seeds/demo_campaign.json backend:/tmp/demo_campaign.json
+docker compose -f docker-compose.prod.yml exec backend \
+    python scripts/seed_demo.py --seed /tmp/demo_campaign.json --embeddings require
+
+# 2. Sweep (default thresholds 0.55,0.65,0.75; hybrid@0.65 marked). The
+#    image has no docs/, so copy this report in, update it there, copy it back.
+docker compose -f docker-compose.prod.yml cp docs/RETRIEVAL_EVAL.md backend:/tmp/RETRIEVAL_EVAL.md
 docker compose -f docker-compose.prod.yml exec backend \
     python scripts/eval_retrieval.py --campaign-id <campaign-uuid> \
-    --thresholds 0.55,0.65,0.75
+    --embeddings require --out /tmp/RETRIEVAL_EVAL.md
+docker compose -f docker-compose.prod.yml cp backend:/tmp/RETRIEVAL_EVAL.md docs/RETRIEVAL_EVAL.md
 ```
+
+From a checkout with a local Postgres, run the same two scripts from
+`src/backend/` without the `docker compose` prefix (`--seed` defaults to
+`seeds/demo_campaign.json`, `--out docs/RETRIEVAL_EVAL.md` updates this file).
+Without a cached embedding model, `--embeddings auto` still runs: vector-only
+scores 0 and hybrid is lexical-only, so only `require` reproduces the numbers
+above.
