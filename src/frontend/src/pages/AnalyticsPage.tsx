@@ -130,7 +130,7 @@ export function AnalyticsPage() {
   return (
     <div className="max-w-5xl mx-auto px-4 py-6 md:py-10 flex flex-col gap-6">
       <PageHeader
-        title="Campaign Analytics"
+        title="Stats"
         description="Session activity and the characters and quests that come up most."
       />
 

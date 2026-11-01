@@ -102,6 +102,13 @@
   }
 }
 
+/* Route focus targets (E0-UX.8): RouteAnnouncer moves focus to the page h1
+   (or <main>) after a route change. They are not controls, so no ring. */
+h1[tabindex="-1"]:focus,
+main[tabindex="-1"]:focus {
+  outline: none;
+}
+
 /* Reduced motion (NFR-10): collapse every transition/animation to ~0 so
    panels appear without sliding and pulses/spinners stop. 0.01ms (not 0)
    keeps transitionend/animationend firing for code that waits on them. */
