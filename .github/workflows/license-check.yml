@@ -142,6 +142,7 @@ jobs:
           - { image: backend, context: src/backend, dockerfile: src/backend/Dockerfile.prod, python: true, editions: "agpl commercial" }
           - { image: nginx, context: ".", dockerfile: nginx/Dockerfile, python: false, editions: "agpl commercial" }
           - { image: ml, context: src/services/ml, dockerfile: src/services/ml/Dockerfile, python: true, editions: "agpl commercial" }
+          - { image: stt, context: src/services/stt, dockerfile: src/services/stt/Dockerfile, python: true, editions: "agpl commercial" }
     steps:
       - uses: actions/checkout@v4
 

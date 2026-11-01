@@ -1,0 +1,49 @@
+# Pin lock for the `stt` sidecar image (29 packages). It deliberately has no
+# faster-whisper and no PyAV (`av`):
+#   * PyAV's wheels bundle an FFmpeg linked against GPL libx264/libx265, and
+#     only permissive code may be linked into a Lorekeeper process. Uploads are
+#     decoded by the `ffmpeg` CLI from Debian instead, a separate program run as
+#     a subprocess (mere aggregation, docs/LICENSING.md).
+#   * faster-whisper declares av as a hard dependency, so it is installed with
+#     --no-deps from requirements-nodeps.txt; every dependency it actually uses
+#     (ctranslate2, huggingface-hub, tokenizers, onnxruntime, tqdm) is here.
+# No torch and no nvidia-*/cuda-* wheels either: ctranslate2 ships its own CPU
+# kernels. The Dockerfile guards prove all of this in the built image.
+#
+# Regenerate (identical on x86_64 and aarch64) from the top-level pins
+#   fastapi==0.115.0  uvicorn==0.30.0  pydantic==2.9.0  python-multipart==0.0.12
+#   ctranslate2==4.8.4  huggingface-hub==2.4.0  tokenizers==0.23.3
+#   onnxruntime==1.31.1  tqdm==4.70.1  anyio==4.15.1
+# with
+#   uv pip compile stt.in --python-version 3.11 --no-header --no-annotate \
+#     --python-platform x86_64-manylinux_2_28     # and aarch64-manylinux_2_28
+# Every package here needs a licenses/register.yaml row listing `stt` in images.
+annotated-types==0.8.0
+anyio==4.15.1
+click==8.5.0
+ctranslate2==4.8.4
+fastapi==0.115.0
+filelock==4.2.6
+flatbuffers==25.12.19
+fsspec==2026.9.0
+h11==0.16.0
+hf-xet==1.8.0
+httpcore2==2.16.0
+httpx2==2.16.0
+huggingface-hub==2.4.0
+idna==3.20
+numpy==2.4.6
+onnxruntime==1.31.1
+packaging==26.3
+protobuf==7.36.2
+pydantic==2.9.0
+pydantic-core==2.23.2
+python-multipart==0.0.12
+pyyaml==6.0.3
+starlette==0.38.6
+tokenizers==0.23.3
+tqdm==4.70.1
+truststore==0.10.5
+typing-extensions==4.16.0
+tzdata==2026.6
+uvicorn==0.30.0

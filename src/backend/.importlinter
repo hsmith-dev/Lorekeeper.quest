@@ -129,5 +129,3 @@ ignore_imports =
     app.services.nlp_service -> spacy
     # ratchet: in-process MiniLM embeddings; E0-Platform.6 routes embed() through app.clients.ml
     app.services.embedding_service -> sentence_transformers
-    # ratchet: in-process Whisper; E0-Platform.6 routes transcription to the stt sidecar
-    app.services.transcription_service -> whisper

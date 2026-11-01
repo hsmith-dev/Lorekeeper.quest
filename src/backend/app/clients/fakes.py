@@ -1,4 +1,4 @@
-"""Deterministic stand-in for the ml sidecar, used under ENVIRONMENT=test.
+"""Deterministic stand-ins for the ml and stt sidecars, used under ENVIRONMENT=test.
 
 No network, no models: the same text always gives the same 384-d unit
 vector (seeded from its sha256), and NER is a handful of regex rules that
@@ -14,6 +14,10 @@ used for every config under ENVIRONMENT=test, see llm_provider.fake_llm_active).
 It replies with the next scripted item if any (an exception instance is
 raised), else with fake_json(schema) for a structured call, else with
 "[fake-llm <sha256(messages)[:8]>] <first 12 words of the last user turn>".
+
+FakeSTTClient answers like the stt sidecar: empty or odd-length PCM16
+audio is a 422, all-zero bytes (silence) give an empty transcript,
+anything else a fixed-format text seeded from its sha256.
 """
 
 from __future__ import annotations
@@ -25,12 +29,13 @@ import re
 import struct
 from collections import deque
 from collections.abc import Iterable
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel
 
 from app.clients.errors import ModelServiceError
 from app.clients.ml import NLI_LABELS, MLStatus, ModelState, NamedEntity, NliScores
+from app.clients.stt import STTStatus, Transcript, TranscriptSegment
 from app.domain.embedding import EMBEDDING_DIM, EMBEDDING_MODEL
 
 # A run of Capitalised words ("Borin Stonebeard", "Waterdeep"); a leading
@@ -254,3 +259,26 @@ class FakeLLM:
     def chunks(self, messages: list[dict]) -> list[str]:
         """reply(messages) split into at least 2 stream chunks."""
         return fake_chunks(self.reply(messages))
+
+
+class FakeSTTClient:
+    async def transcribe(self, audio: bytes, *, initial_prompt: str | None = None,
+                         format: Literal["pcm16"] | None = None) -> Transcript:
+        if not audio:
+            raise ModelServiceError("stt sidecar rejected /v1/transcribe with 422: empty audio",
+                                    status_code=422)
+        if format == "pcm16" and len(audio) % 2:
+            raise ModelServiceError("stt sidecar rejected /v1/transcribe with 422: odd-length pcm16",
+                                    status_code=422)
+        # PCM16 has a known duration (2 bytes per sample at 16 kHz); for a
+        # container, pretend every upload is one second long.
+        duration_ms = len(audio) // 32 if format == "pcm16" else 1000
+        if not audio.strip(b"\0"):
+            return Transcript(text="", language="en", segments=[], rtf=0.0)
+        text = f"Fake transcript {hashlib.sha256(audio).hexdigest()[:12]}."
+        return Transcript(text=text, language="en",
+                          segments=[TranscriptSegment(0, duration_ms, text)], rtf=0.0)
+
+    async def status(self) -> STTStatus:
+        return STTStatus(models=[ModelState("faster-whisper-base", "stt", "not_loaded")],
+                         compute_type="int8", device="cpu", rss_bytes=0)
