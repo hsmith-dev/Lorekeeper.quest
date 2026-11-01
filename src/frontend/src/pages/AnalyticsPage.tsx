@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useCampaigns } from "../hooks/useCampaigns";
+import { usePageCampaign } from "../hooks/useCurrentCampaign";
 import { useCampaignAnalytics } from "../hooks/useAnalytics";
 import { PageHeader } from "../components/PageHeader";
 import type { Campaign, TagCount } from "../types";
@@ -124,7 +125,7 @@ function CampaignAnalyticsView({ campaign }: { campaign: Campaign }) {
 
 export function AnalyticsPage() {
   const { data: campaigns } = useCampaigns();
-  const [selected, setSelected] = useState<Campaign | null>(null);
+  const [selected, setSelected] = usePageCampaign();
 
   return (
     <div className="max-w-5xl mx-auto px-4 py-6 md:py-10 flex flex-col gap-6">
@@ -154,7 +155,7 @@ export function AnalyticsPage() {
         </div>
       )}
 
-      {selected && <CampaignAnalyticsView campaign={selected} />}
+      {selected && <CampaignAnalyticsView key={selected.id} campaign={selected} />}
     </div>
   );
 }

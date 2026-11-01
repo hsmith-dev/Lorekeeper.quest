@@ -6,6 +6,7 @@ import { JournalList } from "../components/JournalList";
 import { CampaignSelector } from "../components/CampaignSelector";
 import { TagFilter } from "../components/TagFilter";
 import { useCampaigns } from "../hooks/useCampaigns";
+import { usePageCampaign } from "../hooks/useCurrentCampaign";
 import { useRecap } from "../hooks/useJournals";
 import type { Campaign } from "../types";
 
@@ -116,31 +117,36 @@ function RecapPanel({ campaign }: { campaign: Campaign }) {
 
 export function DashboardPage() {
   const { data: campaigns } = useCampaigns();
-  const [selectedCampaign, setSelectedCampaign] = useState<Campaign | null>(null);
+  const [selectedCampaign, setSelectedCampaign] = usePageCampaign();
   const [selectedTagId, setSelectedTagId] = useState<string | undefined>();
   const [searchParams, setSearchParams] = useSearchParams();
+
+  // The tag filter belongs to one campaign: drop it when the campaign changes
+  // (from this page's picker or from the nav's CampaignSwitcher).
+  const selectedCampaignId = selectedCampaign?.id;
+  useEffect(() => setSelectedTagId(undefined), [selectedCampaignId]);
 
   // Lets other pages (e.g. Sharing's "Shared With Me" cards) deep-link
   // straight into a specific campaign here rather than just dropping the
   // user on the page and making them find it in the picker themselves.
+  // The pick is global, so the parameter is dropped once applied; left in
+  // place it would pull the selection back after every later switch.
   useEffect(() => {
     const campaignId = searchParams.get("campaign");
-    if (!campaignId || !campaigns || selectedCampaign?.id === campaignId) return;
+    if (!campaignId || !campaigns) return;
     const match = campaigns.find((c) => c.id === campaignId);
-    if (match) setSelectedCampaign(match);
-  }, [searchParams, campaigns, selectedCampaign]);
-
-  const handleSelect = (c: Campaign) => {
-    setSelectedCampaign(c);
-    setSelectedTagId(undefined);
-    if (searchParams.get("campaign")) {
-      // Clear it once acted on so it doesn't fight subsequent manual picks
-      // (e.g. deep-link into a shared campaign, then switch to another one).
-      const next = new URLSearchParams(searchParams);
-      next.delete("campaign");
-      setSearchParams(next, { replace: true });
-    }
-  };
+    if (!match) return;
+    if (selectedCampaignId !== campaignId) setSelectedCampaign(match);
+    // Functional form: CampaignSelector may be dropping `new` at the same time.
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        next.delete("campaign");
+        return next;
+      },
+      { replace: true },
+    );
+  }, [searchParams, campaigns, selectedCampaignId, setSelectedCampaign, setSearchParams]);
 
   return (
     <div className="max-w-5xl mx-auto px-4 py-6 md:py-10">
@@ -156,11 +162,8 @@ export function DashboardPage() {
             >
               Campaign
             </h2>
-            <CampaignSelector
-              campaigns={campaigns ?? []}
-              selected={selectedCampaign}
-              onSelect={handleSelect}
-            />
+            {/* Selection defaults to the app-wide current campaign. */}
+            <CampaignSelector campaigns={campaigns ?? []} />
           </div>
 
           {selectedCampaign && (

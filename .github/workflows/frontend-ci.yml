@@ -44,3 +44,5 @@ jobs:
         run: node scripts/check-focus-trap.mjs
       - name: Spoiler-safety primitives and preview shell checks
         run: node scripts/check-spoiler-safety.mjs
+      - name: Current campaign and CampaignSwitcher checks
+        run: node scripts/check-campaign-switcher.mjs

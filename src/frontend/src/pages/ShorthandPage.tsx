@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useCampaigns } from "../hooks/useCampaigns";
+import { usePageCampaign } from "../hooks/useCurrentCampaign";
 import {
   useShorthandTerms,
   useCreateShorthand,
@@ -149,7 +150,7 @@ function CampaignShorthand({ campaign }: { campaign: Campaign }) {
 
 export function ShorthandPage() {
   const { data: campaigns } = useCampaigns();
-  const [selected, setSelected] = useState<Campaign | null>(null);
+  const [selected, setSelected] = usePageCampaign();
 
   return (
     <div className="max-w-3xl mx-auto px-4 py-6 md:py-10 flex flex-col gap-6">
@@ -179,7 +180,7 @@ export function ShorthandPage() {
         </div>
       )}
 
-      {selected && <CampaignShorthand campaign={selected} />}
+      {selected && <CampaignShorthand key={selected.id} campaign={selected} />}
     </div>
   );
 }
