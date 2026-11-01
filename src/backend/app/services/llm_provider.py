@@ -12,16 +12,34 @@ detect_backend(api_url) tells Ollama from KoboldCpp/other OpenAI-compatible
 servers with one cached `GET /api/version` probe, so callers can skip
 KoboldCpp-only endpoints (ai_service.generate_narrative's native attempt)
 that would only 404 on Ollama.
+
+complete_structured(messages, schema, config, *, task, ...) returns a
+validated instance of a flat pydantic schema (app/schemas/llm). It enforces
+the schema per backend (Ollama `format`; strict `response_format` for
+KoboldCpp/openai/custom, prompted again on a 4xx; prompted JSON for
+anthropic/gemini), checks every reply with model_validate_json, runs at most
+two repair turns quoting the errors, then raises StructuredOutputError. Each
+attempt takes its own gate slot (same class), so a live_recap can run between
+repairs; each attempt logs one
+`structured_attempt` JSON line, and structured_stats counts outcomes per task.
 """
 
+import json
+import logging
+import re
+import time
 from collections.abc import AsyncIterator
 from contextlib import aclosing, asynccontextmanager
 from dataclasses import dataclass, field
 import httpx
 from fastapi import HTTPException
+from pydantic import BaseModel, ValidationError
 from app.core import llm_gate
 from app.core.config import get_settings
+from app.core.errors import LLMConfigError, LLMUnavailable, PromptBudgetError, StructuredOutputError
 from app.core.llm_gate import GateClass, Slot
+from app.schemas.llm import flat_json_schema, flatness_problems
+from app.services.prompt_budget import TASK_POLICIES, estimate_messages, estimate_tokens
 
 # Tests swap in an httpx.MockTransport here; None = real network.
 _transport: httpx.AsyncBaseTransport | None = None
@@ -198,6 +216,375 @@ async def complete_messages(
         if cfg.provider == "gemini":
             return await _gemini(messages, cfg, mt, temp, timeout)
         return await _openai_compat(messages, cfg, mt, temp, timeout, task=task, options=opts)
+
+
+# ---------------------------------------------------------------------------
+# Structured output (E0-LLM.4)
+
+logger = logging.getLogger(__name__)
+
+STRUCTURED_MAX_ATTEMPTS = 3  # the first call + at most 2 repair turns
+REPAIR_ERRORS_MAX_CHARS = 1000
+LOG_ERRORS_MAX = 10  # validation errors (loc, type) per structured_attempt line
+STRUCTURED_BUDGET_TASK = "structured"  # budget for a task not in TASK_POLICIES
+
+# Enforcement modes; also the `backend` field of the structured_attempt log.
+MODE_OLLAMA = "ollama"                           # /api/chat with format=<schema>
+MODE_OPENAI_SCHEMA = "openai_compat"             # strict response_format json_schema
+MODE_OPENAI_PROMPTED = "openai_compat_prompted"  # schema in the prompt only
+MODE_ANTHROPIC = "anthropic"
+MODE_GEMINI = "gemini"
+
+# Per-task outcome counters of complete_structured, for the process:
+# {task: {"first_try_valid": n, "valid_after_repair": n, "failed": n}}.
+structured_stats: dict[str, dict[str, int]] = {}
+
+
+def _bump_stat(task: str, key: str) -> None:
+    counts = structured_stats.setdefault(
+        task, {"first_try_valid": 0, "valid_after_repair": 0, "failed": 0}
+    )
+    counts[key] += 1
+
+
+def _checked_schema(schema: type[BaseModel]) -> dict:
+    js = flat_json_schema(schema)
+    problems = flatness_problems(js)
+    if problems:
+        raise ValueError(
+            f"{schema.__name__} is not a flat LLM schema (see app/schemas/llm): " + "; ".join(problems)
+        )
+    return js
+
+
+def schema_prompt(schema: type[BaseModel]) -> str:
+    """The instruction complete_structured adds to the final user turn: the
+    flat JSON schema and "reply with only one JSON object"."""
+    return (
+        "Reply with only one JSON object that matches this JSON schema. "
+        "No markdown, no explanation, no other text.\n"
+        "JSON schema:\n" + json.dumps(flat_json_schema(schema), separators=(",", ":"))
+    )
+
+
+def _with_schema(messages: list[dict], instruction: str) -> list[dict]:
+    """Copy of messages with instruction appended to the final user turn, or
+    added as a new user turn. The caller's list and dicts are not touched."""
+    out = [dict(m) for m in messages]
+    last = out[-1] if out else None
+    if last is not None and last.get("role") == "user" and isinstance(last.get("content"), str):
+        last["content"] = f"{last['content']}\n\n{instruction}" if last["content"] else instruction
+    else:
+        out.append({"role": "user", "content": instruction})
+    return out
+
+
+_FENCE_RE = re.compile(r"```[A-Za-z0-9_-]*[ \t]*\n?(.*?)\n?[ \t]*```", re.DOTALL)
+
+
+def _json_candidate(text: str) -> str:
+    """The reply with one surrounding markdown fence stripped, else the text
+    from the first "{" to the last "}", else the reply itself."""
+    s = text.strip()
+    m = _FENCE_RE.fullmatch(s)
+    if m:
+        return m.group(1).strip()
+    start, end = s.find("{"), s.rfind("}")
+    if start != -1 and end > start:
+        return s[start : end + 1]
+    return s
+
+
+def _validate(raw: str, schema: type[BaseModel]) -> tuple[BaseModel | None, list[dict]]:
+    """(instance, []) if raw holds a valid object, else (None, [{loc, msg, type}])."""
+    try:
+        return schema.model_validate_json(_json_candidate(raw)), []
+    except ValidationError as exc:
+        return None, [
+            {
+                "loc": ".".join(str(p) for p in e.get("loc", ())) or "(root)",
+                "msg": str(e.get("msg", "")),
+                "type": str(e.get("type", "")),
+            }
+            for e in exc.errors(include_url=False, include_input=False)
+        ]
+
+
+def _error_lines(errors: list[dict]) -> str:
+    text = "\n".join(f"{e['loc']}: {e['msg']}" for e in errors)
+    if len(text) > REPAIR_ERRORS_MAX_CHARS:
+        text = text[: REPAIR_ERRORS_MAX_CHARS - 3] + "..."
+    return text
+
+
+def _repair_messages(base: list[dict], raw: str, errors: list[dict], window: int | None) -> list[dict]:
+    """base + the last bad output (assistant turn) + the errors (user turn).
+    Only the latest output is echoed, so the prompt stays bounded. With a
+    window (platform LLM) the echo is cut from the end, or dropped, so the
+    prompt fits instead of Ollama front-truncating it; if even the errors
+    alone don't fit, PromptBudgetError."""
+    lines = _error_lines(errors)
+
+    def ask(shown: str) -> dict:
+        return {
+            "role": "user",
+            "content": (
+                f"Your previous reply{shown} did not match the JSON schema. Validation errors:\n"
+                f"{lines}\n\nReply with only the corrected JSON object, with no other text."
+            ),
+        }
+
+    full = [*base, {"role": "assistant", "content": raw}, ask("")]
+    if window is None or estimate_messages(full) <= window:
+        return full
+    # Longest prefix of raw that still fits (the estimate only grows with length).
+    cut_ask = ask(" (cut short here)")
+    fixed = estimate_messages([*base, {"role": "assistant", "content": ""}, cut_ask])
+    lo, hi = 0, len(raw)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if fixed + estimate_tokens(raw[:mid] + "...") <= window:
+            lo = mid
+        else:
+            hi = mid - 1
+    if lo > 0:
+        return [*base, {"role": "assistant", "content": raw[:lo] + "..."}, cut_ask]
+    dropped = [*base, ask(" (not shown)")]
+    if estimate_messages(dropped) > window:
+        raise PromptBudgetError(
+            f"The repair prompt needs ~{estimate_messages(dropped)} tokens but the window is {window}."
+        )
+    return dropped
+
+
+async def _prompted_sender(coro) -> str:
+    """Await an existing sender (_openai_compat/_anthropic/_gemini): its 400
+    (missing BYOK key) becomes LLMConfigError, its 503 and any transport
+    error it lets through become LLMUnavailable."""
+    try:
+        return await coro
+    except HTTPException as exc:
+        if exc.status_code == 400:
+            raise LLMConfigError(str(exc.detail)) from exc
+        raise LLMUnavailable(str(exc.detail)) from exc
+    except (httpx.HTTPError, AttributeError, TypeError) as exc:
+        # AttributeError/TypeError: a reply shape the sender didn't expect
+        # (e.g. `content: null`, which _openai_compat calls .strip() on).
+        raise LLMUnavailable(f"AI model unavailable: {exc}") from exc
+
+
+class _RejectedFormat(Exception):
+    """A 4xx to a strict response_format request: retry it prompted."""
+
+
+@dataclass
+class _Structured:
+    cfg: LLMConfig
+    task: str
+    json_schema: dict
+    mode: str
+    max_tokens: int
+    timeout: float
+
+
+def _auth_headers(cfg: LLMConfig) -> dict[str, str]:
+    return {"Authorization": f"Bearer {cfg.api_key}"} if cfg.api_key else {}
+
+
+async def _send_ollama(st: _Structured, messages: list[dict]) -> str:
+    s = get_settings()
+    base = (st.cfg.api_url or s.kobold_url).rstrip("/")
+    payload = {
+        "model": model_for(st.task, st.cfg) or s.kobold_model,
+        "messages": messages,
+        "format": st.json_schema,
+        "stream": False,
+        "options": {"temperature": 0, "num_predict": st.max_tokens},
+    }
+    try:
+        async with _client(st.timeout) as client:
+            r = await client.post(f"{base}/api/chat", json=payload, headers=_auth_headers(st.cfg))
+            r.raise_for_status()
+            content = (r.json().get("message") or {}).get("content") or ""
+    except (httpx.HTTPError, ValueError, AttributeError) as exc:
+        raise LLMUnavailable(f"AI model unavailable: {exc}") from exc
+    if not content.strip():
+        raise LLMUnavailable("AI model unavailable: empty response from Ollama")
+    return content
+
+
+async def _send_openai_schema(st: _Structured, messages: list[dict]) -> str:
+    base, model = _openai_compat_target(st.cfg, st.task)
+    payload = {
+        "model": model,
+        "messages": messages,
+        "max_tokens": st.max_tokens,
+        "temperature": 0,
+        "stream": False,
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                # OpenAI allows [A-Za-z0-9_-]{1,64} here.
+                "name": re.sub(r"[^A-Za-z0-9_-]", "_", st.task)[:64] or STRUCTURED_BUDGET_TASK,
+                "schema": st.json_schema,
+                "strict": True,
+            },
+        },
+    }
+    try:
+        async with _client(st.timeout) as client:
+            r = await client.post(f"{base}/v1/chat/completions", json=payload, headers=_auth_headers(st.cfg))
+    except httpx.HTTPError as exc:
+        raise LLMUnavailable(f"AI model unavailable: {exc}") from exc
+    if 400 <= r.status_code < 500:
+        raise _RejectedFormat(r.status_code)
+    try:
+        r.raise_for_status()
+        content = r.json()["choices"][0]["message"]["content"] or ""
+    except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as exc:
+        raise LLMUnavailable(f"AI model unavailable: {exc}") from exc
+    if not content.strip():
+        raise LLMUnavailable("AI model unavailable: empty response from model")
+    return content
+
+
+async def _send_structured(st: _Structured, messages: list[dict]) -> str:
+    """One attempt's reply text. A strict response_format refused with a 4xx
+    is retried once as prompted JSON, and st.mode stays prompted after."""
+    if st.mode == MODE_OLLAMA:
+        return await _send_ollama(st, messages)
+    if st.mode == MODE_OPENAI_SCHEMA:
+        try:
+            return await _send_openai_schema(st, messages)
+        except _RejectedFormat as exc:
+            logger.info(json.dumps({
+                "event": "structured_response_format_rejected", "task": st.task, "status": exc.args[0],
+            }))
+            st.mode = MODE_OPENAI_PROMPTED
+    if st.mode == MODE_ANTHROPIC:
+        return await _prompted_sender(_anthropic(messages, st.cfg, st.max_tokens, 0, st.timeout))
+    if st.mode == MODE_GEMINI:
+        return await _prompted_sender(_gemini(messages, st.cfg, st.max_tokens, 0, st.timeout))
+    return await _prompted_sender(_openai_compat(messages, st.cfg, st.max_tokens, 0, st.timeout, task=st.task))
+
+
+async def _structured_mode(cfg: LLMConfig) -> str:
+    if cfg.provider == "kobold":
+        return MODE_OLLAMA if await detect_backend(cfg.api_url) == BACKEND_OLLAMA else MODE_OPENAI_SCHEMA
+    if cfg.provider in ("openai", "custom"):
+        return MODE_OPENAI_SCHEMA
+    if cfg.provider == "anthropic":
+        return MODE_ANTHROPIC
+    if cfg.provider == "gemini":
+        return MODE_GEMINI
+    return MODE_OPENAI_PROMPTED
+
+
+async def complete_structured(
+    messages: list[dict],
+    schema: type[BaseModel],
+    config: LLMConfig | None = None,
+    *,
+    task: str = STRUCTURED_BUDGET_TASK,
+    timeout: float = 120,
+    gate_class: GateClass | str | None = None,
+    max_tokens: int | None = None,
+) -> BaseModel:
+    """A validated `schema` instance from the model, at temperature 0.
+
+    schema: a flat pydantic model (an app/schemas/llm FlatModel); ValueError
+    before any request if its JSON schema isn't flat. The schema is restated
+    in the final user turn of a copy of messages (schema_prompt) and enforced
+    per backend: Ollama `format`; strict `response_format` for KoboldCpp,
+    openai and custom (that attempt retried prompted on a 4xx, and prompted
+    from then on); prompted JSON for anthropic, gemini and anything else.
+
+    Every reply goes through schema.model_validate_json (after stripping a
+    code fence, or chatter around the object). An invalid reply gets at most
+    two repair turns quoting the errors, then StructuredOutputError
+    (ai_output_unusable, attempts=3). For the platform LLM each attempt (the
+    first call and each repair) acquires and releases its own gate slot, all
+    in the same class (gate_class, default llm_gate.current_class, resolved
+    once per call), so a higher-priority call such as a live_recap can run
+    between repairs. Validation and building the repair prompt happen with
+    no slot held. If the caller already holds a slot, every attempt reuses
+    it (the gate is reentrant). BYOK never touches the gate.
+
+    task: names the call in logs, stats and the json_schema, picks the model
+    (model_for) and the prompt budget (its TASK_POLICIES entry, else
+    "structured"). max_tokens defaults to that budget's reserved output; a
+    larger one shrinks the prompt window to match.
+
+    Raises PromptBudgetError (platform prompt over the window; no request),
+    LLMBusy (no gate slot for any attempt, including a repair; nothing is
+    kept from the earlier attempts), LLMUnavailable (backend down, timeout, 5xx,
+    empty reply, or a key-less openai call's 401), LLMConfigError (missing
+    anthropic/gemini key). None of those is an attempt or triggers a repair.
+    A repair prompt that can't fit the window ends the call early with
+    StructuredOutputError (attempts = attempts made)."""
+    cfg = config or get_default_config()
+    json_schema = _checked_schema(schema)
+    base = _with_schema(messages, schema_prompt(schema))
+
+    budget_task = task if task in TASK_POLICIES else STRUCTURED_BUDGET_TASK
+    reserved = TASK_POLICIES[budget_task].reserved_output
+    mt = max_tokens if max_tokens is not None else reserved
+    window: int | None = None
+    if uses_platform_llm(cfg):
+        # A max_tokens above the task's reserve shrinks the prompt window to match.
+        window = get_settings().ollama_context_length - max(mt, reserved)
+        needed = estimate_messages(base)
+        if needed > window:
+            raise PromptBudgetError(
+                f"Structured prompt for {task!r} needs ~{needed} tokens but the window is {window}."
+            )
+
+    st = _Structured(cfg, task, json_schema, await _structured_mode(cfg), mt, timeout)
+    # One class for every attempt of this call, even if current_class changes
+    # between them (e.g. a Job wrapper resetting it).
+    cls = GateClass(gate_class) if gate_class is not None else llm_gate.current_class.get()
+    errors: list[dict] = []
+    prompt = base
+    for attempt in range(1, STRUCTURED_MAX_ATTEMPTS + 1):
+        # A slot per attempt (story E0-LLM.4, E0-LLM.2): released before
+        # validation, so a waiting live_recap is served between repairs.
+        async with gated(cfg, cls):
+            started = time.monotonic()
+            raw = await _send_structured(st, prompt)
+            ms = round((time.monotonic() - started) * 1000)
+        result, errors = _validate(raw, schema)
+        line = {
+            "event": "structured_attempt",
+            "task": task,
+            "attempt": attempt,
+            "valid": result is not None,
+            "backend": st.mode,
+            "ms": ms,
+        }
+        if result is None:
+            # Where and how it failed only: no msg, no input text.
+            line["errors"] = [{"loc": e["loc"], "type": e["type"]} for e in errors[:LOG_ERRORS_MAX]]
+        logger.info(json.dumps(line))
+        if result is not None:
+            _bump_stat(task, "first_try_valid" if attempt == 1 else "valid_after_repair")
+            return result
+        if attempt < STRUCTURED_MAX_ATTEMPTS:
+            try:
+                prompt = _repair_messages(base, raw, errors, window)
+            except PromptBudgetError as exc:
+                # Requests were already sent: the output is unusable, not the prompt.
+                _bump_stat(task, "failed")
+                raise StructuredOutputError(
+                    "The AI's output was unusable, and a repair prompt would not fit. Please try again.",
+                    attempts=attempt,
+                    errors=errors,
+                ) from exc
+    _bump_stat(task, "failed")
+    raise StructuredOutputError(
+        "The AI's output was unusable, even after asking it to fix it. Please try again.",
+        attempts=STRUCTURED_MAX_ATTEMPTS,
+        errors=errors,
+    )
 
 
 def _openai_compat_target(cfg: LLMConfig, task: str | None) -> tuple[str, str]:

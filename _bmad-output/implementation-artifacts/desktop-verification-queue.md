@@ -54,3 +54,9 @@ Stories were merged on green GitHub CI while the desktop was offline (owner deci
 
 ## E0-UX.8 — Nav restructure, redirects, not-found, route announce (PR #31)
 - [ ] UI pass with `npm run dev` + one owned and one joined campaign: open `/analytics`, `/record?x=1`, `/nope`, and `/sources` with the joined campaign selected; check the route announcement with VoiceOver
+
+## E0-LLM.4 — `complete_structured`: schema enforcement + ≤2 repairs (PR #32)
+- [ ] Real structured output on `lorekeeper`: from the cached backend image with host networking, `OLLAMA_TEST_URL=http://100.119.62.5:11434 OLLAMA_TEST_MODEL=lorekeeper python -m pytest -m ollama -s tests/integration/test_llm_structured_ollama.py` (+ `TEST_DATABASE_URL`/`DATABASE_URL`). 50 calls over 3 flat schemas; reports first-try / after-repair / failed rates and latency; expects ≥95% valid. Pass ~20 `seeds/demo_campaign.json` paragraphs via `OLLAMA_TEST_PARAGRAPHS=<file>` (JSON list of strings). Record as the FR-3 row in `docs/BENCHMARKS.md` with the Ollama version
+- [ ] Same with `OLLAMA_TEST_MODEL=lorekeeper-base` (set `LOCAL_LLM_MODEL` or a different `KOBOLD_URL`, otherwise the test skips)
+- [ ] Grep `structured_attempt` log lines with `valid:false` for recurring error locations (= schema features Ollama silently ignores)
+- [ ] Note: the E1 relationship fields (`source,target,kind`) in the integration schema are a placeholder until E1.1 fixes the extraction schema
