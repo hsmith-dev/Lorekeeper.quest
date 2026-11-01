@@ -9,9 +9,10 @@ offline:
                  --campaign-id names an existing one
   sweep          run an evaluation at each operating point -> ResultTable
   format_table   the fixed-width table used in the docs/*_EVAL.md code blocks
-  write_report   fill the generated regions of a docs/*_EVAL.md, never the
-                 hand-written prose; a missing doc starts from
-                 docs/EVAL_TEMPLATE.md
+  write_regions  rewrite named <!-- name -->…<!-- /name --> regions of a doc,
+                 never the hand-written prose around them
+  write_report   write_regions for a docs/*_EVAL.md's results and failures;
+                 a missing doc starts from docs/EVAL_TEMPLATE.md
   build_parser   the shared CLI flags
   make_llm       the LLM handle: Ollama (OpenAI-compatible, ungated) at a
                  configurable URL, or a deterministic fake (llm_provider's
@@ -255,6 +256,34 @@ def _replace_region(doc: str, name: str, body: str) -> str:
     return _region_re(name).sub(lambda m: f"{m.group(1)}\n{body}\n{m.group(3)}", doc, count=1)
 
 
+def write_regions(
+    path: str | os.PathLike,
+    regions: dict[str, str],
+    *,
+    initial: str | None = None,
+) -> Path:
+    """Rewrite only the named generated regions of `path` (each
+    `<!-- name -->…<!-- /name -->`) with the given bodies; everything else is
+    hand-written and kept byte for byte. A missing doc starts from `initial`
+    (ReportError if there is none). ReportError, doc unchanged, if any marker
+    is missing."""
+    p = Path(path)
+    if p.exists():
+        doc = p.read_text(encoding="utf-8")
+    elif initial is not None:
+        doc = initial
+    else:
+        raise ReportError(f"{p}: not found")
+    for name in regions:
+        if not _region_re(name).search(doc):
+            raise ReportError(f"{p}: missing region <!-- {name} -->…<!-- /{name} -->")
+    for name, body in regions.items():
+        doc = _replace_region(doc, name, body)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(doc, encoding="utf-8")
+    return p
+
+
 def write_report(
     path: str | os.PathLike,
     table: ResultTable,
@@ -265,10 +294,10 @@ def write_report(
     template_path: str | os.PathLike | None = None,
     note: str | None = None,
 ) -> Path:
-    """Rewrite only the results and failures regions of `path`. A missing
-    doc is created from the template first. ReportError (doc unchanged) if a
-    marker is missing. `chosen_point` / `failures` override the table's own
-    (sweep fills both)."""
+    """Rewrite only the results and failures regions of `path` (via
+    write_regions). A missing doc is created from the template first.
+    ReportError (doc unchanged) if a marker is missing. `chosen_point` /
+    `failures` override the table's own (sweep fills both)."""
     if chosen_point is not None or failures is not None:
         table = ResultTable(
             columns=table.columns, rows=table.rows,
@@ -278,27 +307,18 @@ def write_report(
         )
         if table.chosen is not None and table.chosen not in [r["point"] for r in table.rows]:
             raise ValueError(f"chosen point {table.chosen!r} is not a row of the table")
-    p = Path(path)
-    if p.exists():
-        doc = p.read_text(encoding="utf-8")
-    else:
+    initial = None
+    if not Path(path).exists():
         tpl = Path(template_path or TEMPLATE_PATH)
         if not tpl.exists():
             raise ReportError(f"template not found: {tpl}")
-        doc = tpl.read_text(encoding="utf-8").replace("{{title}}", title)
-
-    for name in (RESULTS_REGION, FAILURES_REGION):
-        if not _region_re(name).search(doc):
-            raise ReportError(f"{p}: missing region <!-- {name} -->…<!-- /{name} -->")
+        initial = tpl.read_text(encoding="utf-8").replace("{{title}}", title)
 
     results = f"```\n{format_table(table)}\n```"
     if note:
         results += f"\n\n{note}"
-    doc = _replace_region(doc, RESULTS_REGION, results)
-    doc = _replace_region(doc, FAILURES_REGION, format_failures(table))
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(doc, encoding="utf-8")
-    return p
+    return write_regions(path, {RESULTS_REGION: results, FAILURES_REGION: format_failures(table)},
+                         initial=initial)
 
 
 # ── LLM handle ──────────────────────────────────────────────────────────────
