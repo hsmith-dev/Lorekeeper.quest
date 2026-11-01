@@ -1,8 +1,13 @@
 import asyncio
+import os
+import re
+from collections.abc import Mapping
+
 import pytest
 import pytest_asyncio
 import sqlalchemy as sa
 from httpx import AsyncClient, ASGITransport
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 
 from app.main import app
@@ -10,12 +15,54 @@ from app.core.limiter import limiter
 from app.db.base import Base
 from app.db.session import get_db
 
-TEST_DB_URL = "postgresql+asyncpg://lorekeeper:changeme@localhost:5432/lorekeeper_test"
+DEFAULT_TEST_DB_URL = "postgresql+asyncpg://lorekeeper:changeme@localhost:5432/lorekeeper_test"
+
+
+# Override per machine or per worktree, e.g. one lorekeeper_test_<lane> DB per
+# parallel lane. An empty value counts as unset.
+def resolve_test_db_url(environ: Mapping[str, str] = os.environ) -> str:
+    return environ.get("TEST_DATABASE_URL") or DEFAULT_TEST_DB_URL
+
+
+TEST_DB_URL = resolve_test_db_url()
+
+# setup_test_db drops every table, so only run against a database whose name
+# marks it as a test DB: "..._test" or "..._test_<lane>" (lane alphanumeric).
+_TEST_DB_NAME_RE = re.compile(r"^.+_test(_[A-Za-z0-9]+)?$")
+TEST_DB_NAME_RULE = (
+    "the database name must end in '_test' or '_test_<lane>' "
+    "(lane = letters/digits only)"
+)
+
+
+def is_test_database_name(name: str | None) -> bool:
+    """True if `name` is safe for the suite to wipe."""
+    return bool(name) and _TEST_DB_NAME_RE.fullmatch(name) is not None
+
+
+def _guard_test_database(url: str) -> None:
+    """Abort the whole session before anything connects to a non-test DB."""
+    try:
+        name = make_url(url).database
+    except Exception:  # unparseable URL — refuse rather than guess
+        # No exception text: SQLAlchemy's message echoes the URL, password included.
+        pytest.exit(
+            "Refusing to run tests: TEST_DATABASE_URL could not be parsed.",
+            returncode=1,
+        )
+    if not is_test_database_name(name):
+        pytest.exit(
+            f"Refusing to run tests against database {name!r}: {TEST_DB_NAME_RULE}. "
+            "The suite drops all tables. Set TEST_DATABASE_URL to a test database.",
+            returncode=1,
+        )
 
 
 @pytest.fixture(scope="session", autouse=True)
 def setup_test_db():
     """Drop and recreate all tables once per session using an isolated event loop."""
+    _guard_test_database(TEST_DB_URL)
+
     async def _create():
         engine = create_async_engine(TEST_DB_URL)
         async with engine.begin() as conn:
