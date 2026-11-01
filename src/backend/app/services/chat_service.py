@@ -1,6 +1,7 @@
 import asyncio
 import httpx
 from fastapi import HTTPException
+from app.access import GM, CampaignContext
 from app.core.config import get_settings
 from app.services.llm_provider import LLMConfig, complete_messages
 
@@ -99,11 +100,21 @@ def build_chat_messages(
     journal_context: list[dict],
     canon_context: str | None = None,
     shorthand_glossary: list[dict] | None = None,
+    ctx: CampaignContext | None = None,
 ) -> list[dict]:
     """Assemble the exact messages array a chat completion sees — shared by
-    the blocking and streaming chat endpoints, and returned to the client
-    (system prompt) by the transparency panel so 'grounded in your journal'
-    is inspectable rather than asserted."""
+    the blocking and streaming chat endpoints, and returned to a GM (system
+    prompt) by the transparency panel so 'grounded in your journal' is
+    inspectable rather than asserted.
+
+    A non-GM `ctx` (E0-Access.8) gets no glossary, no canon context and no
+    Shorthand ("Notes") lines, whatever the caller passed. `history` is the
+    replayable history (`access.replay_history`); each turn goes in as
+    `{role, content}` only."""
+    if ctx is not None and ctx.role != GM:
+        shorthand_glossary = None
+        canon_context = None
+        journal_context = [{k: v for k, v in j.items() if k != "shorthand"} for j in journal_context]
     system_parts = [_SYSTEM_PROMPT]
 
     if campaign_name:
@@ -162,7 +173,7 @@ def build_chat_messages(
         )
 
     messages: list[dict] = [{"role": "system", "content": "\n".join(system_parts)}]
-    messages.extend(history[-8:])
+    messages.extend({"role": m["role"], "content": m["content"]} for m in history[-8:])
     messages.append({"role": "user", "content": user_content})
     return messages
 

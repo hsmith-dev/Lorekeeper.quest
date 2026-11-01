@@ -1,6 +1,6 @@
 import { useState, useCallback } from "react";
 import type { AxiosError } from "axios";
-import type { ChatMessage, JournalSource, RetrievalDebug } from "../types";
+import type { ChatMessage, JournalSource, ResolvedSource, RetrievalDebug } from "../types";
 import { sendChatMessage, getChatSession } from "../services/api";
 
 /** A chat message as the UI renders it — assistant messages carry their RAG
@@ -10,6 +10,7 @@ export interface UiChatMessage extends ChatMessage {
   sources?: JournalSource[];
   grounded?: boolean;
   retrieval?: RetrievalDebug | null;
+  citations?: ResolvedSource[];
 }
 
 function extractError(err: unknown): string {
@@ -100,6 +101,7 @@ export function useChat() {
               sources: JournalSource[];
               grounded: boolean;
               retrieval: RetrievalDebug | null;
+              citations?: ResolvedSource[];
             };
             newSessionId = meta.session_id;
             // Sources and the retrieval trace are known before the first
@@ -112,6 +114,7 @@ export function useChat() {
                 sources: meta.sources ?? [],
                 grounded: meta.grounded,
                 retrieval: meta.retrieval,
+                citations: meta.citations ?? [],
               },
             ]);
             setIsStreaming(true);
@@ -175,6 +178,7 @@ export function useChat() {
             sources: data.sources ?? [],
             grounded: data.grounded,
             retrieval: data.retrieval ?? null,
+            citations: data.citations ?? [],
           },
         ]);
         setSessionId(data.session_id);
@@ -195,7 +199,8 @@ export function useChat() {
     try {
       const { data } = await getChatSession(id);
       setSessionId(data.id);
-      setMessages(data.messages);
+      // A stored message carries its grounded flag; a redacted one is a notice.
+      setMessages(data.messages.map((m) => ({ ...m, grounded: m.grounded ?? undefined })));
     } catch (err) {
       setError(extractError(err));
     } finally {

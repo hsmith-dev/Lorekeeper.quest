@@ -10,7 +10,9 @@ lattice, the registry (`visible_clause`, `audience_of`, `scoped_select`,
 `scoped_get`, `DERIVED_REGISTRY`), `audience_ctx` and the preview header.
 E0-Access.4 adds the projections (`project`, `project_all`, `PROJECTIONS`),
 Share Links (`share_ctx`, `resolve_share_token`), `ctx_for_request`,
-`role_ctx` and the `Vary` middleware.
+`role_ctx` and the `Vary` middleware. E0-Access.8 adds citations
+(`register_resolver`, `visible_refs`, `resolve_sources`, `message_refs`) and
+the chat projections (`project_chat`, `replay_history`).
 """
 from app.access.audience import (
     ALWAYS_GM_FIELDS, GM_AUDIENCE, MEMBERS, PUBLIC, AnyOf, Audience, AudienceLevel, covers, ctx_audience,
@@ -31,11 +33,31 @@ from app.access.registry import (
     register_source_kind, registration, scoped_get, scoped_select, stored, visible_clause,
 )
 from app.access.projection import (
-    LITE, PROJECTIONS, WITH_COUNT, Projection, check_create, check_party_schemas, project, project_all, schema_for,
+    CHAT_DETAIL, CHAT_META, CHAT_REPLY, LITE, PROJECTIONS, REDACTED_NOTICE, WITH_COUNT, Projection,
+    check_chat_session, check_create, check_party_schemas, project, project_all, project_chat, redact_messages,
+    replay_history, schema_for, session_visible_text,
+)
+from app.access.sources import (
+    field_visible, message_refs, register_resolver, registered_resolvers, resolve_sources, visible_refs,
 )
 from app.access.share import COLLABORATE, READ_ONLY, ctx_for_share, resolve_share_token, share_ctx
 
 __all__ = [
+    "CHAT_DETAIL",
+    "CHAT_META",
+    "CHAT_REPLY",
+    "REDACTED_NOTICE",
+    "check_chat_session",
+    "field_visible",
+    "message_refs",
+    "project_chat",
+    "redact_messages",
+    "register_resolver",
+    "registered_resolvers",
+    "replay_history",
+    "resolve_sources",
+    "session_visible_text",
+    "visible_refs",
     "COLLABORATE",
     "READ_ONLY",
     "LITE",

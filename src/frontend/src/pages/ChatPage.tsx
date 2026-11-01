@@ -54,7 +54,7 @@ function RetrievalPanel({ retrieval }: { retrieval: RetrievalDebug }) {
                     <span className={`shrink-0 font-mono ${c.used ? "text-success" : c.passed_gate ? "text-muted-foreground" : "text-warning"}`}>
                       {c.used ? "✓ used" : c.passed_gate ? "· passed" : "✗ gated"}
                     </span>
-                    <span className="truncate text-muted-foreground">{c.shorthand}</span>
+                    <span className="truncate text-muted-foreground">{c.shorthand ?? c.session_date ?? "Journal entry"}</span>
                     <span className="shrink-0 font-mono text-muted-foreground">
                       {c.vector_distance != null ? `d=${c.vector_distance.toFixed(3)}` : "d=—"}
                       {c.lexical_rank != null ? ` · fts#${c.lexical_rank}` : ""}
@@ -100,7 +100,9 @@ function SourcesPanel({ sources }: { sources: JournalSource[] }) {
               {s.session_date && (
                 <p className="text-muted-foreground mb-1 font-medium">{s.session_date}</p>
               )}
-              <p className="text-muted-foreground italic mb-1 truncate">Notes: {s.shorthand}</p>
+              {s.shorthand && (
+                <p className="text-muted-foreground italic mb-1 truncate">Notes: {s.shorthand}</p>
+              )}
               <p className="text-foreground leading-relaxed">{s.snippet}…</p>
               {s.method && (
                 <p className="mt-1 font-mono text-[11px] text-muted-foreground">
@@ -372,7 +374,7 @@ export function ChatPage() {
                       LOREKEEPER
                     </p>
                   )}
-                  <p className="whitespace-pre-wrap">{msg.content}{isStreaming && i === messages.length - 1 && msg.role === "assistant" ? "▍" : ""}</p>
+                  <p className={`whitespace-pre-wrap ${msg.redacted ? "italic opacity-70" : ""}`}>{msg.content}{isStreaming && i === messages.length - 1 && msg.role === "assistant" ? "▍" : ""}</p>
                 </div>
                 {msg.role === "assistant" && (msg.sources?.length ?? 0) > 0 && (
                   <SourcesPanel sources={msg.sources!} />

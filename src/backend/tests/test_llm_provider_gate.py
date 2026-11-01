@@ -379,13 +379,15 @@ async def test_reserved_slot_covers_stream(backend, gate):
 
 
 def fake_prep():
-    """Just enough of chat._ChatPrep for event_stream (no DB, no retrieval)."""
+    """Just enough of chat._ChatPrep for event_stream (no DB, no retrieval):
+    the projected meta event and the completion's messages."""
+    session_id = uuid.uuid4()
     return SimpleNamespace(
-        session=SimpleNamespace(id=uuid.uuid4()),
-        sources=[],
-        canon_sources=[],
-        grounded=lambda: False,
-        retrieval_debug=lambda: SimpleNamespace(model_dump=lambda: {}),
+        session=SimpleNamespace(id=session_id),
+        meta={"session_id": str(session_id), "sources": [], "canon_sources": [], "grounded": False,
+              "retrieval": None, "citations": []},
+        refs=[],
+        grounded=False,
         chat_messages=MESSAGES,
     )
 
@@ -397,7 +399,7 @@ async def post_chat_stream(monkeypatch, persisted: list | None = None):
     from app.db.session import get_db
     from app.main import app
 
-    async def prepare(body, user, db, config):
+    async def prepare(request, body, user, db, config):
         return fake_prep()
 
     async def persist(*args, **kwargs):
@@ -477,7 +479,7 @@ async def test_chat_stream_client_disconnect_frees_slot(gate, monkeypatch, disco
     async def handler(request):
         return httpx.Response(200, content=slow_body())
 
-    async def prepare(body, user, db, config):
+    async def prepare(request, body, user, db, config):
         return fake_prep()
 
     async def persist(*args, **kwargs):

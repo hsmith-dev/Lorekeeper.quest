@@ -29,6 +29,14 @@ unless one is named (Campaign: `PublicCampaignResponse`).
 entries, so `project` stays sync. `project` on a non-GM entry with tags and
 no `links=` raises: a programming error, never a silent leak.
 
+Chat sessions (E0-Access.8) are projected with `project_chat(db, session,
+ctx | role_map, variant, extra)` (CHAT_META, CHAT_REPLY, CHAT_DETAIL): the
+route passes one GM-shaped body as `extra`, and the Party schemas drop
+`shorthand` and `system_prompt` and empty `canon_sources`. Stored messages
+are redacted by `access.visible_refs` (`project(..., visible_refs=)`), and
+`replay_history` gives the `{role, content}` turns that may go back into a
+prompt. A campaign-less session (a `RoleMap`) gets the GM schema.
+
 At import, every Party (and anon) schema is checked to carry no GM field:
 none of the model's `gm_fields`, no always-GM field (`shorthand`,
 `gm_notes`, `voice_notes`) and no `field_visibility`, at any depth, and no
@@ -46,13 +54,15 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.access.audience import ALWAYS_GM_FIELDS, stored_audience, visible_to
-from app.access.context import CampaignContext, role_ctx
+from app.access.context import CampaignContext, RoleMap, role_ctx
 from app.access.policy import ANON, GM, PLAYER, not_found
 from app.access.registry import (
     Derived, Stored, UnregisteredModel, audience_of, gm_fields, registration, scope_column,
 )
+from app.access.sources import message_refs, visible_refs as _visible_refs
 from app.db.models.campaign import Campaign
 from app.db.models.character_sheet import CharacterSheet, CharacterSheetTemplate
+from app.db.models.chat import ChatSession
 from app.db.models.journal import JournalEntry
 from app.db.models.npc import NpcEntry
 from app.db.models.quest import Quest
@@ -61,10 +71,14 @@ from app.schemas.campaign import CampaignGMResponse, CampaignPartyResponse
 from app.schemas.character_sheet import (
     CharacterSheetGMResponse, CharacterSheetPartyResponse, TemplateGMResponse, TemplatePartyResponse,
 )
+from app.schemas.chat import (
+    ChatGMResponse, ChatMetaGM, ChatMetaParty, ChatPartyResponse, ChatSessionDetailGM, ChatSessionDetailParty,
+)
 from app.schemas.journal import JournalGMResponse, JournalLiteResponse, JournalPartyResponse
 from app.schemas.npc import NpcGMResponse, NpcPartyResponse
 from app.schemas.quest import QuestGMResponse, QuestPartyResponse
 from app.schemas.share import PublicCampaignResponse
+from app.schemas.sources import SourceRef
 from app.schemas.tag import (
     TagGMResponse, TagPartyResponse, TagWithCountGMResponse, TagWithCountPartyResponse,
 )
@@ -92,6 +106,11 @@ WITH_COUNT = "with_count"
 # An entry in an NPC/Quest entry list: the GM gets the lite GM row, a
 # non-GM the Party entry (E0-Access.7 serves it there).
 LITE = "lite"
+# The Chronicler (E0-Access.8): the SSE meta event, the blocking reply and a
+# stored session, each built through project_chat.
+CHAT_META = "chat_meta"
+CHAT_REPLY = "chat_reply"
+CHAT_DETAIL = "chat_detail"
 
 PROJECTIONS: dict[type | tuple[type, str], Projection] = {
     JournalEntry: Projection(JournalGMResponse, JournalPartyResponse),
@@ -103,6 +122,9 @@ PROJECTIONS: dict[type | tuple[type, str], Projection] = {
     CharacterSheet: Projection(CharacterSheetGMResponse, CharacterSheetPartyResponse),
     CharacterSheetTemplate: Projection(TemplateGMResponse, TemplatePartyResponse),
     Campaign: Projection(CampaignGMResponse, CampaignPartyResponse, anon=PublicCampaignResponse),
+    (ChatSession, CHAT_META): Projection(ChatMetaGM, ChatMetaParty),
+    (ChatSession, CHAT_REPLY): Projection(ChatGMResponse, ChatPartyResponse),
+    (ChatSession, CHAT_DETAIL): Projection(ChatSessionDetailGM, ChatSessionDetailParty),
 }
 
 
@@ -239,10 +261,14 @@ def _apply_field_visibility(obj: Any, reg: Any, schema: type[BaseModel], data: d
 
 
 def project(obj: Any, ctx: CampaignContext, *, variant: str | None = None,
-            extra: Mapping[str, Any] | None = None, links: Mapping[uuid.UUID, JournalTag] | None = None) -> BaseModel:
+            extra: Mapping[str, Any] | None = None, links: Mapping[uuid.UUID, JournalTag] | None = None,
+            visible_refs: Iterable[SourceRef] | None = None) -> BaseModel:
     """`obj` as the response schema for ctx (see the module docstring for the
     order). `links` ({tag_id: JournalTag}) are an entry's tag links, needed
-    for a non-GM entry with tags (`project_all` loads them)."""
+    for a non-GM entry with tags (`project_all` loads them). `visible_refs`
+    are the SourceRefs ctx may see among a chat session's messages
+    (`project_chat` computes them): a message citing anything else is
+    redacted (none given: every message with a ref is)."""
     if not isinstance(ctx, CampaignContext):
         raise TypeError(f"project: ctx must be a CampaignContext, got {type(ctx).__name__} (use project_all "
                         "for a role_map)")
@@ -257,6 +283,10 @@ def project(obj: Any, ctx: CampaignContext, *, variant: str | None = None,
     if model is Tag:
         return _project_tag(obj, ctx, schema, extra)
 
+    if model is ChatSession and "messages" in schema.model_fields:
+        raw = extra.pop("messages", None)
+        extra["messages"] = redact_messages(obj.messages if raw is None else raw, visible_refs or (),
+                                            legacy_visible=ctx.role == GM)
     data = _read(obj, schema, skip=(*extra, "tags") if model is JournalEntry else extra)
     if model is JournalEntry and "tags" in schema.model_fields:
         tags = list(obj.tags)
@@ -321,6 +351,163 @@ async def project_all(db: AsyncSession, rows: Iterable[Any], ctx: CampaignContex
         out.append(project(row, row_ctx, variant=variant, extra=extra(row) if extra else None,
                            links=links.get(row.id) if isinstance(row, JournalEntry) else None))
     return out
+
+
+# ── Chat sessions (E0-Access.8) ────────────────────────────────────────────
+#
+# A stored message is `{role, content, refs: [SourceRef], grounded}`. On read
+# and before replay, a message whose refs ctx can no longer all see is
+# redacted (read) or left out (replay). A legacy message (no `refs` key, or
+# malformed refs) is visible only to a GM ctx. An archived session is never
+# replayed and is `not_found()` to a non-GM ctx.
+
+REDACTED_NOTICE = "This message drew on something you can no longer see, so it is hidden."
+REPLAY_ROLES = frozenset({"user", "assistant"})
+
+ChatScope = CampaignContext | RoleMap
+
+
+def _safe_refs(msg: Any) -> list[SourceRef] | None:
+    """The message's refs; None for a legacy or malformed message."""
+    try:
+        return message_refs(msg)
+    except ValueError:
+        return None
+
+
+def _all_refs(messages: Iterable[Any]) -> list[SourceRef]:
+    out: list[SourceRef] = []
+    for msg in messages or ():
+        out.extend(_safe_refs(msg) or ())
+    return out
+
+
+def _message_visible(msg: Any, visible: set[SourceRef], legacy_visible: bool) -> bool:
+    if not isinstance(msg, Mapping):
+        return False
+    refs = _safe_refs(msg)
+    if refs is None:
+        return legacy_visible
+    return all(r in visible for r in refs)
+
+
+def redact_messages(messages: Iterable[Any], visible: Iterable[SourceRef], *,
+                    legacy_visible: bool) -> list[dict[str, Any]]:
+    """Each stored message as a response message: as stored when all its refs
+    are in `visible` (a legacy message when `legacy_visible`), else the
+    redaction notice with no refs."""
+    shown = set(visible)
+    out: list[dict[str, Any]] = []
+    for msg in messages or ():
+        if not isinstance(msg, Mapping):
+            continue
+        role = str(msg.get("role", ""))
+        if _message_visible(msg, shown, legacy_visible):
+            out.append({"role": role, "content": str(msg.get("content", "")), "refs": _safe_refs(msg) or [],
+                        "grounded": msg.get("grounded"), "redacted": False})
+        else:
+            out.append({"role": role, "content": REDACTED_NOTICE, "refs": [], "grounded": None, "redacted": True})
+    return out
+
+
+def _roles_all_gm(roles: Mapping[uuid.UUID, str]) -> bool:
+    return all(role == GM for role in roles.values())
+
+
+def _chat_scope(session: ChatSession, ctx: ChatScope) -> tuple[ChatScope, bool]:
+    """(the scope session's messages are checked with, whether legacy
+    messages are visible). `not_found()` for a session that is not the
+    user's, of another Campaign, or archived to a non-GM ctx."""
+    if isinstance(ctx, CampaignContext):
+        if session.user_id is None or session.user_id != ctx.user_id or session.campaign_id != ctx.campaign_id:
+            not_found()
+        if session.archived_at is not None and ctx.role != GM:
+            not_found()
+        return ctx, ctx.role == GM
+    if not isinstance(ctx, Mapping):
+        raise TypeError(f"project_chat: ctx must be a CampaignContext or a RoleMap, got {type(ctx).__name__}")
+    if session.campaign_id is not None:
+        # A Campaign's session through a role map: the Role in its Campaign.
+        return _chat_scope(session, role_ctx(ctx, session.campaign_id))
+    uid = getattr(ctx, "user_id", None)
+    if uid is None or session.user_id != uid:
+        not_found()
+    # A campaign-less session is the user's own: the GM schema, its refs
+    # checked by the Role in each cited row's Campaign; legacy messages only
+    # while the user is a Player nowhere.
+    return ctx, _roles_all_gm(ctx)
+
+
+def check_chat_session(session: ChatSession, ctx: ChatScope) -> None:
+    """`not_found()` unless ctx may read `session` (its own, of ctx's
+    Campaign, and not archived for a non-GM ctx)."""
+    _chat_scope(session, ctx)
+
+
+def _session_defaults(session: ChatSession, schema: type[BaseModel]) -> dict[str, Any]:
+    out = {"id": str(session.id), "session_id": str(session.id),
+           "campaign_id": str(session.campaign_id) if session.campaign_id else None}
+    return {k: v for k, v in out.items() if k in schema.model_fields}
+
+
+async def project_chat(db: AsyncSession, session: ChatSession, ctx: ChatScope, variant: str,
+                       extra: Mapping[str, Any] | None = None) -> BaseModel:
+    """`session` as ctx's chat schema for `variant` (CHAT_META, CHAT_REPLY,
+    CHAT_DETAIL). `extra` is the GM-shaped body (the route builds one dict);
+    the Party schemas drop `shorthand` and `system_prompt` and empty
+    `canon_sources`. With a `RoleMap` (a campaign-less session, the user's
+    own) the GM schema. Messages are redacted by what ctx may see now."""
+    if not isinstance(session, ChatSession):
+        raise TypeError(f"project_chat: expected a ChatSession, got {type(session).__name__}")
+    scope, legacy_visible = _chat_scope(session, ctx)
+    if isinstance(scope, CampaignContext):
+        schema = schema_for(ChatSession, scope, variant)
+    else:
+        schema = projection_for(ChatSession, variant).gm
+    data = {**_session_defaults(session, schema), **dict(extra or {})}
+    visible: list[SourceRef] = []
+    if "messages" in schema.model_fields:
+        raw = data.get("messages")
+        messages = session.messages if raw is None else raw
+        data["messages"] = messages
+        visible = await _visible_refs(db, _all_refs(messages), scope)
+    if isinstance(scope, CampaignContext):
+        return project(session, scope, variant=variant, extra=data, visible_refs=visible)
+    unknown = sorted(set(data) - set(schema.model_fields))
+    if unknown:
+        raise ValueError(f"project_chat: {schema.__name__} has no field(s) {unknown}")
+    if "messages" in data:
+        data["messages"] = redact_messages(data["messages"], visible, legacy_visible=legacy_visible)
+    body = _read(session, schema, skip=data)
+    body.update(data)
+    return schema.model_validate(body, from_attributes=True)
+
+
+async def replay_history(db: AsyncSession, session: ChatSession | None, ctx: ChatScope) -> list[dict[str, str]]:
+    """The session's messages that may go back into a prompt for ctx, as
+    `{role, content}` only: none for an archived session, and none that
+    ctx may not see (redacted or legacy). `not_found()` as `project_chat`."""
+    if session is None:
+        return []
+    scope, legacy_visible = _chat_scope(session, ctx)
+    if session.archived_at is not None:
+        return []
+    messages = list(session.messages or [])
+    shown = set(await _visible_refs(db, _all_refs(messages), scope))
+    return [
+        {"role": str(m["role"]), "content": str(m.get("content", ""))}
+        for m in messages
+        if isinstance(m, Mapping) and m.get("role") in REPLAY_ROLES and _message_visible(m, shown, legacy_visible)
+    ]
+
+
+async def session_visible_text(db: AsyncSession, session: ChatSession, ctx: ChatScope) -> list[str]:
+    """The message texts ctx may read in `session` (for search): redacted
+    messages contribute nothing."""
+    scope, legacy_visible = _chat_scope(session, ctx)
+    messages = list(session.messages or [])
+    shown = set(await _visible_refs(db, _all_refs(messages), scope))
+    return [str(m.get("content", "")) for m in messages if _message_visible(m, shown, legacy_visible)]
 
 
 # ── Import-time check: Party schemas carry no GM field ─────────────────────
