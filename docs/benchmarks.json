@@ -1,0 +1,2852 @@
+{
+  "format": 1,
+  "rows": {},
+  "spikes": [
+    {
+      "spike": "SPIKE-1",
+      "config": "nli-deberta-v3-base",
+      "column": "cpu",
+      "env": {
+        "date": "2026-11-01",
+        "cpu": "AMD Ryzen 9 9900X 12-Core Processor",
+        "arch": "x86_64",
+        "cpuset_threads": 4,
+        "cgroup_cpu_max": "400000 100000",
+        "cgroup_memory_max": "2684354560",
+        "cuda_visible_devices": "",
+        "python": "3.12.16",
+        "hardware_label": "AMD Ryzen 9 9900X 12-Core Processor, 60 GB host",
+        "torch": "2.11.0+cu128",
+        "torch_threads": 4,
+        "device": "cpu"
+      },
+      "metrics": {
+        "load_s": 0.61,
+        "per_pair_batch1_ms": {
+          "n": 30,
+          "median": 64.9,
+          "min": 61.5,
+          "max": 161.9,
+          "p25": 63.0,
+          "p75": 66.4
+        },
+        "fifty_pairs_s": {
+          "n": 5,
+          "median": 0.964,
+          "min": 0.961,
+          "max": 1.059,
+          "p25": 0.963,
+          "p75": 0.987
+        },
+        "pairs_per_s": 51.9,
+        "sanity_correct": 4,
+        "sanity": [
+          {
+            "expected": "contradiction",
+            "got": "contradiction",
+            "p_contradiction": 1.0
+          },
+          {
+            "expected": "entailment",
+            "got": "neutral",
+            "p_contradiction": 0.0
+          },
+          {
+            "expected": "contradiction",
+            "got": "contradiction",
+            "p_contradiction": 0.999
+          },
+          {
+            "expected": "neutral",
+            "got": "contradiction",
+            "p_contradiction": 1.0
+          },
+          {
+            "expected": "contradiction",
+            "got": "contradiction",
+            "p_contradiction": 1.0
+          },
+          {
+            "expected": "entailment",
+            "got": "entailment",
+            "p_contradiction": 0.0
+          }
+        ],
+        "peak_rss_mb": 1428.1,
+        "cgroup_peak_mb": 1240.2
+      }
+    },
+    {
+      "spike": "SPIKE-1",
+      "config": "nli-deberta-v3-base",
+      "column": "gpu",
+      "env": {
+        "date": "2026-11-01",
+        "cpu": "AMD Ryzen 9 9900X 12-Core Processor",
+        "arch": "x86_64",
+        "cpuset_threads": 24,
+        "cgroup_cpu_max": "max 100000",
+        "cgroup_memory_max": "max",
+        "cuda_visible_devices": null,
+        "python": "3.12.16",
+        "hardware_label": "AMD Ryzen 9 9900X 12-Core Processor, 60 GB host",
+        "torch": "2.11.0+cu128",
+        "torch_threads": 24,
+        "device": "cuda"
+      },
+      "metrics": {
+        "load_s": 0.72,
+        "per_pair_batch1_ms": {
+          "n": 30,
+          "median": 4.8,
+          "min": 4.7,
+          "max": 473.8,
+          "p25": 4.7,
+          "p75": 4.8
+        },
+        "fifty_pairs_s": {
+          "n": 5,
+          "median": 0.023,
+          "min": 0.023,
+          "max": 0.023,
+          "p25": 0.023,
+          "p75": 0.023
+        },
+        "pairs_per_s": 2173.9,
+        "sanity_correct": 4,
+        "sanity": [
+          {
+            "expected": "contradiction",
+            "got": "contradiction",
+            "p_contradiction": 1.0
+          },
+          {
+            "expected": "entailment",
+            "got": "neutral",
+            "p_contradiction": 0.0
+          },
+          {
+            "expected": "contradiction",
+            "got": "contradiction",
+            "p_contradiction": 0.999
+          },
+          {
+            "expected": "neutral",
+            "got": "contradiction",
+            "p_contradiction": 1.0
+          },
+          {
+            "expected": "contradiction",
+            "got": "contradiction",
+            "p_contradiction": 1.0
+          },
+          {
+            "expected": "entailment",
+            "got": "entailment",
+            "p_contradiction": 0.0
+          }
+        ],
+        "peak_rss_mb": 1959.2,
+        "cgroup_peak_mb": 2095.6
+      }
+    },
+    {
+      "spike": "SPIKE-1",
+      "config": "nli-deberta-v3-xsmall",
+      "column": "cpu",
+      "env": {
+        "date": "2026-11-01",
+        "cpu": "AMD Ryzen 9 9900X 12-Core Processor",
+        "arch": "x86_64",
+        "cpuset_threads": 4,
+        "cgroup_cpu_max": "400000 100000",
+        "cgroup_memory_max": "2684354560",
+        "cuda_visible_devices": "",
+        "python": "3.12.16",
+        "hardware_label": "AMD Ryzen 9 9900X 12-Core Processor, 60 GB host",
+        "torch": "2.11.0+cu128",
+        "torch_threads": 4,
+        "device": "cpu"
+      },
+      "metrics": {
+        "load_s": 0.52,
+        "per_pair_batch1_ms": {
+          "n": 30,
+          "median": 18.9,
+          "min": 17.9,
+          "max": 20.0,
+          "p25": 18.4,
+          "p75": 19.1
+        },
+        "fifty_pairs_s": {
+          "n": 5,
+          "median": 0.309,
+          "min": 0.304,
+          "max": 0.311,
+          "p25": 0.305,
+          "p75": 0.31
+        },
+        "pairs_per_s": 161.8,
+        "sanity_correct": 4,
+        "sanity": [
+          {
+            "expected": "contradiction",
+            "got": "contradiction",
+            "p_contradiction": 0.998
+          },
+          {
+            "expected": "entailment",
+            "got": "neutral",
+            "p_contradiction": 0.0
+          },
+          {
+            "expected": "contradiction",
+            "got": "contradiction",
+            "p_contradiction": 0.974
+          },
+          {
+            "expected": "neutral",
+            "got": "contradiction",
+            "p_contradiction": 0.994
+          },
+          {
+            "expected": "contradiction",
+            "got": "contradiction",
+            "p_contradiction": 0.995
+          },
+          {
+            "expected": "entailment",
+            "got": "entailment",
+            "p_contradiction": 0.001
+          }
+        ],
+        "peak_rss_mb": 1098.3,
+        "cgroup_peak_mb": 870.6
+      }
+    },
+    {
+      "spike": "SPIKE-1",
+      "config": "nli-deberta-v3-xsmall",
+      "column": "gpu",
+      "env": {
+        "date": "2026-11-01",
+        "cpu": "AMD Ryzen 9 9900X 12-Core Processor",
+        "arch": "x86_64",
+        "cpuset_threads": 24,
+        "cgroup_cpu_max": "max 100000",
+        "cgroup_memory_max": "max",
+        "cuda_visible_devices": null,
+        "python": "3.12.16",
+        "hardware_label": "AMD Ryzen 9 9900X 12-Core Processor, 60 GB host",
+        "torch": "2.11.0+cu128",
+        "torch_threads": 24,
+        "device": "cuda"
+      },
+      "metrics": {
+        "load_s": 0.66,
+        "per_pair_batch1_ms": {
+          "n": 30,
+          "median": 4.8,
+          "min": 4.7,
+          "max": 480.1,
+          "p25": 4.8,
+          "p75": 4.9
+        },
+        "fifty_pairs_s": {
+          "n": 5,
+          "median": 0.012,
+          "min": 0.012,
+          "max": 0.013,
+          "p25": 0.012,
+          "p75": 0.013
+        },
+        "pairs_per_s": 4166.7,
+        "sanity_correct": 4,
+        "sanity": [
+          {
+            "expected": "contradiction",
+            "got": "contradiction",
+            "p_contradiction": 0.998
+          },
+          {
+            "expected": "entailment",
+            "got": "neutral",
+            "p_contradiction": 0.0
+          },
+          {
+            "expected": "contradiction",
+            "got": "contradiction",
+            "p_contradiction": 0.974
+          },
+          {
+            "expected": "neutral",
+            "got": "contradiction",
+            "p_contradiction": 0.994
+          },
+          {
+            "expected": "contradiction",
+            "got": "contradiction",
+            "p_contradiction": 0.995
+          },
+          {
+            "expected": "entailment",
+            "got": "entailment",
+            "p_contradiction": 0.001
+          }
+        ],
+        "peak_rss_mb": 1964.4,
+        "cgroup_peak_mb": 2079.0
+      }
+    },
+    {
+      "spike": "SPIKE-1",
+      "config": "nli-deberta-v3-xsmall (ml image)",
+      "column": "cpu",
+      "env": {
+        "date": "2026-11-01",
+        "cpu": "AMD Ryzen 9 9900X 12-Core Processor",
+        "arch": "x86_64",
+        "cpuset_threads": 4,
+        "cgroup_cpu_max": "400000 100000",
+        "cgroup_memory_max": "2684354560",
+        "cuda_visible_devices": "",
+        "python": "3.11.18",
+        "hardware_label": "AMD Ryzen 9 9900X 12-Core Processor, 60 GB host",
+        "torch": "2.15.0+cpu",
+        "torch_threads": 4,
+        "device": "cpu"
+      },
+      "metrics": {
+        "load_s": 0.57,
+        "per_pair_batch1_ms": {
+          "n": 30,
+          "median": 18.9,
+          "min": 18.1,
+          "max": 19.8,
+          "p25": 18.4,
+          "p75": 19.2
+        },
+        "fifty_pairs_s": {
+          "n": 5,
+          "median": 0.308,
+          "min": 0.308,
+          "max": 0.313,
+          "p25": 0.308,
+          "p75": 0.312
+        },
+        "pairs_per_s": 162.3,
+        "sanity_correct": 4,
+        "sanity": [
+          {
+            "expected": "contradiction",
+            "got": "contradiction",
+            "p_contradiction": 0.998
+          },
+          {
+            "expected": "entailment",
+            "got": "neutral",
+            "p_contradiction": 0.0
+          },
+          {
+            "expected": "contradiction",
+            "got": "contradiction",
+            "p_contradiction": 0.974
+          },
+          {
+            "expected": "neutral",
+            "got": "contradiction",
+            "p_contradiction": 0.994
+          },
+          {
+            "expected": "contradiction",
+            "got": "contradiction",
+            "p_contradiction": 0.995
+          },
+          {
+            "expected": "entailment",
+            "got": "entailment",
+            "p_contradiction": 0.001
+          }
+        ],
+        "peak_rss_mb": 766.5,
+        "cgroup_peak_mb": 1228.9
+      }
+    },
+    {
+      "spike": "SPIKE-2",
+      "config": "base float16",
+      "column": "gpu",
+      "env": {
+        "date": "2026-11-01",
+        "cpu": "AMD Ryzen 9 9900X 12-Core Processor",
+        "arch": "x86_64",
+        "cpuset_threads": 24,
+        "cgroup_cpu_max": "max 100000",
+        "cgroup_memory_max": "max",
+        "cuda_visible_devices": null,
+        "python": "3.12.16",
+        "hardware_label": "AMD Ryzen 9 9900X 12-Core Processor, 60 GB host",
+        "ctranslate2": "4.8.4",
+        "cpu_threads": 24,
+        "device": "cuda",
+        "busy_url": null
+      },
+      "metrics": {
+        "load_s": 0.23,
+        "chunk_s": 15,
+        "chunk_latency_s": {
+          "n": 25,
+          "median": 0.11,
+          "min": 0.06,
+          "max": 0.13,
+          "p25": 0.1,
+          "p75": 0.12
+        },
+        "chunk_rtf": {
+          "n": 25,
+          "median": 0.008,
+          "min": 0.006,
+          "max": 0.01,
+          "p25": 0.008,
+          "p75": 0.008
+        },
+        "full_clip_s": 0.61,
+        "full_rtf": 0.009,
+        "word_match": 0.908,
+        "names_no_prompt": [
+          "Aldric"
+        ],
+        "names_with_prompt": [
+          "Karak Dun",
+          "Borin Stonebeard",
+          "Grukk",
+          "Aldric",
+          "Veyra",
+          "Dawnbreaker"
+        ],
+        "word_match_with_prompt": 0.961,
+        "transcript": "Okay, everyone, settle in.  We are picking up where we left off last week.  The party is standing at the gates of Karakdon, and the dwarven sentries are not happy to  see you.  Borin's Donnebird steps forward and demands to know why a half-orc barbarian is carrying  the royal seal.  Grok, what do you do?  Grok says he found it on a dead courier near the river, and he wants a reward.  Roll me a persuasion check.  Thirteen?  With your bonus that is a fifteen, Borin narrows his ice but lets you through, inside the  hall.  Aldrich the Paladin notices the torches are burning green, which he has only seen once  before.  During the siege of Donbreaker, Vera, our Elven Ranger, wants to check the shadows near  the throne.  Give me a perception roll.  Natural twenty.  You spot a cloak figure slipping behind a pillar, clutching a black dagger with runes  that glow faintly.  The figure whispers something in an old tongue, and the green flames flare up all around  you.  Roll initiative.  Everybody.  Aldrich goes first with the nineteen.  And Vera, then the cloak stranger, then Grok, Aldrich, the stranger is thirty feet  away across the cracked marble floor.  What is your move?",
+        "transcript_with_prompt": "Okay, everyone, settle in. We are picking up where we left off last week. The party is standing  at the gates of Karak Dun, and the dwarven sentries are not happy to see you. Borin Stonebeard  steps forward and demands to know why a half-orc barbarian is carrying the royal seal.  Grukk, what do you do? Grukk says he found it on a dead courier near the river, and he wants  a reward. Roll me a persuasion check. 13. With your bonus that is a 15, Borin narrows  his eyes but lets you through. Inside the hall, Aldric the paladin notices the torches are burning  green, which he has only seen once before. During the siege of Dawnbreaker, Veyra, our Elven  Ranger, wants to check the shadows near the throne. Give me a perception roll. Natural 20, you  spot a cloak figure slipping behind a pillar, clutching a black dagger with runes that glow faintly.  The figure whispers something in an old tongue, and the green flames flare up all around you.  Roll initiative, everybody. Aldric goes first with the 19, then Veyra, then the cloak stranger,  then Grukk. Aldric, the stranger is 30 feet away across the cracked marble floor. What is your move?",
+        "peak_rss_mb": 1107.6,
+        "cgroup_peak_mb": 1214.6
+      }
+    },
+    {
+      "spike": "SPIKE-2",
+      "config": "base float32",
+      "column": "cpu",
+      "env": {
+        "date": "2026-11-01",
+        "cpu": "AMD Ryzen 9 9900X 12-Core Processor",
+        "arch": "x86_64",
+        "cpuset_threads": 4,
+        "cgroup_cpu_max": "400000 100000",
+        "cgroup_memory_max": "1342177280",
+        "cuda_visible_devices": "",
+        "python": "3.12.16",
+        "hardware_label": "AMD Ryzen 9 9900X 12-Core Processor, 60 GB host",
+        "ctranslate2": "4.8.4",
+        "cpu_threads": 4,
+        "device": "cpu",
+        "busy_url": null
+      },
+      "metrics": {
+        "load_s": 0.16,
+        "chunk_s": 15,
+        "chunk_latency_s": {
+          "n": 25,
+          "median": 0.98,
+          "min": 0.55,
+          "max": 1.11,
+          "p25": 0.92,
+          "p75": 1.03
+        },
+        "chunk_rtf": {
+          "n": 25,
+          "median": 0.068,
+          "min": 0.061,
+          "max": 0.081,
+          "p25": 0.065,
+          "p75": 0.073
+        },
+        "full_clip_s": 4.8,
+        "full_rtf": 0.072,
+        "word_match": 0.908,
+        "names_no_prompt": [
+          "Aldric"
+        ],
+        "names_with_prompt": [
+          "Karak Dun",
+          "Borin Stonebeard",
+          "Grukk",
+          "Aldric",
+          "Veyra",
+          "Dawnbreaker"
+        ],
+        "word_match_with_prompt": 0.956,
+        "transcript": "Okay, everyone, settle in.  We are picking up where we left off last week.  The party is standing at the gates of Karakdon, and the dwarven sentries are not happy to  see you.  Borin's Donnebird steps forward and demands to know why a half-orc barbarian is carrying  the royal seal.  Grok, what do you do?  Grok says he found it on a dead courier near the river, and he wants a reward.  Roll me a persuasion check.  Thirteen?  With your bonus that is a fifteen, Borin narrows his ice but lets you through, inside the  hall.  Aldrich the Paladin notices the torches are burning green, which he has only seen once  before.  During the siege of Donbreaker, Vera, our Elven Ranger, wants to check the shadows near  the throne.  Give me a perception roll.  Natural twenty.  You spot a cloak figure slipping behind a pillar, clutching a black dagger with runes  that glow faintly.  The figure whispers something in an old tongue, and the green flames flare up all around  you.  Roll initiative.  Everybody.  Aldrich goes first with the nineteen.  And Vera, then the cloak stranger, then Grok, Aldrich, the stranger is thirty feet  away across the cracked marble floor.  What is your move?",
+        "transcript_with_prompt": "Okay everyone, settle in, we are picking up where we left off last week. The party is standing  at the gates of Karak Dun, and the dwarven sentries are not happy to see you. Borin Stonebeard  steps forward and demands to know why a half-orc barbarian is carrying the royal seal.  Grukk, what do you do? Grukk says he found it on a dead courier near the river, and he wants  a reward. Roll me a persuasion check, 13, with your bonus that is a 15. Borin narrows his  eyes but lets you through. Inside the hall, Aldric the paladin notices the torches are burning  green, which he has only seen once before. During the siege of Dawnbreaker, Veyra, our  elven ranger, wants to check the shadows near the throne. Give me a perception roll, natural  20, you spot a cloak figure slipping behind a pillar, clutching a black dagger with runes  that glow faintly, the figure whispers something in an old tongue, and the green flames flare  up all around you. Roll initiative, everybody, Aldric goes first with the 19, then Veyra,  then the cloak stranger, then Grog, Aldric, the stranger is 30 feet away across the cracked  marble floor. What is your move?",
+        "peak_rss_mb": 608.0,
+        "cgroup_peak_mb": 559.3
+      }
+    },
+    {
+      "spike": "SPIKE-2",
+      "config": "base int8",
+      "column": "cpu",
+      "env": {
+        "date": "2026-11-01",
+        "cpu": "AMD Ryzen 9 9900X 12-Core Processor",
+        "arch": "x86_64",
+        "cpuset_threads": 4,
+        "cgroup_cpu_max": "400000 100000",
+        "cgroup_memory_max": "1342177280",
+        "cuda_visible_devices": "",
+        "python": "3.12.16",
+        "hardware_label": "AMD Ryzen 9 9900X 12-Core Processor, 60 GB host",
+        "ctranslate2": "4.8.4",
+        "cpu_threads": 4,
+        "device": "cpu",
+        "busy_url": null
+      },
+      "metrics": {
+        "load_s": 0.19,
+        "chunk_s": 15,
+        "chunk_latency_s": {
+          "n": 25,
+          "median": 0.43,
+          "min": 0.28,
+          "max": 0.49,
+          "p25": 0.41,
+          "p75": 0.45
+        },
+        "chunk_rtf": {
+          "n": 25,
+          "median": 0.029,
+          "min": 0.027,
+          "max": 0.042,
+          "p25": 0.028,
+          "p75": 0.032
+        },
+        "full_clip_s": 2.22,
+        "full_rtf": 0.033,
+        "word_match": 0.888,
+        "names_no_prompt": [
+          "Aldric"
+        ],
+        "names_with_prompt": [
+          "Karak Dun",
+          "Borin Stonebeard",
+          "Grukk",
+          "Aldric",
+          "Veyra",
+          "Dawnbreaker"
+        ],
+        "word_match_with_prompt": 0.956,
+        "transcript": "Okay, everyone, settle in.  We are picking up where we left off last week.  The party is standing at the gates of Karakdon, and the Dwarven centuries are not happy to  see you.  Borin's Dona bird steps forward and demands to know why a half-orc barbarian is carrying  the royal seal.  Grok, what do you do?  Grok says he found it on a dead courier near the river, and he wants a reward.  Roll me a persuasion check, 13, with your bonus that is a 15, Borin narrows his ice but  lets you through.  Inside the hall, Aldrich the paladin notices the torches are burning green, which he has  only seen once before.  During the siege of Donbriker, Vera, our Elven Ranger, wants to check the shadows near  the throne.  Give me a perception roll, natural 20, you spot a cloak figure slipping behind a pillar,  clutching a black dagger with runes that glow faintly, the figure whispers something  in an old tongue, and the green flames flare up all around you.  All initiative, everybody, Aldrich goes first with a 19, then Vera, then the cloak stranger,  then Grok, Aldrich, the stranger is 30 feet away across the cracked marble floor, what  is your move?",
+        "transcript_with_prompt": "Okay everyone, settle in, we are picking up where we left off last week. The party is standing  at the gates of Karak Dun, and the dwarven sentries are not happy to see you. Borin Stonebeard  steps forward and demands to know why a half-orc barbarian is carrying the royal seal.  Grukk, what do you do? Grukk says he found it on a dead courier near the river, and he wants  a reward. Roll me a persuasion check, 13, with your bonus that is a 15. Borin narrows his  eyes but lets you through. Inside the hall, Aldric the paladin notices the torches are burning  green, which he has only seen once before. During the siege of Dawnbreaker, Veyra, our  elven ranger, wants to check the shadows near the throne. Give me a perception roll, natural  20, you spot a cloak figure slipping behind a pillar, clutching a black dagger with runes  that glow faintly, the figure whispers something in an old tongue, and the green flames flare  up all around you. Roll initiative, everybody, Aldric goes first with the 19, then Veyra,  then the cloak stranger, then Grog, Aldric, the stranger is 30 feet away across the cracked  marble floor, what is your move?",
+        "peak_rss_mb": 405.5,
+        "cgroup_peak_mb": 498.0
+      }
+    },
+    {
+      "spike": "SPIKE-2",
+      "config": "base int8 + LLM busy",
+      "column": "cpu",
+      "env": {
+        "date": "2026-11-01",
+        "cpu": "AMD Ryzen 9 9900X 12-Core Processor",
+        "arch": "x86_64",
+        "cpuset_threads": 4,
+        "cgroup_cpu_max": "400000 100000",
+        "cgroup_memory_max": "1342177280",
+        "cuda_visible_devices": "",
+        "python": "3.12.16",
+        "hardware_label": "AMD Ryzen 9 9900X 12-Core Processor, 60 GB host",
+        "ctranslate2": "4.8.4",
+        "cpu_threads": 4,
+        "device": "cpu",
+        "busy_url": "http://127.0.0.1:11500"
+      },
+      "metrics": {
+        "load_s": 0.26,
+        "chunk_s": 15,
+        "chunk_latency_s": {
+          "n": 25,
+          "median": 0.43,
+          "min": 0.28,
+          "max": 0.58,
+          "p25": 0.4,
+          "p75": 0.45
+        },
+        "chunk_rtf": {
+          "n": 25,
+          "median": 0.03,
+          "min": 0.027,
+          "max": 0.04,
+          "p25": 0.029,
+          "p75": 0.035
+        },
+        "full_clip_s": 2.18,
+        "full_rtf": 0.032,
+        "word_match": 0.888,
+        "names_no_prompt": [
+          "Aldric"
+        ],
+        "names_with_prompt": [
+          "Karak Dun",
+          "Borin Stonebeard",
+          "Grukk",
+          "Aldric",
+          "Veyra",
+          "Dawnbreaker"
+        ],
+        "word_match_with_prompt": 0.956,
+        "transcript": "Okay, everyone, settle in.  We are picking up where we left off last week.  The party is standing at the gates of Karakdon, and the Dwarven centuries are not happy to  see you.  Borin's Dona bird steps forward and demands to know why a half-orc barbarian is carrying  the royal seal.  Grok, what do you do?  Grok says he found it on a dead courier near the river, and he wants a reward.  Roll me a persuasion check, 13, with your bonus that is a 15, Borin narrows his ice but  lets you through.  Inside the hall, Aldrich the paladin notices the torches are burning green, which he has  only seen once before.  During the siege of Donbriker, Vera, our Elven Ranger, wants to check the shadows near  the throne.  Give me a perception roll, natural 20, you spot a cloak figure slipping behind a pillar,  clutching a black dagger with runes that glow faintly, the figure whispers something  in an old tongue, and the green flames flare up all around you.  All initiative, everybody, Aldrich goes first with a 19, then Vera, then the cloak stranger,  then Grok, Aldrich, the stranger is 30 feet away across the cracked marble floor, what  is your move?",
+        "transcript_with_prompt": "Okay everyone, settle in, we are picking up where we left off last week. The party is standing  at the gates of Karak Dun, and the dwarven sentries are not happy to see you. Borin Stonebeard  steps forward and demands to know why a half-orc barbarian is carrying the royal seal.  Grukk, what do you do? Grukk says he found it on a dead courier near the river, and he wants  a reward. Roll me a persuasion check, 13, with your bonus that is a 15. Borin narrows his  eyes but lets you through. Inside the hall, Aldric the paladin notices the torches are burning  green, which he has only seen once before. During the siege of Dawnbreaker, Veyra, our  elven ranger, wants to check the shadows near the throne. Give me a perception roll, natural  20, you spot a cloak figure slipping behind a pillar, clutching a black dagger with runes  that glow faintly, the figure whispers something in an old tongue, and the green flames flare  up all around you. Roll initiative, everybody, Aldric goes first with the 19, then Veyra,  then the cloak stranger, then Grog, Aldric, the stranger is 30 feet away across the cracked  marble floor, what is your move?",
+        "busy": {
+          "chunk_latency_s": {
+            "n": 25,
+            "median": 1.88,
+            "min": 1.16,
+            "max": 2.49,
+            "p25": 1.58,
+            "p75": 2.1
+          },
+          "chunk_rtf": {
+            "n": 25,
+            "median": 0.14,
+            "min": 0.097,
+            "max": 0.178,
+            "p25": 0.123,
+            "p75": 0.163
+          },
+          "llm_calls": 1,
+          "llm_gen_tok_s": 5.69
+        },
+        "peak_rss_mb": 406.6,
+        "cgroup_peak_mb": 355.6
+      }
+    },
+    {
+      "spike": "SPIKE-2",
+      "config": "small float16",
+      "column": "gpu",
+      "env": {
+        "date": "2026-11-01",
+        "cpu": "AMD Ryzen 9 9900X 12-Core Processor",
+        "arch": "x86_64",
+        "cpuset_threads": 24,
+        "cgroup_cpu_max": "max 100000",
+        "cgroup_memory_max": "max",
+        "cuda_visible_devices": null,
+        "python": "3.12.16",
+        "hardware_label": "AMD Ryzen 9 9900X 12-Core Processor, 60 GB host",
+        "ctranslate2": "4.8.4",
+        "cpu_threads": 24,
+        "device": "cuda",
+        "busy_url": null
+      },
+      "metrics": {
+        "load_s": 0.27,
+        "chunk_s": 15,
+        "chunk_latency_s": {
+          "n": 25,
+          "median": 0.18,
+          "min": 0.07,
+          "max": 0.21,
+          "p25": 0.15,
+          "p75": 0.19
+        },
+        "chunk_rtf": {
+          "n": 25,
+          "median": 0.012,
+          "min": 0.01,
+          "max": 0.014,
+          "p25": 0.01,
+          "p75": 0.012
+        },
+        "full_clip_s": 0.91,
+        "full_rtf": 0.014,
+        "word_match": 0.937,
+        "names_no_prompt": [
+          "Aldric",
+          "Dawnbreaker"
+        ],
+        "names_with_prompt": [
+          "Karak Dun",
+          "Borin Stonebeard",
+          "Grukk",
+          "Aldric",
+          "Veyra",
+          "Dawnbreaker"
+        ],
+        "word_match_with_prompt": 0.976,
+        "transcript": "Okay everyone, settle in.  We are picking up where we left off last week.  The party is standing at the gates of Karakdan, and the dwarven sentries are not happy to  see you.  Boran Stonibird steps forward and demands to know why a half-orc barbarian is carrying  the royal seal.  Grug.  What do you do?  Grug says he found it on a dead courier near the river, and he wants a reward.  Roll me a persuasion check.  Thirteen, with your bonus that is a fifteen.  Boran narrows his eyes but lets you through.  Read the haul.  Aldric the paladin notices the torches are burning green, which he has only seen once  before.  During the siege of Dawnbreaker, Vera, our elven ranger, wants to check the shadows near  the throne.  Give me a perception roll.  Natural twenty.  You spot a cloaked figure slipping behind a pillar, clutching a black dagger with runes  that glow faintly.  The figure whispers something in an old tongue, and the green flames flare up all around  you.  Roll initiative.  Everybody.  Aldric goes first with a nineteen.  Then Vera.  Then the cloaked stranger.  Then Grug.  Aldric.  The stranger is thirty feet away across the cracked marble floor.  What is your move?",
+        "transcript_with_prompt": "Okay everyone, settle in. We are picking up where we left off last week. The party  is standing at the gates of Karak Dun, and the dwarven sentries are not happy to see  you. Borin Stonebeard steps forward and demands to know why a half-orc barbarian is carrying  the royal seal. Grukk, what do you do? Grukk says he found it on a dead courier near the  river, and he wants a reward. Roll me a persuasion check. 13, with your bonus that is a 15. Borin  narrows his eyes but lets you through. Inside the hall, Aldric the paladin notices the torches  are burning green, which he has only seen once before. During the siege of Dawnbreaker,  Veyra, our elven ranger, wants to check the shadows near the throne. Give me a perception  roll. Natural 20, you spot a cloaked figure slipping behind a pillar, clutching a black  dagger with runes that glow faintly. The figure whispers something in an old tongue, and the  green flames flare up all around you. Roll initiative, everybody. Aldric goes first with  a 19, then Veyra, then the cloaked stranger, then Grukk. Aldric, the stranger is 30 feet  away across the cracked marble floor. What is your move?",
+        "peak_rss_mb": 1170.8,
+        "cgroup_peak_mb": 1180.6
+      }
+    },
+    {
+      "spike": "SPIKE-2",
+      "config": "small float32",
+      "column": "cpu",
+      "env": {
+        "date": "2026-11-01",
+        "cpu": "AMD Ryzen 9 9900X 12-Core Processor",
+        "arch": "x86_64",
+        "cpuset_threads": 4,
+        "cgroup_cpu_max": "400000 100000",
+        "cgroup_memory_max": "2684354560",
+        "cuda_visible_devices": "",
+        "python": "3.12.16",
+        "hardware_label": "AMD Ryzen 9 9900X 12-Core Processor, 60 GB host",
+        "ctranslate2": "4.8.4",
+        "cpu_threads": 4,
+        "device": "cpu",
+        "busy_url": null
+      },
+      "metrics": {
+        "load_s": 0.32,
+        "chunk_s": 15,
+        "chunk_latency_s": {
+          "n": 25,
+          "median": 2.92,
+          "min": 1.27,
+          "max": 3.94,
+          "p25": 2.72,
+          "p75": 3.11
+        },
+        "chunk_rtf": {
+          "n": 25,
+          "median": 0.201,
+          "min": 0.172,
+          "max": 0.271,
+          "p25": 0.19,
+          "p75": 0.221
+        },
+        "full_clip_s": 17.85,
+        "full_rtf": 0.266,
+        "word_match": 0.937,
+        "names_no_prompt": [
+          "Aldric",
+          "Dawnbreaker"
+        ],
+        "names_with_prompt": [
+          "Karak Dun",
+          "Borin Stonebeard",
+          "Grukk",
+          "Aldric",
+          "Veyra",
+          "Dawnbreaker"
+        ],
+        "word_match_with_prompt": 0.976,
+        "transcript": "Okay everyone, settle in.  We are picking up where we left off last week.  The party is standing at the gates of Karakdan, and the dwarven sentries are not happy to  see you.  Boran Stonibird steps forward and demands to know why a half-orc barbarian is carrying  the royal seal.  Grug.  What do you do?  Grug says he found it on a dead courier near the river, and he wants a reward.  Roll me a persuasion check.  Thirteen, with your bonus that is a fifteen.  Boran narrows his eyes but lets you through.  Read the haul.  Aldric the paladin notices the torches are burning green, which he has only seen once  before.  During the siege of Dawnbreaker, Vera, our elven ranger, wants to check the shadows near  the throne.  Give me a perception roll.  Natural twenty.  You spot a cloaked figure slipping behind a pillar, clutching a black dagger with runes  that glow faintly.  The figure whispers something in an old tongue, and the green flames flare up all around  you.  Roll initiative.  Everybody.  Aldric goes first with a nineteen.  Then Vera.  Then the cloaked stranger.  Then Grug.  Aldric.  The stranger is thirty feet away across the cracked marble floor.  What is your move?",
+        "transcript_with_prompt": "Okay everyone, settle in. We are picking up where we left off last week. The party  is standing at the gates of Karak Dun, and the dwarven sentries are not happy to see  you. Borin Stonebeard steps forward and demands to know why a half-orc barbarian is carrying  the royal seal. Grukk, what do you do? Grukk says he found it on a dead courier near the  river, and he wants a reward. Roll me a persuasion check. 13, with your bonus that is a 15. Borin  narrows his eyes but lets you through. Inside the hall, Aldric the paladin notices the torches  are burning green, which he has only seen once before. During the siege of Dawnbreaker,  Veyra, our elven ranger, wants to check the shadows near the throne. Give me a perception  roll. Natural 20, you spot a cloaked figure slipping behind a pillar, clutching a black  dagger with runes that glow faintly. The figure whispers something in an old tongue, and the  green flames flare up all around you. Roll initiative, everybody. Aldric goes first with  a 19, then Veyra, then the cloaked stranger, then Grukk. Aldric, the stranger is 30 feet  away across the cracked marble floor. What is your move?",
+        "peak_rss_mb": 1505.4,
+        "cgroup_peak_mb": 1458.5
+      }
+    },
+    {
+      "spike": "SPIKE-2",
+      "config": "small int8",
+      "column": "cpu",
+      "env": {
+        "date": "2026-11-01",
+        "cpu": "AMD Ryzen 9 9900X 12-Core Processor",
+        "arch": "x86_64",
+        "cpuset_threads": 4,
+        "cgroup_cpu_max": "400000 100000",
+        "cgroup_memory_max": "2684354560",
+        "cuda_visible_devices": "",
+        "python": "3.12.16",
+        "hardware_label": "AMD Ryzen 9 9900X 12-Core Processor, 60 GB host",
+        "ctranslate2": "4.8.4",
+        "cpu_threads": 4,
+        "device": "cpu",
+        "busy_url": null
+      },
+      "metrics": {
+        "load_s": 0.39,
+        "chunk_s": 15,
+        "chunk_latency_s": {
+          "n": 25,
+          "median": 1.33,
+          "min": 0.68,
+          "max": 2.06,
+          "p25": 1.22,
+          "p75": 1.37
+        },
+        "chunk_rtf": {
+          "n": 25,
+          "median": 0.091,
+          "min": 0.08,
+          "max": 0.137,
+          "p25": 0.088,
+          "p75": 0.103
+        },
+        "full_clip_s": 8.75,
+        "full_rtf": 0.13,
+        "word_match": 0.922,
+        "names_no_prompt": [
+          "Aldric",
+          "Dawnbreaker"
+        ],
+        "names_with_prompt": [
+          "Karak Dun",
+          "Borin Stonebeard",
+          "Grukk",
+          "Aldric",
+          "Veyra",
+          "Dawnbreaker"
+        ],
+        "word_match_with_prompt": 0.966,
+        "transcript": "Okay everyone.  Settle in.  We are picking up where we left off last week.  The party is standing at the gates of Karakdan, and the dwarven sentries are not happy to  see you.  Boran Stonibird steps forward and demands to know why a half-orc barbarian is carrying  the royal seal.  Grog.  What do you do?  Grog says he found it on a dead courier near the river, and he wants a reward.  Roll me a persuasion check.  13, with your bonus that is a 15.  Boran narrows his eyes but lets you through.  Inside the hall, Aldric the paladin notices the torches are burning green, which he has  only seen once before.  During the siege of Dawnbreaker, Vera, our elven ranger, wants to check the shadows near  the throne.  Give me a perception roll.  Natural 20.  You spot a cloaked figure slipping behind a pillar, clutching a black dagger with  runes that glow faintly.  The figure whispers something in an old tongue, and the green flames flare up  all around you.  Roll initiative.  Everybody.  Aldric goes first with a 19.  Then the cloaked stranger.  Then Grog.  Aldric.  The stranger is 30 feet away across the cracked marble floor.  What is your move?",
+        "transcript_with_prompt": "Okay everyone, settle in. We are picking up where we left off last week. The party is  standing at the gates of Karak Dun, and the dwarven sentries are not happy to see you.  Borin Stonebeard steps forward and demands to know why a half-orc barbarian is carrying  the royal seal. Grukk, what do you do? Grukk says he found it on a dead courier near  the river, and he wants a reward. Roll me a persuasion check. 13, with your bonus  that is a 15. Borin narrows his ice butt lets you through. Inside the hall, Aldric the  paladin notices the torches are burning green, which he has only seen once before.  During the siege of Dawnbreaker, Veyra, our elven ranger, wants to check the shadows  near the throne. Give me a perception roll. Natural 20, you spot a cloaked figure  slipping behind a pillar, clutching a black dagger with runes that glow  faintly. The figure whispers something in an old tongue, and the green flames  flare up all around you. Roll initiative, everybody. Aldric goes first with a 19,  then Veyra, then the cloaked stranger, then Grukk, Aldric, the stranger is 30 feet  away across the cracked marble floor. What is your move?",
+        "peak_rss_mb": 740.5,
+        "cgroup_peak_mb": 1156.2
+      }
+    },
+    {
+      "spike": "SPIKE-3",
+      "config": "kokoro-82M af_heart per-sentence",
+      "column": "cpu",
+      "env": {
+        "date": "2026-11-01",
+        "cpu": "AMD Ryzen 9 9900X 12-Core Processor",
+        "arch": "x86_64",
+        "cpuset_threads": 4,
+        "cgroup_cpu_max": "400000 100000",
+        "cgroup_memory_max": "6442450944",
+        "cuda_visible_devices": "",
+        "python": "3.12.16",
+        "hardware_label": "AMD Ryzen 9 9900X 12-Core Processor, 60 GB host",
+        "torch": "2.11.0+cu128",
+        "device": "cpu"
+      },
+      "metrics": {
+        "load_s": 1.27,
+        "words": 316,
+        "audio_s": 105.3,
+        "generation_s": {
+          "n": 5,
+          "median": 13.63,
+          "min": 13.23,
+          "max": 14.78,
+          "p25": 13.55,
+          "p75": 14.26
+        },
+        "rtf": {
+          "n": 5,
+          "median": 0.129,
+          "min": 0.126,
+          "max": 0.14,
+          "p25": 0.129,
+          "p75": 0.135
+        },
+        "first_audio_s": {
+          "n": 5,
+          "median": 1.3,
+          "min": 1.17,
+          "max": 1.57,
+          "p25": 1.27,
+          "p75": 1.32
+        },
+        "dropped_words": [],
+        "peak_rss_mb": 3110.1,
+        "cgroup_peak_mb": 3085.5
+      }
+    },
+    {
+      "spike": "SPIKE-3",
+      "config": "kokoro-82M af_heart per-sentence",
+      "column": "gpu",
+      "env": {
+        "date": "2026-11-01",
+        "cpu": "AMD Ryzen 9 9900X 12-Core Processor",
+        "arch": "x86_64",
+        "cpuset_threads": 24,
+        "cgroup_cpu_max": "max 100000",
+        "cgroup_memory_max": "max",
+        "cuda_visible_devices": null,
+        "python": "3.12.16",
+        "hardware_label": "AMD Ryzen 9 9900X 12-Core Processor, 60 GB host",
+        "torch": "2.11.0+cu128",
+        "device": "cuda"
+      },
+      "metrics": {
+        "load_s": 16.93,
+        "words": 316,
+        "audio_s": 105.3,
+        "generation_s": {
+          "n": 5,
+          "median": 0.49,
+          "min": 0.48,
+          "max": 0.63,
+          "p25": 0.49,
+          "p75": 0.49
+        },
+        "rtf": {
+          "n": 5,
+          "median": 0.005,
+          "min": 0.005,
+          "max": 0.006,
+          "p25": 0.005,
+          "p75": 0.005
+        },
+        "first_audio_s": {
+          "n": 5,
+          "median": 0.04,
+          "min": 0.04,
+          "max": 0.07,
+          "p25": 0.04,
+          "p75": 0.04
+        },
+        "dropped_words": [],
+        "peak_rss_mb": 2543.3,
+        "cgroup_peak_mb": 2369.6
+      }
+    },
+    {
+      "spike": "SPIKE-6",
+      "config": "cpu-capped-3",
+      "column": "cpu",
+      "env": {
+        "date": "2026-11-01",
+        "cpu": "AMD Ryzen 9 9900X 12-Core Processor",
+        "arch": "x86_64",
+        "cpuset_threads": 24,
+        "cgroup_cpu_max": "max 100000",
+        "cgroup_memory_max": "max",
+        "cuda_visible_devices": null,
+        "python": "3.11.18",
+        "hardware_label": "AMD Ryzen 9 9900X 12-Core Processor, 60 GB host",
+        "ollama": "0.40.3",
+        "model": "lorekeeper",
+        "model_digest": "68ffea1422de",
+        "url": "http://127.0.0.1:11500",
+        "num_thread": null
+      },
+      "metrics": {
+        "shapes": {
+          "continuity_verify": {
+            "runs": [
+              {
+                "ttft_s": 3.3,
+                "total_s": 51.3,
+                "prompt_tokens": 85,
+                "prompt_tok_s": 29.3,
+                "gen_tokens": 25,
+                "gen_tok_s": 0.52,
+                "load_s": 0.0,
+                "cache_hit": false
+              },
+              {
+                "ttft_s": 7.6,
+                "total_s": 62.1,
+                "prompt_tokens": 88,
+                "prompt_tok_s": 11.7,
+                "gen_tokens": 39,
+                "gen_tok_s": 0.72,
+                "load_s": 0.0,
+                "cache_hit": false
+              },
+              {
+                "ttft_s": 5.0,
+                "total_s": 56.22,
+                "prompt_tokens": 89,
+                "prompt_tok_s": 18.6,
+                "gen_tokens": 39,
+                "gen_tok_s": 0.76,
+                "load_s": 0.0,
+                "cache_hit": false
+              }
+            ],
+            "cache_hits": 0,
+            "ttft_s": {
+              "n": 3,
+              "median": 5.0,
+              "min": 3.3,
+              "max": 7.6,
+              "p25": 4.15,
+              "p75": 6.3
+            },
+            "total_s": {
+              "n": 3,
+              "median": 56.22,
+              "min": 51.3,
+              "max": 62.1,
+              "p25": 53.76,
+              "p75": 59.16
+            },
+            "prompt_tok_s": {
+              "n": 3,
+              "median": 18.6,
+              "min": 11.7,
+              "max": 29.3,
+              "p25": 15.15,
+              "p75": 23.95
+            },
+            "gen_tok_s": {
+              "n": 3,
+              "median": 0.72,
+              "min": 0.52,
+              "max": 0.76,
+              "p25": 0.62,
+              "p75": 0.74
+            },
+            "prompt_tokens": 89,
+            "gen_tokens": {
+              "n": 3,
+              "median": 39.0,
+              "min": 25.0,
+              "max": 39.0,
+              "p25": 32.0,
+              "p75": 39.0
+            }
+          },
+          "npc_first_turn": {
+            "runs": [
+              {
+                "ttft_s": 3.09,
+                "total_s": 92.48,
+                "prompt_tokens": 97,
+                "prompt_tok_s": 32.3,
+                "gen_tokens": 64,
+                "gen_tok_s": 0.72,
+                "load_s": 0.0,
+                "cache_hit": false
+              },
+              {
+                "ttft_s": 2.4,
+                "total_s": 71.01,
+                "prompt_tokens": 96,
+                "prompt_tok_s": 45.8,
+                "gen_tokens": 64,
+                "gen_tok_s": 0.93,
+                "load_s": 0.0,
+                "cache_hit": false
+              },
+              {
+                "ttft_s": 1.49,
+                "total_s": 87.89,
+                "prompt_tokens": 96,
+                "prompt_tok_s": 74.7,
+                "gen_tokens": 64,
+                "gen_tok_s": 0.74,
+                "load_s": 0.0,
+                "cache_hit": false
+              }
+            ],
+            "cache_hits": 0,
+            "ttft_s": {
+              "n": 3,
+              "median": 2.4,
+              "min": 1.49,
+              "max": 3.09,
+              "p25": 1.94,
+              "p75": 2.75
+            },
+            "total_s": {
+              "n": 3,
+              "median": 87.89,
+              "min": 71.01,
+              "max": 92.48,
+              "p25": 79.45,
+              "p75": 90.19
+            },
+            "prompt_tok_s": {
+              "n": 3,
+              "median": 45.8,
+              "min": 32.3,
+              "max": 74.7,
+              "p25": 39.05,
+              "p75": 60.25
+            },
+            "gen_tok_s": {
+              "n": 3,
+              "median": 0.74,
+              "min": 0.72,
+              "max": 0.93,
+              "p25": 0.73,
+              "p75": 0.83
+            },
+            "prompt_tokens": 96,
+            "gen_tokens": {
+              "n": 3,
+              "median": 64.0,
+              "min": 64.0,
+              "max": 64.0,
+              "p25": 64.0,
+              "p75": 64.0
+            }
+          }
+        }
+      }
+    },
+    {
+      "spike": "SPIKE-6",
+      "config": "cpu-capped-3-t3",
+      "column": "cpu",
+      "env": {
+        "date": "2026-11-01",
+        "cpu": "AMD Ryzen 9 9900X 12-Core Processor",
+        "arch": "x86_64",
+        "cpuset_threads": 24,
+        "cgroup_cpu_max": "max 100000",
+        "cgroup_memory_max": "max",
+        "cuda_visible_devices": null,
+        "python": "3.11.18",
+        "hardware_label": "AMD Ryzen 9 9900X 12-Core Processor, 60 GB host",
+        "ollama": "0.40.3",
+        "model": "lorekeeper",
+        "model_digest": "58b2a62db3a2",
+        "url": "http://127.0.0.1:11500",
+        "num_thread": null
+      },
+      "metrics": {
+        "shapes": {
+          "continuity_verify": {
+            "runs": [
+              {
+                "ttft_s": 1.82,
+                "total_s": 5.84,
+                "prompt_tokens": 87,
+                "prompt_tok_s": 48.0,
+                "gen_tokens": 25,
+                "gen_tok_s": 6.21,
+                "load_s": 0.0,
+                "cache_hit": false
+              },
+              {
+                "ttft_s": 1.9,
+                "total_s": 8.33,
+                "prompt_tokens": 87,
+                "prompt_tok_s": 45.8,
+                "gen_tokens": 39,
+                "gen_tok_s": 6.07,
+                "load_s": 0.0,
+                "cache_hit": false
+              },
+              {
+                "ttft_s": 1.84,
+                "total_s": 7.94,
+                "prompt_tokens": 87,
+                "prompt_tok_s": 47.4,
+                "gen_tokens": 35,
+                "gen_tok_s": 5.74,
+                "load_s": 0.0,
+                "cache_hit": false
+              }
+            ],
+            "cache_hits": 0,
+            "ttft_s": {
+              "n": 3,
+              "median": 1.84,
+              "min": 1.82,
+              "max": 1.9,
+              "p25": 1.83,
+              "p75": 1.87
+            },
+            "total_s": {
+              "n": 3,
+              "median": 7.94,
+              "min": 5.84,
+              "max": 8.33,
+              "p25": 6.89,
+              "p75": 8.13
+            },
+            "prompt_tok_s": {
+              "n": 3,
+              "median": 47.4,
+              "min": 45.8,
+              "max": 48.0,
+              "p25": 46.6,
+              "p75": 47.7
+            },
+            "gen_tok_s": {
+              "n": 3,
+              "median": 6.07,
+              "min": 5.74,
+              "max": 6.21,
+              "p25": 5.91,
+              "p75": 6.14
+            },
+            "prompt_tokens": 87,
+            "gen_tokens": {
+              "n": 3,
+              "median": 35.0,
+              "min": 25.0,
+              "max": 39.0,
+              "p25": 30.0,
+              "p75": 37.0
+            }
+          },
+          "npc_first_turn": {
+            "runs": [
+              {
+                "ttft_s": 1.92,
+                "total_s": 13.41,
+                "prompt_tokens": 97,
+                "prompt_tok_s": 50.5,
+                "gen_tokens": 64,
+                "gen_tok_s": 5.57,
+                "load_s": 0.0,
+                "cache_hit": false
+              },
+              {
+                "ttft_s": 1.15,
+                "total_s": 11.6,
+                "prompt_tokens": 96,
+                "prompt_tok_s": 83.9,
+                "gen_tokens": 64,
+                "gen_tok_s": 6.12,
+                "load_s": 0.0,
+                "cache_hit": false
+              },
+              {
+                "ttft_s": 0.89,
+                "total_s": 11.93,
+                "prompt_tokens": 95,
+                "prompt_tok_s": 107.7,
+                "gen_tokens": 64,
+                "gen_tok_s": 5.8,
+                "load_s": 0.0,
+                "cache_hit": false
+              }
+            ],
+            "cache_hits": 0,
+            "ttft_s": {
+              "n": 3,
+              "median": 1.15,
+              "min": 0.89,
+              "max": 1.92,
+              "p25": 1.02,
+              "p75": 1.53
+            },
+            "total_s": {
+              "n": 3,
+              "median": 11.93,
+              "min": 11.6,
+              "max": 13.41,
+              "p25": 11.77,
+              "p75": 12.67
+            },
+            "prompt_tok_s": {
+              "n": 3,
+              "median": 83.9,
+              "min": 50.5,
+              "max": 107.7,
+              "p25": 67.2,
+              "p75": 95.8
+            },
+            "gen_tok_s": {
+              "n": 3,
+              "median": 5.8,
+              "min": 5.57,
+              "max": 6.12,
+              "p25": 5.69,
+              "p75": 5.96
+            },
+            "prompt_tokens": 95,
+            "gen_tokens": {
+              "n": 3,
+              "median": 64.0,
+              "min": 64.0,
+              "max": 64.0,
+              "p25": 64.0,
+              "p75": 64.0
+            }
+          }
+        }
+      }
+    },
+    {
+      "spike": "SPIKE-6",
+      "config": "cpu-ref4",
+      "column": "cpu",
+      "env": {
+        "date": "2026-11-01",
+        "cpu": "AMD Ryzen 9 9900X 12-Core Processor",
+        "arch": "x86_64",
+        "cpuset_threads": 24,
+        "cgroup_cpu_max": "max 100000",
+        "cgroup_memory_max": "max",
+        "cuda_visible_devices": null,
+        "python": "3.11.18",
+        "hardware_label": "AMD Ryzen 9 9900X 12-Core Processor, 60 GB host",
+        "ollama": "0.40.3",
+        "model": "lorekeeper",
+        "model_digest": "9e042e72bd1e",
+        "url": "http://127.0.0.1:11500",
+        "num_thread": null
+      },
+      "metrics": {
+        "shapes": {
+          "extraction_50": {
+            "runs": [
+              {
+                "ttft_s": 17.93,
+                "total_s": 67.76,
+                "prompt_tokens": 1628,
+                "prompt_tok_s": 90.8,
+                "gen_tokens": 400,
+                "gen_tok_s": 8.03,
+                "load_s": 0.0,
+                "cache_hit": false
+              },
+              {
+                "ttft_s": 17.93,
+                "total_s": 68.89,
+                "prompt_tokens": 1629,
+                "prompt_tok_s": 90.9,
+                "gen_tokens": 400,
+                "gen_tok_s": 7.85,
+                "load_s": 0.0,
+                "cache_hit": false
+              },
+              {
+                "ttft_s": 18.35,
+                "total_s": 70.22,
+                "prompt_tokens": 1628,
+                "prompt_tok_s": 89.3,
+                "gen_tokens": 400,
+                "gen_tok_s": 7.71,
+                "load_s": 0.0,
+                "cache_hit": false
+              }
+            ],
+            "cache_hits": 0,
+            "ttft_s": {
+              "n": 3,
+              "median": 17.93,
+              "min": 17.93,
+              "max": 18.35,
+              "p25": 17.93,
+              "p75": 18.14
+            },
+            "total_s": {
+              "n": 3,
+              "median": 68.89,
+              "min": 67.76,
+              "max": 70.22,
+              "p25": 68.33,
+              "p75": 69.56
+            },
+            "prompt_tok_s": {
+              "n": 3,
+              "median": 90.8,
+              "min": 89.3,
+              "max": 90.9,
+              "p25": 90.05,
+              "p75": 90.85
+            },
+            "gen_tok_s": {
+              "n": 3,
+              "median": 7.85,
+              "min": 7.71,
+              "max": 8.03,
+              "p25": 7.78,
+              "p75": 7.94
+            },
+            "prompt_tokens": 1628,
+            "gen_tokens": {
+              "n": 3,
+              "median": 400.0,
+              "min": 400.0,
+              "max": 400.0,
+              "p25": 400.0,
+              "p75": 400.0
+            }
+          },
+          "extraction_300": {
+            "runs": [
+              {
+                "ttft_s": 23.43,
+                "total_s": 75.22,
+                "prompt_tokens": 2051,
+                "prompt_tok_s": 87.7,
+                "gen_tokens": 400,
+                "gen_tok_s": 7.72,
+                "load_s": 0.0,
+                "cache_hit": false
+              },
+              {
+                "ttft_s": 0.19,
+                "total_s": 51.32,
+                "prompt_tokens": 2051,
+                "prompt_tok_s": 15931.7,
+                "gen_tokens": 400,
+                "gen_tok_s": 7.82,
+                "load_s": 0.0,
+                "cache_hit": true
+              },
+              {
+                "ttft_s": 0.19,
+                "total_s": 51.34,
+                "prompt_tokens": 2051,
+                "prompt_tok_s": 15999.8,
+                "gen_tokens": 400,
+                "gen_tok_s": 7.82,
+                "load_s": 0.0,
+                "cache_hit": true
+              }
+            ],
+            "cache_hits": 2,
+            "ttft_s": {
+              "n": 1,
+              "median": 23.43,
+              "min": 23.43,
+              "max": 23.43,
+              "p25": 23.43,
+              "p75": 23.43
+            },
+            "total_s": {
+              "n": 1,
+              "median": 75.22,
+              "min": 75.22,
+              "max": 75.22,
+              "p25": 75.22,
+              "p75": 75.22
+            },
+            "prompt_tok_s": {
+              "n": 1,
+              "median": 87.7,
+              "min": 87.7,
+              "max": 87.7,
+              "p25": 87.7,
+              "p75": 87.7
+            },
+            "gen_tok_s": {
+              "n": 3,
+              "median": 7.82,
+              "min": 7.72,
+              "max": 7.82,
+              "p25": 7.77,
+              "p75": 7.82
+            },
+            "prompt_tokens": 2051,
+            "gen_tokens": {
+              "n": 3,
+              "median": 400.0,
+              "min": 400.0,
+              "max": 400.0,
+              "p25": 400.0,
+              "p75": 400.0
+            }
+          },
+          "continuity_verify": {
+            "runs": [
+              {
+                "ttft_s": 0.94,
+                "total_s": 5.29,
+                "prompt_tokens": 86,
+                "prompt_tok_s": 92.0,
+                "gen_tokens": 39,
+                "gen_tok_s": 8.97,
+                "load_s": 0.0,
+                "cache_hit": false
+              },
+              {
+                "ttft_s": 0.94,
+                "total_s": 3.7,
+                "prompt_tokens": 86,
+                "prompt_tok_s": 91.8,
+                "gen_tokens": 25,
+                "gen_tok_s": 9.05,
+                "load_s": 0.0,
+                "cache_hit": false
+              },
+              {
+                "ttft_s": 0.95,
+                "total_s": 5.29,
+                "prompt_tokens": 88,
+                "prompt_tok_s": 93.5,
+                "gen_tokens": 39,
+                "gen_tok_s": 8.97,
+                "load_s": 0.0,
+                "cache_hit": false
+              }
+            ],
+            "cache_hits": 0,
+            "ttft_s": {
+              "n": 3,
+              "median": 0.94,
+              "min": 0.94,
+              "max": 0.95,
+              "p25": 0.94,
+              "p75": 0.94
+            },
+            "total_s": {
+              "n": 3,
+              "median": 5.29,
+              "min": 3.7,
+              "max": 5.29,
+              "p25": 4.5,
+              "p75": 5.29
+            },
+            "prompt_tok_s": {
+              "n": 3,
+              "median": 92.0,
+              "min": 91.8,
+              "max": 93.5,
+              "p25": 91.9,
+              "p75": 92.75
+            },
+            "gen_tok_s": {
+              "n": 3,
+              "median": 8.97,
+              "min": 8.97,
+              "max": 9.05,
+              "p25": 8.97,
+              "p75": 9.01
+            },
+            "prompt_tokens": 88,
+            "gen_tokens": {
+              "n": 3,
+              "median": 39.0,
+              "min": 25.0,
+              "max": 39.0,
+              "p25": 32.0,
+              "p75": 39.0
+            }
+          },
+          "rolling_recap": {
+            "runs": [
+              {
+                "ttft_s": 5.43,
+                "total_s": 24.16,
+                "prompt_tokens": 514,
+                "prompt_tok_s": 95.0,
+                "gen_tokens": 160,
+                "gen_tok_s": 8.54,
+                "load_s": 0.0,
+                "cache_hit": false
+              },
+              {
+                "ttft_s": 5.52,
+                "total_s": 23.6,
+                "prompt_tokens": 518,
+                "prompt_tok_s": 93.9,
+                "gen_tokens": 153,
+                "gen_tok_s": 8.46,
+                "load_s": 0.0,
+                "cache_hit": false
+              },
+              {
+                "ttft_s": 5.71,
+                "total_s": 25.37,
+                "prompt_tokens": 518,
+                "prompt_tok_s": 92.3,
+                "gen_tokens": 160,
+                "gen_tok_s": 8.14,
+                "load_s": 0.0,
+                "cache_hit": false
+              }
+            ],
+            "cache_hits": 0,
+            "ttft_s": {
+              "n": 3,
+              "median": 5.52,
+              "min": 5.43,
+              "max": 5.71,
+              "p25": 5.47,
+              "p75": 5.62
+            },
+            "total_s": {
+              "n": 3,
+              "median": 24.16,
+              "min": 23.6,
+              "max": 25.37,
+              "p25": 23.88,
+              "p75": 24.77
+            },
+            "prompt_tok_s": {
+              "n": 3,
+              "median": 93.9,
+              "min": 92.3,
+              "max": 95.0,
+              "p25": 93.1,
+              "p75": 94.45
+            },
+            "gen_tok_s": {
+              "n": 3,
+              "median": 8.46,
+              "min": 8.14,
+              "max": 8.54,
+              "p25": 8.3,
+              "p75": 8.5
+            },
+            "prompt_tokens": 518,
+            "gen_tokens": {
+              "n": 3,
+              "median": 160.0,
+              "min": 153.0,
+              "max": 160.0,
+              "p25": 156.0,
+              "p75": 160.0
+            }
+          },
+          "npc_first_turn": {
+            "runs": [
+              {
+                "ttft_s": 1.12,
+                "total_s": 19.13,
+                "prompt_tokens": 95,
+                "prompt_tok_s": 85.4,
+                "gen_tokens": 150,
+                "gen_tok_s": 8.33,
+                "load_s": 0.0,
+                "cache_hit": false
+              },
+              {
+                "ttft_s": 1.04,
+                "total_s": 19.04,
+                "prompt_tokens": 95,
+                "prompt_tok_s": 91.6,
+                "gen_tokens": 150,
+                "gen_tok_s": 8.33,
+                "load_s": 0.0,
+                "cache_hit": false
+              },
+              {
+                "ttft_s": 1.03,
+                "total_s": 19.08,
+                "prompt_tokens": 95,
+                "prompt_tok_s": 92.5,
+                "gen_tokens": 150,
+                "gen_tok_s": 8.31,
+                "load_s": 0.0,
+                "cache_hit": false
+              }
+            ],
+            "cache_hits": 0,
+            "ttft_s": {
+              "n": 3,
+              "median": 1.04,
+              "min": 1.03,
+              "max": 1.12,
+              "p25": 1.04,
+              "p75": 1.08
+            },
+            "total_s": {
+              "n": 3,
+              "median": 19.08,
+              "min": 19.04,
+              "max": 19.13,
+              "p25": 19.06,
+              "p75": 19.1
+            },
+            "prompt_tok_s": {
+              "n": 3,
+              "median": 91.6,
+              "min": 85.4,
+              "max": 92.5,
+              "p25": 88.5,
+              "p75": 92.05
+            },
+            "gen_tok_s": {
+              "n": 3,
+              "median": 8.33,
+              "min": 8.31,
+              "max": 8.33,
+              "p25": 8.32,
+              "p75": 8.33
+            },
+            "prompt_tokens": 95,
+            "gen_tokens": {
+              "n": 3,
+              "median": 150.0,
+              "min": 150.0,
+              "max": 150.0,
+              "p25": 150.0,
+              "p75": 150.0
+            }
+          },
+          "recap_draft_300": {
+            "runs": [
+              {
+                "ttft_s": 10.13,
+                "total_s": 66.78,
+                "prompt_tokens": 939,
+                "prompt_tok_s": 92.8,
+                "gen_tokens": 450,
+                "gen_tok_s": 7.94,
+                "load_s": 0.0,
+                "cache_hit": false
+              },
+              {
+                "ttft_s": 10.34,
+                "total_s": 64.99,
+                "prompt_tokens": 940,
+                "prompt_tok_s": 91.0,
+                "gen_tokens": 449,
+                "gen_tok_s": 8.22,
+                "load_s": 0.0,
+                "cache_hit": false
+              },
+              {
+                "ttft_s": 10.06,
+                "total_s": 64.22,
+                "prompt_tokens": 941,
+                "prompt_tok_s": 93.6,
+                "gen_tokens": 450,
+                "gen_tok_s": 8.31,
+                "load_s": 0.0,
+                "cache_hit": false
+              }
+            ],
+            "cache_hits": 0,
+            "ttft_s": {
+              "n": 3,
+              "median": 10.13,
+              "min": 10.06,
+              "max": 10.34,
+              "p25": 10.1,
+              "p75": 10.23
+            },
+            "total_s": {
+              "n": 3,
+              "median": 64.99,
+              "min": 64.22,
+              "max": 66.78,
+              "p25": 64.6,
+              "p75": 65.88
+            },
+            "prompt_tok_s": {
+              "n": 3,
+              "median": 92.8,
+              "min": 91.0,
+              "max": 93.6,
+              "p25": 91.9,
+              "p75": 93.2
+            },
+            "gen_tok_s": {
+              "n": 3,
+              "median": 8.22,
+              "min": 7.94,
+              "max": 8.31,
+              "p25": 8.08,
+              "p75": 8.27
+            },
+            "prompt_tokens": 941,
+            "gen_tokens": {
+              "n": 3,
+              "median": 450.0,
+              "min": 449.0,
+              "max": 450.0,
+              "p25": 450.0,
+              "p75": 450.0
+            }
+          }
+        },
+        "structured": {
+          "calls": 10,
+          "first_try_valid": 10,
+          "valid_after_repair": 0,
+          "failed": 0,
+          "latency_s": {
+            "n": 10,
+            "median": 32.4,
+            "min": 24.4,
+            "max": 53.0,
+            "p25": 31.1,
+            "p75": 37.5
+          }
+        }
+      }
+    },
+    {
+      "spike": "SPIKE-6",
+      "config": "cpu-ref4-default-threads",
+      "column": "cpu",
+      "env": {
+        "date": "2026-11-01",
+        "cpu": "AMD Ryzen 9 9900X 12-Core Processor",
+        "arch": "x86_64",
+        "cpuset_threads": 24,
+        "cgroup_cpu_max": "max 100000",
+        "cgroup_memory_max": "max",
+        "cuda_visible_devices": null,
+        "python": "3.11.18",
+        "hardware_label": "AMD Ryzen 9 9900X 12-Core Processor, 60 GB host",
+        "ollama": "0.40.3",
+        "model": "lorekeeper",
+        "model_digest": "68ffea1422de",
+        "url": "http://127.0.0.1:11500",
+        "num_thread": null
+      },
+      "metrics": {
+        "shapes": {
+          "continuity_verify": {
+            "runs": [
+              {
+                "ttft_s": 3.41,
+                "total_s": 85.76,
+                "prompt_tokens": 87,
+                "prompt_tok_s": 25.6,
+                "gen_tokens": 32,
+                "gen_tok_s": 0.39,
+                "load_s": 0.0,
+                "cache_hit": false
+              },
+              {
+                "ttft_s": 3.42,
+                "total_s": 86.22,
+                "prompt_tokens": 88,
+                "prompt_tok_s": 25.8,
+                "gen_tokens": 32,
+                "gen_tok_s": 0.39,
+                "load_s": 0.0,
+                "cache_hit": false
+              },
+              {
+                "ttft_s": 3.41,
+                "total_s": 85.98,
+                "prompt_tokens": 88,
+                "prompt_tok_s": 25.9,
+                "gen_tokens": 32,
+                "gen_tok_s": 0.39,
+                "load_s": 0.0,
+                "cache_hit": false
+              }
+            ],
+            "cache_hits": 0,
+            "ttft_s": {
+              "n": 3,
+              "median": 3.41,
+              "min": 3.41,
+              "max": 3.42,
+              "p25": 3.41,
+              "p75": 3.42
+            },
+            "total_s": {
+              "n": 3,
+              "median": 85.98,
+              "min": 85.76,
+              "max": 86.22,
+              "p25": 85.87,
+              "p75": 86.1
+            },
+            "prompt_tok_s": {
+              "n": 3,
+              "median": 25.8,
+              "min": 25.6,
+              "max": 25.9,
+              "p25": 25.7,
+              "p75": 25.85
+            },
+            "gen_tok_s": {
+              "n": 3,
+              "median": 0.39,
+              "min": 0.39,
+              "max": 0.39,
+              "p25": 0.39,
+              "p75": 0.39
+            },
+            "prompt_tokens": 88,
+            "gen_tokens": {
+              "n": 3,
+              "median": 32.0,
+              "min": 32.0,
+              "max": 32.0,
+              "p25": 32.0,
+              "p75": 32.0
+            }
+          }
+        }
+      }
+    },
+    {
+      "spike": "SPIKE-6",
+      "config": "cpu-uncapped",
+      "column": "cpu",
+      "env": {
+        "date": "2026-11-01",
+        "cpu": "AMD Ryzen 9 9900X 12-Core Processor",
+        "arch": "x86_64",
+        "cpuset_threads": 24,
+        "cgroup_cpu_max": "max 100000",
+        "cgroup_memory_max": "max",
+        "cuda_visible_devices": null,
+        "python": "3.11.18",
+        "hardware_label": "AMD Ryzen 9 9900X 12-Core Processor, 60 GB host",
+        "ollama": "0.40.3",
+        "model": "lorekeeper",
+        "model_digest": "68ffea1422de",
+        "url": "http://127.0.0.1:11500",
+        "num_thread": null
+      },
+      "metrics": {
+        "shapes": {
+          "extraction_50": {
+            "runs": [
+              {
+                "ttft_s": 10.01,
+                "total_s": 64.44,
+                "prompt_tokens": 1627,
+                "prompt_tok_s": 162.7,
+                "gen_tokens": 400,
+                "gen_tok_s": 7.35,
+                "load_s": 0.0,
+                "cache_hit": false
+              },
+              {
+                "ttft_s": 9.97,
+                "total_s": 62.15,
+                "prompt_tokens": 1627,
+                "prompt_tok_s": 163.3,
+                "gen_tokens": 400,
+                "gen_tok_s": 7.67,
+                "load_s": 0.0,
+                "cache_hit": false
+              },
+              {
+                "ttft_s": 9.24,
+                "total_s": 60.97,
+                "prompt_tokens": 1629,
+                "prompt_tok_s": 176.4,
+                "gen_tokens": 400,
+                "gen_tok_s": 7.73,
+                "load_s": 0.0,
+                "cache_hit": false
+              }
+            ],
+            "cache_hits": 0,
+            "ttft_s": {
+              "n": 3,
+              "median": 9.97,
+              "min": 9.24,
+              "max": 10.01,
+              "p25": 9.61,
+              "p75": 9.99
+            },
+            "total_s": {
+              "n": 3,
+              "median": 62.15,
+              "min": 60.97,
+              "max": 64.44,
+              "p25": 61.56,
+              "p75": 63.3
+            },
+            "prompt_tok_s": {
+              "n": 3,
+              "median": 163.3,
+              "min": 162.7,
+              "max": 176.4,
+              "p25": 163.0,
+              "p75": 169.85
+            },
+            "gen_tok_s": {
+              "n": 3,
+              "median": 7.67,
+              "min": 7.35,
+              "max": 7.73,
+              "p25": 7.51,
+              "p75": 7.7
+            },
+            "prompt_tokens": 1629,
+            "gen_tokens": {
+              "n": 3,
+              "median": 400.0,
+              "min": 400.0,
+              "max": 400.0,
+              "p25": 400.0,
+              "p75": 400.0
+            }
+          },
+          "extraction_300": {
+            "runs": [
+              {
+                "ttft_s": 11.77,
+                "total_s": 64.11,
+                "prompt_tokens": 2051,
+                "prompt_tok_s": 174.5,
+                "gen_tokens": 400,
+                "gen_tok_s": 7.64,
+                "load_s": 0.0,
+                "cache_hit": false
+              },
+              {
+                "ttft_s": 0.18,
+                "total_s": 52.58,
+                "prompt_tokens": 2051,
+                "prompt_tok_s": 15638.3,
+                "gen_tokens": 400,
+                "gen_tok_s": 7.63,
+                "load_s": 0.0,
+                "cache_hit": true
+              },
+              {
+                "ttft_s": 0.18,
+                "total_s": 52.6,
+                "prompt_tokens": 2051,
+                "prompt_tok_s": 15747.4,
+                "gen_tokens": 400,
+                "gen_tok_s": 7.63,
+                "load_s": 0.0,
+                "cache_hit": true
+              }
+            ],
+            "cache_hits": 2,
+            "ttft_s": {
+              "n": 1,
+              "median": 11.77,
+              "min": 11.77,
+              "max": 11.77,
+              "p25": 11.77,
+              "p75": 11.77
+            },
+            "total_s": {
+              "n": 1,
+              "median": 64.11,
+              "min": 64.11,
+              "max": 64.11,
+              "p25": 64.11,
+              "p75": 64.11
+            },
+            "prompt_tok_s": {
+              "n": 1,
+              "median": 174.5,
+              "min": 174.5,
+              "max": 174.5,
+              "p25": 174.5,
+              "p75": 174.5
+            },
+            "gen_tok_s": {
+              "n": 3,
+              "median": 7.63,
+              "min": 7.63,
+              "max": 7.64,
+              "p25": 7.63,
+              "p75": 7.63
+            },
+            "prompt_tokens": 2051,
+            "gen_tokens": {
+              "n": 3,
+              "median": 400.0,
+              "min": 400.0,
+              "max": 400.0,
+              "p25": 400.0,
+              "p75": 400.0
+            }
+          },
+          "continuity_verify": {
+            "runs": [
+              {
+                "ttft_s": 0.48,
+                "total_s": 5.13,
+                "prompt_tokens": 87,
+                "prompt_tok_s": 182.8,
+                "gen_tokens": 39,
+                "gen_tok_s": 8.4,
+                "load_s": 0.0,
+                "cache_hit": false
+              },
+              {
+                "ttft_s": 0.49,
+                "total_s": 3.43,
+                "prompt_tokens": 87,
+                "prompt_tok_s": 178.7,
+                "gen_tokens": 25,
+                "gen_tok_s": 8.51,
+                "load_s": 0.0,
+                "cache_hit": false
+              },
+              {
+                "ttft_s": 0.48,
+                "total_s": 5.13,
+                "prompt_tokens": 85,
+                "prompt_tok_s": 178.0,
+                "gen_tokens": 39,
+                "gen_tok_s": 8.39,
+                "load_s": 0.0,
+                "cache_hit": false
+              }
+            ],
+            "cache_hits": 0,
+            "ttft_s": {
+              "n": 3,
+              "median": 0.48,
+              "min": 0.48,
+              "max": 0.49,
+              "p25": 0.48,
+              "p75": 0.48
+            },
+            "total_s": {
+              "n": 3,
+              "median": 5.13,
+              "min": 3.43,
+              "max": 5.13,
+              "p25": 4.28,
+              "p75": 5.13
+            },
+            "prompt_tok_s": {
+              "n": 3,
+              "median": 178.7,
+              "min": 178.0,
+              "max": 182.8,
+              "p25": 178.35,
+              "p75": 180.75
+            },
+            "gen_tok_s": {
+              "n": 3,
+              "median": 8.4,
+              "min": 8.39,
+              "max": 8.51,
+              "p25": 8.39,
+              "p75": 8.46
+            },
+            "prompt_tokens": 85,
+            "gen_tokens": {
+              "n": 3,
+              "median": 39.0,
+              "min": 25.0,
+              "max": 39.0,
+              "p25": 32.0,
+              "p75": 39.0
+            }
+          },
+          "rolling_recap": {
+            "runs": [
+              {
+                "ttft_s": 2.9,
+                "total_s": 22.69,
+                "prompt_tokens": 518,
+                "prompt_tok_s": 179.3,
+                "gen_tokens": 160,
+                "gen_tok_s": 8.08,
+                "load_s": 0.0,
+                "cache_hit": false
+              },
+              {
+                "ttft_s": 2.91,
+                "total_s": 22.71,
+                "prompt_tokens": 517,
+                "prompt_tok_s": 178.2,
+                "gen_tokens": 160,
+                "gen_tok_s": 8.08,
+                "load_s": 0.0,
+                "cache_hit": false
+              },
+              {
+                "ttft_s": 2.81,
+                "total_s": 22.59,
+                "prompt_tokens": 514,
+                "prompt_tok_s": 183.4,
+                "gen_tokens": 160,
+                "gen_tok_s": 8.09,
+                "load_s": 0.0,
+                "cache_hit": false
+              }
+            ],
+            "cache_hits": 0,
+            "ttft_s": {
+              "n": 3,
+              "median": 2.9,
+              "min": 2.81,
+              "max": 2.91,
+              "p25": 2.85,
+              "p75": 2.91
+            },
+            "total_s": {
+              "n": 3,
+              "median": 22.69,
+              "min": 22.59,
+              "max": 22.71,
+              "p25": 22.64,
+              "p75": 22.7
+            },
+            "prompt_tok_s": {
+              "n": 3,
+              "median": 179.3,
+              "min": 178.2,
+              "max": 183.4,
+              "p25": 178.75,
+              "p75": 181.35
+            },
+            "gen_tok_s": {
+              "n": 3,
+              "median": 8.08,
+              "min": 8.08,
+              "max": 8.09,
+              "p25": 8.08,
+              "p75": 8.09
+            },
+            "prompt_tokens": 514,
+            "gen_tokens": {
+              "n": 3,
+              "median": 160.0,
+              "min": 160.0,
+              "max": 160.0,
+              "p25": 160.0,
+              "p75": 160.0
+            }
+          },
+          "npc_first_turn": {
+            "runs": [
+              {
+                "ttft_s": 0.53,
+                "total_s": 18.86,
+                "prompt_tokens": 94,
+                "prompt_tok_s": 177.7,
+                "gen_tokens": 150,
+                "gen_tok_s": 8.18,
+                "load_s": 0.0,
+                "cache_hit": false
+              },
+              {
+                "ttft_s": 0.55,
+                "total_s": 18.85,
+                "prompt_tokens": 97,
+                "prompt_tok_s": 176.9,
+                "gen_tokens": 150,
+                "gen_tok_s": 8.2,
+                "load_s": 0.0,
+                "cache_hit": false
+              },
+              {
+                "ttft_s": 0.55,
+                "total_s": 12.94,
+                "prompt_tokens": 97,
+                "prompt_tok_s": 176.4,
+                "gen_tokens": 102,
+                "gen_tok_s": 8.24,
+                "load_s": 0.0,
+                "cache_hit": false
+              }
+            ],
+            "cache_hits": 0,
+            "ttft_s": {
+              "n": 3,
+              "median": 0.55,
+              "min": 0.53,
+              "max": 0.55,
+              "p25": 0.54,
+              "p75": 0.55
+            },
+            "total_s": {
+              "n": 3,
+              "median": 18.85,
+              "min": 12.94,
+              "max": 18.86,
+              "p25": 15.89,
+              "p75": 18.86
+            },
+            "prompt_tok_s": {
+              "n": 3,
+              "median": 176.9,
+              "min": 176.4,
+              "max": 177.7,
+              "p25": 176.65,
+              "p75": 177.3
+            },
+            "gen_tok_s": {
+              "n": 3,
+              "median": 8.2,
+              "min": 8.18,
+              "max": 8.24,
+              "p25": 8.19,
+              "p75": 8.22
+            },
+            "prompt_tokens": 97,
+            "gen_tokens": {
+              "n": 3,
+              "median": 150.0,
+              "min": 102.0,
+              "max": 150.0,
+              "p25": 126.0,
+              "p75": 150.0
+            }
+          },
+          "recap_draft_300": {
+            "runs": [
+              {
+                "ttft_s": 5.21,
+                "total_s": 60.7,
+                "prompt_tokens": 941,
+                "prompt_tok_s": 181.0,
+                "gen_tokens": 439,
+                "gen_tok_s": 7.91,
+                "load_s": 0.0,
+                "cache_hit": false
+              },
+              {
+                "ttft_s": 5.2,
+                "total_s": 52.91,
+                "prompt_tokens": 941,
+                "prompt_tok_s": 181.2,
+                "gen_tokens": 378,
+                "gen_tok_s": 7.92,
+                "load_s": 0.0,
+                "cache_hit": false
+              },
+              {
+                "ttft_s": 5.21,
+                "total_s": 62.14,
+                "prompt_tokens": 940,
+                "prompt_tok_s": 180.7,
+                "gen_tokens": 450,
+                "gen_tok_s": 7.9,
+                "load_s": 0.0,
+                "cache_hit": false
+              }
+            ],
+            "cache_hits": 0,
+            "ttft_s": {
+              "n": 3,
+              "median": 5.21,
+              "min": 5.2,
+              "max": 5.21,
+              "p25": 5.21,
+              "p75": 5.21
+            },
+            "total_s": {
+              "n": 3,
+              "median": 60.7,
+              "min": 52.91,
+              "max": 62.14,
+              "p25": 56.8,
+              "p75": 61.42
+            },
+            "prompt_tok_s": {
+              "n": 3,
+              "median": 181.0,
+              "min": 180.7,
+              "max": 181.2,
+              "p25": 180.85,
+              "p75": 181.1
+            },
+            "gen_tok_s": {
+              "n": 3,
+              "median": 7.91,
+              "min": 7.9,
+              "max": 7.92,
+              "p25": 7.91,
+              "p75": 7.92
+            },
+            "prompt_tokens": 940,
+            "gen_tokens": {
+              "n": 3,
+              "median": 439.0,
+              "min": 378.0,
+              "max": 450.0,
+              "p25": 408.0,
+              "p75": 444.0
+            }
+          }
+        },
+        "structured": {
+          "calls": 10,
+          "first_try_valid": 10,
+          "valid_after_repair": 0,
+          "failed": 0,
+          "latency_s": {
+            "n": 10,
+            "median": 34.9,
+            "min": 29.3,
+            "max": 43.8,
+            "p25": 32.4,
+            "p75": 42.2
+          }
+        }
+      }
+    },
+    {
+      "spike": "SPIKE-6",
+      "config": "gpu",
+      "column": "gpu",
+      "env": {
+        "date": "2026-11-01",
+        "cpu": "AMD Ryzen 9 9900X 12-Core Processor",
+        "arch": "x86_64",
+        "cpuset_threads": 24,
+        "cgroup_cpu_max": "max 100000",
+        "cgroup_memory_max": "max",
+        "cuda_visible_devices": null,
+        "python": "3.11.18",
+        "hardware_label": "AMD Ryzen 9 9900X 12-Core Processor, 60 GB host",
+        "ollama": "0.40.3",
+        "model": "lorekeeper",
+        "model_digest": "68ffea1422de",
+        "url": "http://127.0.0.1:11434",
+        "num_thread": null
+      },
+      "metrics": {
+        "shapes": {
+          "extraction_50": {
+            "runs": [
+              {
+                "ttft_s": 0.2,
+                "total_s": 2.61,
+                "prompt_tokens": 1626,
+                "prompt_tok_s": 8424.3,
+                "gen_tokens": 400,
+                "gen_tok_s": 166.03,
+                "load_s": 0.0,
+                "cache_hit": false
+              },
+              {
+                "ttft_s": 0.2,
+                "total_s": 2.61,
+                "prompt_tokens": 1627,
+                "prompt_tok_s": 8415.5,
+                "gen_tokens": 400,
+                "gen_tok_s": 166.0,
+                "load_s": 0.0,
+                "cache_hit": false
+              },
+              {
+                "ttft_s": 0.2,
+                "total_s": 2.61,
+                "prompt_tokens": 1627,
+                "prompt_tok_s": 8415.5,
+                "gen_tokens": 400,
+                "gen_tok_s": 166.26,
+                "load_s": 0.0,
+                "cache_hit": false
+              }
+            ],
+            "cache_hits": 0,
+            "ttft_s": {
+              "n": 3,
+              "median": 0.2,
+              "min": 0.2,
+              "max": 0.2,
+              "p25": 0.2,
+              "p75": 0.2
+            },
+            "total_s": {
+              "n": 3,
+              "median": 2.61,
+              "min": 2.61,
+              "max": 2.61,
+              "p25": 2.61,
+              "p75": 2.61
+            },
+            "prompt_tok_s": {
+              "n": 3,
+              "median": 8415.5,
+              "min": 8415.5,
+              "max": 8424.3,
+              "p25": 8415.5,
+              "p75": 8419.9
+            },
+            "gen_tok_s": {
+              "n": 3,
+              "median": 166.03,
+              "min": 166.0,
+              "max": 166.26,
+              "p25": 166.01,
+              "p75": 166.14
+            },
+            "prompt_tokens": 1627,
+            "gen_tokens": {
+              "n": 3,
+              "median": 400.0,
+              "min": 400.0,
+              "max": 400.0,
+              "p25": 400.0,
+              "p75": 400.0
+            }
+          },
+          "extraction_300": {
+            "runs": [
+              {
+                "ttft_s": 0.26,
+                "total_s": 2.7,
+                "prompt_tokens": 2051,
+                "prompt_tok_s": 8610.3,
+                "gen_tokens": 400,
+                "gen_tok_s": 163.34,
+                "load_s": 0.0,
+                "cache_hit": false
+              },
+              {
+                "ttft_s": 0.06,
+                "total_s": 2.51,
+                "prompt_tokens": 2051,
+                "prompt_tok_s": 296216.1,
+                "gen_tokens": 400,
+                "gen_tok_s": 163.51,
+                "load_s": 0.0,
+                "cache_hit": true
+              },
+              {
+                "ttft_s": 0.06,
+                "total_s": 2.52,
+                "prompt_tokens": 2051,
+                "prompt_tok_s": 291957.3,
+                "gen_tokens": 400,
+                "gen_tok_s": 163.09,
+                "load_s": 0.0,
+                "cache_hit": true
+              }
+            ],
+            "cache_hits": 2,
+            "ttft_s": {
+              "n": 1,
+              "median": 0.26,
+              "min": 0.26,
+              "max": 0.26,
+              "p25": 0.26,
+              "p75": 0.26
+            },
+            "total_s": {
+              "n": 1,
+              "median": 2.7,
+              "min": 2.7,
+              "max": 2.7,
+              "p25": 2.7,
+              "p75": 2.7
+            },
+            "prompt_tok_s": {
+              "n": 1,
+              "median": 8610.3,
+              "min": 8610.3,
+              "max": 8610.3,
+              "p25": 8610.3,
+              "p75": 8610.3
+            },
+            "gen_tok_s": {
+              "n": 3,
+              "median": 163.34,
+              "min": 163.09,
+              "max": 163.51,
+              "p25": 163.22,
+              "p75": 163.43
+            },
+            "prompt_tokens": 2051,
+            "gen_tokens": {
+              "n": 3,
+              "median": 400.0,
+              "min": 400.0,
+              "max": 400.0,
+              "p25": 400.0,
+              "p75": 400.0
+            }
+          },
+          "continuity_verify": {
+            "runs": [
+              {
+                "ttft_s": 0.02,
+                "total_s": 0.23,
+                "prompt_tokens": 89,
+                "prompt_tok_s": 5660.5,
+                "gen_tokens": 38,
+                "gen_tok_s": 176.89,
+                "load_s": 0.0,
+                "cache_hit": false
+              },
+              {
+                "ttft_s": 0.02,
+                "total_s": 0.24,
+                "prompt_tokens": 87,
+                "prompt_tok_s": 5599.2,
+                "gen_tokens": 39,
+                "gen_tok_s": 177.95,
+                "load_s": 0.0,
+                "cache_hit": false
+              },
+              {
+                "ttft_s": 0.02,
+                "total_s": 0.23,
+                "prompt_tokens": 89,
+                "prompt_tok_s": 5580.6,
+                "gen_tokens": 38,
+                "gen_tok_s": 177.78,
+                "load_s": 0.0,
+                "cache_hit": false
+              }
+            ],
+            "cache_hits": 0,
+            "ttft_s": {
+              "n": 3,
+              "median": 0.02,
+              "min": 0.02,
+              "max": 0.02,
+              "p25": 0.02,
+              "p75": 0.02
+            },
+            "total_s": {
+              "n": 3,
+              "median": 0.23,
+              "min": 0.23,
+              "max": 0.24,
+              "p25": 0.23,
+              "p75": 0.23
+            },
+            "prompt_tok_s": {
+              "n": 3,
+              "median": 5599.2,
+              "min": 5580.6,
+              "max": 5660.5,
+              "p25": 5589.9,
+              "p75": 5629.85
+            },
+            "gen_tok_s": {
+              "n": 3,
+              "median": 177.78,
+              "min": 176.89,
+              "max": 177.95,
+              "p25": 177.33,
+              "p75": 177.87
+            },
+            "prompt_tokens": 89,
+            "gen_tokens": {
+              "n": 3,
+              "median": 38.0,
+              "min": 38.0,
+              "max": 39.0,
+              "p25": 38.0,
+              "p75": 38.0
+            }
+          },
+          "rolling_recap": {
+            "runs": [
+              {
+                "ttft_s": 0.07,
+                "total_s": 1.0,
+                "prompt_tokens": 516,
+                "prompt_tok_s": 7993.3,
+                "gen_tokens": 160,
+                "gen_tok_s": 171.84,
+                "load_s": 0.0,
+                "cache_hit": false
+              },
+              {
+                "ttft_s": 0.08,
+                "total_s": 1.01,
+                "prompt_tokens": 517,
+                "prompt_tok_s": 7406.7,
+                "gen_tokens": 160,
+                "gen_tok_s": 170.74,
+                "load_s": 0.0,
+                "cache_hit": false
+              },
+              {
+                "ttft_s": 2.65,
+                "total_s": 3.69,
+                "prompt_tokens": 518,
+                "prompt_tok_s": 195.7,
+                "gen_tokens": 160,
+                "gen_tok_s": 154.28,
+                "load_s": 0.0,
+                "cache_hit": false
+              }
+            ],
+            "cache_hits": 0,
+            "ttft_s": {
+              "n": 3,
+              "median": 0.08,
+              "min": 0.07,
+              "max": 2.65,
+              "p25": 0.08,
+              "p75": 1.36
+            },
+            "total_s": {
+              "n": 3,
+              "median": 1.01,
+              "min": 1.0,
+              "max": 3.69,
+              "p25": 1.0,
+              "p75": 2.35
+            },
+            "prompt_tok_s": {
+              "n": 3,
+              "median": 7406.7,
+              "min": 195.7,
+              "max": 7993.3,
+              "p25": 3801.2,
+              "p75": 7700.0
+            },
+            "gen_tok_s": {
+              "n": 3,
+              "median": 170.74,
+              "min": 154.28,
+              "max": 171.84,
+              "p25": 162.51,
+              "p75": 171.29
+            },
+            "prompt_tokens": 518,
+            "gen_tokens": {
+              "n": 3,
+              "median": 160.0,
+              "min": 160.0,
+              "max": 160.0,
+              "p25": 160.0,
+              "p75": 160.0
+            }
+          },
+          "npc_first_turn": {
+            "runs": [
+              {
+                "ttft_s": 0.02,
+                "total_s": 0.88,
+                "prompt_tokens": 95,
+                "prompt_tok_s": 6016.1,
+                "gen_tokens": 150,
+                "gen_tok_s": 174.3,
+                "load_s": 0.0,
+                "cache_hit": false
+              },
+              {
+                "ttft_s": 0.02,
+                "total_s": 0.83,
+                "prompt_tokens": 97,
+                "prompt_tok_s": 6035.3,
+                "gen_tokens": 141,
+                "gen_tok_s": 174.63,
+                "load_s": 0.0,
+                "cache_hit": false
+              },
+              {
+                "ttft_s": 0.02,
+                "total_s": 0.88,
+                "prompt_tokens": 95,
+                "prompt_tok_s": 5945.7,
+                "gen_tokens": 150,
+                "gen_tok_s": 174.67,
+                "load_s": 0.0,
+                "cache_hit": false
+              }
+            ],
+            "cache_hits": 0,
+            "ttft_s": {
+              "n": 3,
+              "median": 0.02,
+              "min": 0.02,
+              "max": 0.02,
+              "p25": 0.02,
+              "p75": 0.02
+            },
+            "total_s": {
+              "n": 3,
+              "median": 0.88,
+              "min": 0.83,
+              "max": 0.88,
+              "p25": 0.85,
+              "p75": 0.88
+            },
+            "prompt_tok_s": {
+              "n": 3,
+              "median": 6016.1,
+              "min": 5945.7,
+              "max": 6035.3,
+              "p25": 5980.9,
+              "p75": 6025.7
+            },
+            "gen_tok_s": {
+              "n": 3,
+              "median": 174.63,
+              "min": 174.3,
+              "max": 174.67,
+              "p25": 174.47,
+              "p75": 174.65
+            },
+            "prompt_tokens": 95,
+            "gen_tokens": {
+              "n": 3,
+              "median": 150.0,
+              "min": 141.0,
+              "max": 150.0,
+              "p25": 146.0,
+              "p75": 150.0
+            }
+          },
+          "recap_draft_300": {
+            "runs": [
+              {
+                "ttft_s": 0.12,
+                "total_s": 2.54,
+                "prompt_tokens": 940,
+                "prompt_tok_s": 8528.5,
+                "gen_tokens": 409,
+                "gen_tok_s": 168.58,
+                "load_s": 0.0,
+                "cache_hit": false
+              },
+              {
+                "ttft_s": 0.12,
+                "total_s": 2.69,
+                "prompt_tokens": 940,
+                "prompt_tok_s": 8525.8,
+                "gen_tokens": 432,
+                "gen_tok_s": 168.13,
+                "load_s": 0.0,
+                "cache_hit": false
+              },
+              {
+                "ttft_s": 0.12,
+                "total_s": 2.73,
+                "prompt_tokens": 940,
+                "prompt_tok_s": 8548.5,
+                "gen_tokens": 442,
+                "gen_tok_s": 169.04,
+                "load_s": 0.0,
+                "cache_hit": false
+              }
+            ],
+            "cache_hits": 0,
+            "ttft_s": {
+              "n": 3,
+              "median": 0.12,
+              "min": 0.12,
+              "max": 0.12,
+              "p25": 0.12,
+              "p75": 0.12
+            },
+            "total_s": {
+              "n": 3,
+              "median": 2.69,
+              "min": 2.54,
+              "max": 2.73,
+              "p25": 2.62,
+              "p75": 2.71
+            },
+            "prompt_tok_s": {
+              "n": 3,
+              "median": 8528.5,
+              "min": 8525.8,
+              "max": 8548.5,
+              "p25": 8527.15,
+              "p75": 8538.5
+            },
+            "gen_tok_s": {
+              "n": 3,
+              "median": 168.58,
+              "min": 168.13,
+              "max": 169.04,
+              "p25": 168.36,
+              "p75": 168.81
+            },
+            "prompt_tokens": 940,
+            "gen_tokens": {
+              "n": 3,
+              "median": 432.0,
+              "min": 409.0,
+              "max": 442.0,
+              "p25": 420.0,
+              "p75": 437.0
+            }
+          }
+        },
+        "structured": {
+          "calls": 50,
+          "first_try_valid": 50,
+          "valid_after_repair": 0,
+          "failed": 0,
+          "latency_s": {
+            "n": 50,
+            "median": 1.6,
+            "min": 1.2,
+            "max": 2.5,
+            "p25": 1.5,
+            "p75": 1.9
+          }
+        }
+      }
+    }
+  ]
+}

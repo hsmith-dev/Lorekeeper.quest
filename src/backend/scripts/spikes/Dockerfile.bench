@@ -1,0 +1,37 @@
+# Throwaway measurement image for the SPIKE-1/2/3 x86 re-run (E0-QA.15).
+# Ships nothing: it is never pushed, never part of a compose file, and the
+# licence gates don't scan it. One image serves both columns: torch cu128 also
+# runs on the CPU, and the CPU case hides the GPU (CUDA_VISIBLE_DEVICES="").
+#
+#   docker build -t lorekeeper-bench -f Dockerfile.bench .
+#
+# Library versions follow the M-series spike (spikes/cpu-benchmarks.md §1)
+# where it pinned them, and otherwise the versions the 2026-11-01 run used.
+# torch is a cu128 build (Blackwell sm_120 needs cu128 or later).
+FROM python:3.12-slim
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libsndfile1 \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir torch==2.11.0 --index-url https://download.pytorch.org/whl/cu128
+RUN pip install --no-cache-dir \
+      faster-whisper==1.2.1 ctranslate2==4.8.4 \
+      sentence-transformers==6.2.0 transformers==5.22.1 kokoro==0.9.4 misaki==0.9.4 soundfile psutil numpy==2.5.4 \
+      "en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl"
+
+# ctranslate2's CUDA path needs cuBLAS 12 and cuDNN 9; torch cu128 already
+# installs both as wheels.
+ENV LD_LIBRARY_PATH=/usr/local/lib/python3.12/site-packages/nvidia/cublas/lib:/usr/local/lib/python3.12/site-packages/nvidia/cudnn/lib
+
+# Bake every model so the measured runs are offline.
+RUN python -c "\
+from faster_whisper import WhisperModel; \
+[WhisperModel(s, device='cpu', compute_type='int8') for s in ('base', 'small')]; \
+from sentence_transformers import CrossEncoder; \
+[CrossEncoder(f'cross-encoder/nli-deberta-v3-{n}', device='cpu') for n in ('xsmall', 'base')]; \
+from kokoro import KPipeline; \
+p = KPipeline(lang_code='a', repo_id='hexgrad/Kokoro-82M', device='cpu'); \
+list(p('Warm up.', voice='af_heart'))"
+ENV HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+WORKDIR /bench
