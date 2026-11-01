@@ -211,6 +211,10 @@ services:
       context: ./src/services/ml
       dockerfile: Dockerfile
     restart: unless-stopped
+    # Declared-MB budget for the lazy NLI/OCR models (E0-Platform.4); empty
+    # keeps the sidecar default (2000).
+    environment:
+      ML_RESIDENT_BUDGET_MB: ${ML_RESIDENT_BUDGET_MB:-}
     networks:
       - models
     healthcheck:

@@ -1,7 +1,8 @@
 """Model interfaces, the real loaders, and the per-model slots the app serves.
 
-torch / sentence_transformers / spacy are imported only inside the real
-loader classes below, never at module import time.
+torch / sentence_transformers / spacy / transformers / easyocr / PIL /
+numpy are imported only inside the real loader and reader classes below,
+never at module import time, so the HTTP app runs (and is tested) with fakes.
 """
 
 from __future__ import annotations
@@ -42,6 +43,26 @@ class Embedder(Protocol):
 class NerModel(Protocol):
     def extract(self, text: str) -> list[Entity]:
         """spaCy entities first, then Matcher ITEM/QUEST spans."""
+
+
+NLI_LABELS = ("entailment", "neutral", "contradiction")
+
+
+class NliModel(Protocol):
+    def score(self, pairs: Sequence[tuple[str, str]]) -> list[dict[str, float]]:
+        """One {entailment, neutral, contradiction} softmax per (premise,
+        hypothesis) pair, in input order. The app calls it per chunk of
+        ML_NLI_BATCH_SIZE pairs."""
+
+
+class OcrModel(Protocol):
+    def read(self, image_bytes: bytes) -> str:
+        """The image's text: stripped non-empty lines joined with "\\n".
+        Raises InvalidImage when the bytes are not a decodable image."""
+
+
+class InvalidImage(ValueError):
+    """The upload is empty or not an image PIL can decode (422)."""
 
 
 class SentenceTransformerEmbedder:
@@ -88,22 +109,99 @@ class SpacyNer:
         return ents
 
 
+class TransformersNli:
+    """cross-encoder/nli-deberta-v3-xsmall from the path baked at image build.
+
+    Label order comes from the model's config.id2label (for this checkpoint
+    0 contradiction, 1 entailment, 2 neutral), never from a hard-coded list.
+    """
+
+    def __init__(self, path: str):
+        import torch
+        from transformers import AutoModelForSequenceClassification, AutoTokenizer
+
+        self._torch = torch
+        self._tokenizer = AutoTokenizer.from_pretrained(path)
+        self._model = AutoModelForSequenceClassification.from_pretrained(path)
+        self._model.eval()
+        id2label = self._model.config.id2label
+        self._labels = [str(id2label[i]).lower() for i in range(len(id2label))]
+        if sorted(self._labels) != sorted(NLI_LABELS):
+            raise ValueError(f"{path}: id2label {id2label!r} is not {NLI_LABELS}")
+
+    def score(self, pairs: Sequence[tuple[str, str]]) -> list[dict[str, float]]:
+        if not pairs:
+            return []
+        enc = self._tokenizer(
+            [p for p, _ in pairs], [h for _, h in pairs],
+            padding=True, truncation=True, return_tensors="pt",
+        )
+        with self._torch.inference_mode():
+            logits = self._model(**enc).logits
+        probs = self._torch.softmax(logits.float(), dim=-1).tolist()
+        return [dict(zip(self._labels, row)) for row in probs]
+
+
+class EasyOcrReader:
+    """EasyOCR "en" from the weights baked into model_dir (never downloads).
+
+    read() follows the backend's vision_service._run_extraction exactly:
+    PIL convert("RGB"), readtext(detail=0, paragraph=True), then the stripped
+    non-empty lines joined with "\\n". `reader` is injectable for tests.
+    """
+
+    def __init__(self, model_dir: str, reader: object | None = None):
+        if reader is None:
+            import easyocr
+
+            reader = easyocr.Reader(
+                ["en"], gpu=False, model_storage_directory=model_dir,
+                download_enabled=False, verbose=False,
+            )
+        self._reader = reader
+
+    def read(self, image_bytes: bytes) -> str:
+        import io
+
+        import numpy as np
+        from PIL import Image
+
+        if not image_bytes:
+            raise InvalidImage("empty upload")
+        try:
+            image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        except (OSError, ValueError, SyntaxError, Image.DecompressionBombError) as exc:
+            # UnidentifiedImageError and truncated files are OSErrors.
+            raise InvalidImage(f"not a decodable image: {type(exc).__name__}") from exc
+        results = self._reader.readtext(np.array(image), detail=0, paragraph=True)
+        return "\n".join(line.strip() for line in results if line.strip())
+
+
 class ModelSlot:
-    """One served model: lazy-loadable, with its own lock.
+    """One served model, with its own lock.
 
     The lock serialises both loading and inference for this model, so two
     requests never run the same torch/spaCy pipeline concurrently, while an
-    embed and an NER call can still run side by side.
+    embed and an NER call can still run side by side. Resident slots
+    (embeddings, NER) load in the lifespan; budget.LazySlot adds load on
+    first use and eviction under the resident-memory budget.
     """
+
+    lazy = False
+    cost_mb: int | None = None  # resident models are outside the lazy budget
 
     def __init__(self, name: str, kind: str, loader: Callable[[], object]):
         self.name = name
         self.kind = kind
         self._loader = loader
         self._model: object | None = None
-        self.state = "unloaded"  # unloaded | loading | loaded | failed
+        self.state = "not_loaded"  # not_loaded | loading | loaded | failed
         self.error: str | None = None
         self.lock = threading.Lock()
+
+    @property
+    def is_loaded(self) -> bool:
+        return self._model is not None
 
     def _ensure_loaded(self) -> object:
         # Caller holds self.lock.
@@ -126,3 +224,12 @@ class ModelSlot:
     def run(self, fn: Callable[[object], object]) -> object:
         with self.lock:
             return fn(self._ensure_loaded())
+
+    def unload(self) -> None:
+        """Drop the model reference (state back to not_loaded). The caller
+        makes sure nothing is serving from it; freeing the memory is
+        budget.release_memory()'s job once the last reference is gone."""
+        with self.lock:
+            self._model = None
+            self.state = "not_loaded"
+            self.error = None

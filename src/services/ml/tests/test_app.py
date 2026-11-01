@@ -102,9 +102,13 @@ def test_status(client):
     assert r.status_code == 200
     body = r.json()
     assert body["models"] == [
-        {"name": "all-MiniLM-L6-v2", "kind": "embedding", "state": "loaded"},
-        {"name": "en_core_web_trf", "kind": "ner", "state": "loaded"},
+        {"name": "all-MiniLM-L6-v2", "kind": "embedding", "state": "loaded", "lazy": False, "cost_mb": None},
+        {"name": "en_core_web_trf", "kind": "ner", "state": "loaded", "lazy": False, "cost_mb": None},
+        {"name": "nli-deberta-v3-xsmall", "kind": "nli", "state": "not_loaded", "lazy": True, "cost_mb": 600},
+        {"name": "easyocr-en", "kind": "ocr", "state": "not_loaded", "lazy": True, "cost_mb": 900},
     ]
+    assert body["resident_budget_mb"] == 2000
+    assert body["lazy_resident_mb"] == 0
     assert isinstance(body["rss_bytes"], int) and body["rss_bytes"] > 0
 
 
@@ -119,9 +123,26 @@ def test_config_from_env():
     assert load_config({}).embed_model_path == "/models/all-MiniLM-L6-v2"
 
 
+def test_lazy_config_from_env():
+    cfg = load_config({})
+    assert (cfg.resident_budget_mb, cfg.nli_cost_mb, cfg.ocr_cost_mb, cfg.nli_batch_size) == (2000, 600, 900, 32)
+    assert cfg.nli_model_path == "/models/nli-deberta-v3-xsmall"
+    assert cfg.ocr_model_dir == "/models/easyocr"
+    cfg = load_config({"ML_RESIDENT_BUDGET_MB": "1500", "ML_NLI_COST_MB": "1200", "ML_OCR_COST_MB": "1000",
+                       "ML_NLI_BATCH_SIZE": "8", "ML_NLI_MODEL_PATH": "/m/nli", "ML_OCR_MODEL_DIR": "/m/ocr"})
+    assert (cfg.resident_budget_mb, cfg.nli_cost_mb, cfg.ocr_cost_mb, cfg.nli_batch_size) == (1500, 1200, 1000, 8)
+    assert (cfg.nli_model_path, cfg.ocr_model_dir) == ("/m/nli", "/m/ocr")
+    try:
+        load_config({"ML_NLI_BATCH_SIZE": "0"})
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("a zero batch size would loop forever")
+
+
 def test_no_backend_or_heavy_imports_at_module_level():
     """ml_service never imports `app`, and only the loaders import the ML stack."""
-    heavy = {"torch", "sentence_transformers", "spacy", "transformers"}
+    heavy = {"torch", "sentence_transformers", "spacy", "transformers", "easyocr", "PIL", "numpy", "cv2"}
     for path in PKG.glob("*.py"):
         tree = ast.parse(path.read_text())
         for node in ast.walk(tree):
@@ -139,7 +160,7 @@ def test_no_backend_or_heavy_imports_at_module_level():
 
 
 def test_importing_app_loads_no_models():
-    for mod in ("torch", "sentence_transformers", "spacy"):
+    for mod in ("torch", "sentence_transformers", "spacy", "transformers", "easyocr"):
         if mod in sys.modules:
             continue  # already imported by another test (e.g. test_nlp); nothing to assert
         import ml_service.app  # noqa: F401
