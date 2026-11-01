@@ -23,7 +23,10 @@ class QuestUpdate(BaseModel):
     status: QuestStatus | None = None
 
 
-class QuestResponse(BaseModel):
+# GM and Party projections (E0-Access.4), returned only through
+# app.access.project. The Party schema has no `notes` (GM notes).
+
+class QuestGMResponse(BaseModel):
     id: uuid.UUID
     campaign_id: uuid.UUID
     title: str
@@ -34,6 +37,22 @@ class QuestResponse(BaseModel):
     updated_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class QuestPartyResponse(BaseModel):
+    id: uuid.UUID
+    campaign_id: uuid.UUID
+    title: str
+    description: str | None
+    status: QuestStatus
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+# The pre-E0-Access.4 name is the GM schema.
+QuestResponse = QuestGMResponse
 
 
 class QuestSuggestResponse(BaseModel):

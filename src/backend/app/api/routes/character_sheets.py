@@ -1,153 +1,153 @@
 import uuid
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
+from sqlalchemy import func, select
 
+from app.access import (
+    CampaignContext, check_create, ctx_for_request, not_found, project, project_all, require_campaign,
+    require_campaign_for, scoped_get, scoped_select,
+)
 from app.db.session import get_db
 from app.db.models.user import User
 from app.db.models.character_sheet import CharacterSheetTemplate, CharacterSheet
 from app.schemas.character_sheet import (
-    TemplateCreate, TemplateUpdate, TemplateResponse,
-    CharacterSheetCreate, CharacterSheetUpdate, CharacterSheetResponse,
+    TemplateCreate, TemplateUpdate, TemplateGMResponse,
+    CharacterSheetCreate, CharacterSheetUpdate, CharacterSheetGMResponse,
 )
-from app.api.deps import get_current_user, get_campaign_with_access
+from app.api.deps import get_current_user
 
 router = APIRouter()
 
-# Character sheets (and their templates) are shared campaign knowledge, same
-# access rule as NPCs — any owner or member may read/write/delete, gated
-# purely on campaign membership via get_campaign_with_access. See
-# app/api/routes/npcs.py's _get_accessible_npc docstring for the reasoning.
+# Character sheets (and their templates) are shared campaign knowledge: any
+# owner or member may read/write/delete the ones they can see (Player write
+# rules arrive with E0-Access.6). Every row comes from scoped_select /
+# scoped_get and every body goes through access.project (E0-Access.4): a
+# sheet the caller may not see (visibility gm, or another user's private
+# one) is absent from lists and counts and is the one 404 by id.
+_GM_OR_PARTY = "GM: the GM schema; Player or member preview: the Party schema."
+_template_ctx = require_campaign_for(CharacterSheetTemplate, "template_id")
+_sheet_ctx = require_campaign_for(CharacterSheet, "sheet_id")
 
 
-async def _get_accessible_template(db: AsyncSession, template_id: uuid.UUID, user: User) -> CharacterSheetTemplate:
-    template = await db.get(CharacterSheetTemplate, template_id)
-    if not template:
-        raise HTTPException(status_code=404, detail="Template not found")
-    await get_campaign_with_access(db, template.campaign_id, user)
-    return template
-
-
-async def _get_accessible_sheet(db: AsyncSession, sheet_id: uuid.UUID, user: User) -> CharacterSheet:
-    sheet = await db.get(CharacterSheet, sheet_id)
-    if not sheet:
-        raise HTTPException(status_code=404, detail="Character not found")
-    await get_campaign_with_access(db, sheet.campaign_id, user)
-    return sheet
-
-
-def _template_response(template: CharacterSheetTemplate, character_count: int = 0) -> TemplateResponse:
-    return TemplateResponse.model_validate(template, from_attributes=True).model_copy(
-        update={"character_count": character_count}
+async def _visible_sheet_counts(db: AsyncSession, ctx: CampaignContext, template_ids: list[uuid.UUID]) -> dict:
+    """{template_id: number of its sheets ctx may see}."""
+    if not template_ids:
+        return {}
+    stmt = (
+        scoped_select(CharacterSheet, ctx)
+        .where(CharacterSheet.template_id.in_(template_ids))
+        .with_only_columns(CharacterSheet.template_id, func.count(CharacterSheet.id))
+        .group_by(CharacterSheet.template_id)
     )
+    return dict((await db.execute(stmt)).all())
+
+
+async def _project_template(db: AsyncSession, template: CharacterSheetTemplate, ctx: CampaignContext):
+    counts = await _visible_sheet_counts(db, ctx, [template.id])
+    return project(template, ctx, extra={"character_count": counts.get(template.id, 0)})
 
 
 # ── Templates ────────────────────────────────────────────────────────────────
 
-@router.get("/templates", response_model=list[TemplateResponse])
+@router.get("/templates", response_model=None,
+            responses={200: {"model": list[TemplateGMResponse], "description": _GM_OR_PARTY}})
 async def list_templates(
-    campaign_id: uuid.UUID,
-    user: User = Depends(get_current_user),
+    ctx: CampaignContext = Depends(require_campaign("player")),
     db: AsyncSession = Depends(get_db),
-) -> list[TemplateResponse]:
-    await get_campaign_with_access(db, campaign_id, user)
-    result = await db.execute(
-        select(CharacterSheetTemplate)
-        .where(CharacterSheetTemplate.campaign_id == campaign_id)
-        .order_by(CharacterSheetTemplate.name)
-    )
+):
+    result = await db.execute(scoped_select(CharacterSheetTemplate, ctx).order_by(CharacterSheetTemplate.name))
     templates = result.scalars().all()
     if not templates:
         return []
-    counts = dict(
-        (await db.execute(
-            select(CharacterSheet.template_id, func.count(CharacterSheet.id))
-            .where(CharacterSheet.template_id.in_([t.id for t in templates]))
-            .group_by(CharacterSheet.template_id)
-        )).all()
-    )
-    return [_template_response(t, counts.get(t.id, 0)) for t in templates]
+    counts = await _visible_sheet_counts(db, ctx, [t.id for t in templates])
+    return await project_all(db, templates, ctx, extra=lambda t: {"character_count": counts.get(t.id, 0)})
 
 
-@router.post("/templates", response_model=TemplateResponse, status_code=201)
+@router.post("/templates", response_model=None, status_code=201,
+             responses={201: {"model": TemplateGMResponse, "description": _GM_OR_PARTY}})
 async def create_template(
+    request: Request,
     body: TemplateCreate,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
-) -> TemplateResponse:
-    await get_campaign_with_access(db, body.campaign_id, user)
+):
+    ctx = await ctx_for_request(request, db, user, body.campaign_id)
     template = CharacterSheetTemplate(
         campaign_id=body.campaign_id,
         created_by_user_id=user.id,
         name=body.name,
         fields=[f.model_dump() for f in body.fields],
     )
+    check_create(template, ctx)
     db.add(template)
     await db.commit()
     await db.refresh(template)
-    return _template_response(template)
+    return project(template, ctx)
 
 
-@router.patch("/templates/{template_id}", response_model=TemplateResponse)
+@router.patch("/templates/{template_id}", response_model=None,
+              responses={200: {"model": TemplateGMResponse, "description": _GM_OR_PARTY}})
 async def update_template(
     template_id: uuid.UUID,
     body: TemplateUpdate,
-    user: User = Depends(get_current_user),
+    ctx: CampaignContext = Depends(_template_ctx),
     db: AsyncSession = Depends(get_db),
-) -> TemplateResponse:
-    template = await _get_accessible_template(db, template_id, user)
+):
+    template = await scoped_get(db, CharacterSheetTemplate, ctx, template_id)
     if body.name is not None:
         template.name = body.name
     if body.fields is not None:
         template.fields = [f.model_dump() for f in body.fields]
     await db.commit()
     await db.refresh(template)
-    count = (
-        await db.execute(select(func.count(CharacterSheet.id)).where(CharacterSheet.template_id == template.id))
-    ).scalar() or 0
-    return _template_response(template, count)
+    return await _project_template(db, template, ctx)
 
 
 @router.delete("/templates/{template_id}", status_code=204)
 async def delete_template(
     template_id: uuid.UUID,
-    user: User = Depends(get_current_user),
+    ctx: CampaignContext = Depends(_template_ctx),
     db: AsyncSession = Depends(get_db),
 ) -> None:
     """Deleting a template cascades to every character sheet built from it
     (see character_sheets.template_id's ondelete="CASCADE") — the frontend is
     expected to warn using the list response's character_count before calling
     this, same pattern as removing a campaign member with delete_entries."""
-    template = await _get_accessible_template(db, template_id, user)
+    template = await scoped_get(db, CharacterSheetTemplate, ctx, template_id)
+    # The cascade must not destroy sheets the caller cannot see: refuse (as a
+    # missing template) when any of its sheets is hidden from ctx.
+    total = (await db.execute(
+        select(func.count(CharacterSheet.id)).where(CharacterSheet.template_id == template.id)
+    )).scalar_one()
+    if total != (await _visible_sheet_counts(db, ctx, [template.id])).get(template.id, 0):
+        not_found()
     await db.delete(template)
     await db.commit()
 
 
 # ── Character sheets ─────────────────────────────────────────────────────────
 
-@router.get("/", response_model=list[CharacterSheetResponse])
+@router.get("/", response_model=None,
+            responses={200: {"model": list[CharacterSheetGMResponse], "description": _GM_OR_PARTY}})
 async def list_character_sheets(
-    campaign_id: uuid.UUID,
-    user: User = Depends(get_current_user),
+    ctx: CampaignContext = Depends(require_campaign("player")),
     db: AsyncSession = Depends(get_db),
-) -> list[CharacterSheetResponse]:
-    await get_campaign_with_access(db, campaign_id, user)
-    result = await db.execute(
-        select(CharacterSheet).where(CharacterSheet.campaign_id == campaign_id).order_by(CharacterSheet.name)
-    )
-    return list(result.scalars().all())
+):
+    result = await db.execute(scoped_select(CharacterSheet, ctx).order_by(CharacterSheet.name))
+    return await project_all(db, result.scalars().all(), ctx)
 
 
-@router.post("/", response_model=CharacterSheetResponse, status_code=201)
+@router.post("/", response_model=None, status_code=201,
+             responses={201: {"model": CharacterSheetGMResponse, "description": _GM_OR_PARTY}})
 async def create_character_sheet(
+    request: Request,
     body: CharacterSheetCreate,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
-) -> CharacterSheetResponse:
-    await get_campaign_with_access(db, body.campaign_id, user)
-    template = await db.get(CharacterSheetTemplate, body.template_id)
-    if not template or template.campaign_id != body.campaign_id:
-        raise HTTPException(status_code=404, detail="Template not found in this campaign")
+):
+    ctx = await ctx_for_request(request, db, user, body.campaign_id)
+    # A template of another Campaign is missing (scoped to ctx's Campaign).
+    await scoped_get(db, CharacterSheetTemplate, ctx, body.template_id)
     sheet = CharacterSheet(
         campaign_id=body.campaign_id,
         template_id=body.template_id,
@@ -155,29 +155,32 @@ async def create_character_sheet(
         name=body.name,
         data=body.data,
     )
+    check_create(sheet, ctx)
     db.add(sheet)
     await db.commit()
     await db.refresh(sheet)
-    return sheet
+    return project(sheet, ctx)
 
 
-@router.get("/{sheet_id}", response_model=CharacterSheetResponse)
+@router.get("/{sheet_id}", response_model=None,
+            responses={200: {"model": CharacterSheetGMResponse, "description": _GM_OR_PARTY}})
 async def get_character_sheet(
     sheet_id: uuid.UUID,
-    user: User = Depends(get_current_user),
+    ctx: CampaignContext = Depends(_sheet_ctx),
     db: AsyncSession = Depends(get_db),
-) -> CharacterSheetResponse:
-    return await _get_accessible_sheet(db, sheet_id, user)
+):
+    return project(await scoped_get(db, CharacterSheet, ctx, sheet_id), ctx)
 
 
-@router.patch("/{sheet_id}", response_model=CharacterSheetResponse)
+@router.patch("/{sheet_id}", response_model=None,
+              responses={200: {"model": CharacterSheetGMResponse, "description": _GM_OR_PARTY}})
 async def update_character_sheet(
     sheet_id: uuid.UUID,
     body: CharacterSheetUpdate,
-    user: User = Depends(get_current_user),
+    ctx: CampaignContext = Depends(_sheet_ctx),
     db: AsyncSession = Depends(get_db),
-) -> CharacterSheetResponse:
-    sheet = await _get_accessible_sheet(db, sheet_id, user)
+):
+    sheet = await scoped_get(db, CharacterSheet, ctx, sheet_id)
     if body.name is not None:
         sheet.name = body.name
     if body.data is not None:
@@ -187,15 +190,15 @@ async def update_character_sheet(
         sheet.data = body.data
     await db.commit()
     await db.refresh(sheet)
-    return sheet
+    return project(sheet, ctx)
 
 
 @router.delete("/{sheet_id}", status_code=204)
 async def delete_character_sheet(
     sheet_id: uuid.UUID,
-    user: User = Depends(get_current_user),
+    ctx: CampaignContext = Depends(_sheet_ctx),
     db: AsyncSession = Depends(get_db),
 ) -> None:
-    sheet = await _get_accessible_sheet(db, sheet_id, user)
+    sheet = await scoped_get(db, CharacterSheet, ctx, sheet_id)
     await db.delete(sheet)
     await db.commit()

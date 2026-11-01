@@ -1,9 +1,13 @@
 import uuid
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from sqlalchemy.orm import selectinload
 
+from app.access import (
+    COLLABORATE, ctx_for_share, not_found, project, project_all, resolve_share_token, scoped_get, scoped_select,
+    share_ctx,
+)
 from app.core.limiter import limiter
 from app.db.session import get_db
 from app.db.models.user import User
@@ -13,7 +17,6 @@ from app.db.models.journal import JournalEntry
 from app.db.models.tag import Tag
 from app.db.models.npc import NpcEntry
 from app.db.models.quest import Quest
-from app.db.models.share_token import CampaignShareToken
 from app.schemas.share import (
     PublicCampaignResponse,
     JoinCampaignResponse,
@@ -26,21 +29,14 @@ from app.api.deps import require_active_account
 
 router = APIRouter()
 
-# Read-only share links are anonymous and player-facing. Every endpoint here
-# returns the Public* schemas from app/schemas/share.py, which leave out
-# GM-private fields (journal shorthand, NPC/quest notes). Don't return the
-# owner-facing Journal/Npc/Quest response schemas from this router.
+# Read-only share links are anonymous and player-facing (E0-Access.4): a
+# token resolves through access.share_ctx to an anon ctx (Public Audience),
+# rows come from scoped_select / scoped_get, and every body goes through
+# access.project (the Public* schemas are the anon Party projections). An
+# unknown, revoked, expired or wrong-kind token, and a hidden or missing
+# row, are all the one 404 {"detail":"Not found"}.
 
-
-async def _resolve_token(db: AsyncSession, token: str, kind: str | None = None) -> CampaignShareToken:
-    query = select(CampaignShareToken).where(CampaignShareToken.token == token)
-    if kind is not None:
-        query = query.where(CampaignShareToken.kind == kind)
-    result = await db.execute(query)
-    share = result.scalar_one_or_none()
-    if not share or share.revoked:
-        raise HTTPException(status_code=404, detail="This link is invalid or has been revoked.")
-    return share
+_ENTRY_TAGS = selectinload(JournalEntry.tags).selectinload(Tag.custom_category)
 
 
 @router.get("/{token}", response_model=PublicCampaignResponse)
@@ -53,15 +49,10 @@ async def get_shared_campaign(
     # Either kind resolves here — this only returns non-sensitive campaign
     # metadata, used both for the read-only view and to preview a collaborate
     # invite ("You've been invited to join X") before the user commits to it.
-    share = await _resolve_token(db, token)
-    result = await db.execute(select(Campaign).where(Campaign.id == share.campaign_id))
-    campaign = result.scalar_one_or_none()
-    if not campaign:
-        raise HTTPException(status_code=404, detail="Campaign not found")
-    return PublicCampaignResponse(
-        id=campaign.id, name=campaign.name, genre=campaign.genre,
-        description=campaign.description, share_kind=share.kind,
-    )
+    share = await resolve_share_token(db, token, kind=None)
+    ctx = ctx_for_share(share)
+    campaign = await scoped_get(db, Campaign, ctx, share.campaign_id)
+    return project(campaign, ctx, extra={"share_kind": share.kind})
 
 
 @router.get("/{token}/journals", response_model=PublicJournalListResponse)
@@ -73,17 +64,16 @@ async def get_shared_journals(
     limit: int = Query(20, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
 ) -> PublicJournalListResponse:
-    share = await _resolve_token(db, token, "read_only")
+    ctx = await share_ctx(db, token)
     query = (
-        select(JournalEntry)
-        .where(JournalEntry.campaign_id == share.campaign_id)
-        .options(selectinload(JournalEntry.tags).selectinload(Tag.custom_category))
+        scoped_select(JournalEntry, ctx)
+        .options(_ENTRY_TAGS)
         .order_by(JournalEntry.session_date.desc().nullslast(), JournalEntry.created_at.desc())
     )
     total = (await db.execute(select(func.count()).select_from(query.subquery()))).scalar()
     query = query.offset((page - 1) * limit).limit(limit)
     items = (await db.execute(query)).scalars().all()
-    return PublicJournalListResponse(items=items, total=total, page=page, limit=limit)
+    return PublicJournalListResponse(items=await project_all(db, items, ctx), total=total, page=page, limit=limit)
 
 
 @router.get("/{token}/journals/{journal_id}", response_model=PublicJournalResponse)
@@ -94,16 +84,9 @@ async def get_shared_journal(
     journal_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
 ) -> PublicJournalResponse:
-    share = await _resolve_token(db, token, "read_only")
-    result = await db.execute(
-        select(JournalEntry)
-        .where(JournalEntry.id == journal_id, JournalEntry.campaign_id == share.campaign_id)
-        .options(selectinload(JournalEntry.tags).selectinload(Tag.custom_category))
-    )
-    entry = result.scalar_one_or_none()
-    if not entry:
-        raise HTTPException(status_code=404, detail="Entry not found")
-    return entry
+    ctx = await share_ctx(db, token)
+    entry = await scoped_get(db, JournalEntry, ctx, journal_id, options=[_ENTRY_TAGS])
+    return (await project_all(db, [entry], ctx))[0]
 
 
 @router.get("/{token}/npcs", response_model=list[PublicNpcResponse])
@@ -113,11 +96,10 @@ async def get_shared_npcs(
     token: str,
     db: AsyncSession = Depends(get_db),
 ) -> list[PublicNpcResponse]:
-    share = await _resolve_token(db, token, "read_only")
-    result = await db.execute(
-        select(NpcEntry).where(NpcEntry.campaign_id == share.campaign_id).order_by(NpcEntry.name)
-    )
-    return list(result.scalars().all())
+    # NPCs are always_gm until F3-world (Decision B1-D4): an empty list.
+    ctx = await share_ctx(db, token)
+    rows = (await db.execute(scoped_select(NpcEntry, ctx).order_by(NpcEntry.name))).scalars().all()
+    return await project_all(db, rows, ctx)
 
 
 @router.get("/{token}/quests", response_model=list[PublicQuestResponse])
@@ -127,11 +109,10 @@ async def get_shared_quests(
     token: str,
     db: AsyncSession = Depends(get_db),
 ) -> list[PublicQuestResponse]:
-    share = await _resolve_token(db, token, "read_only")
-    result = await db.execute(
-        select(Quest).where(Quest.campaign_id == share.campaign_id).order_by(Quest.title)
-    )
-    return list(result.scalars().all())
+    # Quests are always_gm until F3-world (Decision B1-D4): an empty list.
+    ctx = await share_ctx(db, token)
+    rows = (await db.execute(scoped_select(Quest, ctx).order_by(Quest.title))).scalars().all()
+    return await project_all(db, rows, ctx)
 
 
 @router.post("/{token}/join", response_model=JoinCampaignResponse)
@@ -144,12 +125,12 @@ async def join_campaign(
 ) -> JoinCampaignResponse:
     """Redeem a 'collaborate' share link. Requires an account with access
     granted — unlike the read-only endpoints above, this grants real write
-    access, so anonymous (or not-yet-paid) redemption isn't an option."""
-    share = await _resolve_token(db, token, "collaborate")
-    campaign_result = await db.execute(select(Campaign).where(Campaign.id == share.campaign_id))
-    campaign = campaign_result.scalar_one_or_none()
-    if not campaign:
-        raise HTTPException(status_code=404, detail="Campaign not found")
+    access, so anonymous (or not-yet-paid) redemption isn't an option. A
+    revoked or expired link is the same 404 as an unknown one."""
+    share = await resolve_share_token(db, token, COLLABORATE)
+    campaign = await db.get(Campaign, share.campaign_id)
+    if campaign is None:
+        not_found()
 
     if campaign.user_id == user.id:
         return JoinCampaignResponse(campaign_id=campaign.id, campaign_name=campaign.name, already_member=True)

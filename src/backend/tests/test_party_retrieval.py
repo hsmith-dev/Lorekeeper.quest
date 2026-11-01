@@ -423,7 +423,11 @@ async def test_journal_search_route(db, world, client):
     r = await client.get("/api/journals/?search=lantern", headers=bearer(world.p))
     body = r.json()
     assert {i["id"] for i in body["items"]} == {str(seen.id), str(own.id)}
-    assert all("shorthand" not in i for i in body["items"])
+    # Each row is projected by P's Role in its own Campaign (E0-Access.4):
+    # no Shorthand on Campaign A's rows; P's own GM Campaign keeps it.
+    by_id = {i["id"]: i for i in body["items"]}
+    assert "shorthand" not in by_id[str(seen.id)] and "shorthand" in by_id[str(own.id)]
+    assert "SECRETWORD" not in r.text
 
 
 async def test_entity_entries_routes(db, world, client):
@@ -437,13 +441,17 @@ async def test_entity_entries_routes(db, world, client):
     seen = await add_entry(db, world.a, world.owner, "Barnaby said: Find the caravan.")
     await add_entry(db, world.a, world.owner, "Barnaby, GM-only. Find the caravan.", visibility="gm")
     await db.commit()
-    for url in (f"/api/npcs/{npc.id}/entries", f"/api/quests/{quest.id}/entries"):
+    missing = "00000000-0000-4000-8000-000000000000"
+    for url, missing_url in ((f"/api/npcs/{npc.id}/entries", f"/api/npcs/{missing}/entries"),
+                             (f"/api/quests/{quest.id}/entries", f"/api/quests/{missing}/entries")):
+        # NPCs and Quests are always_gm until F3-world (E0-Access.4): a Player
+        # gets the one 404, exactly as for a missing id.
         r = await client.get(url, headers=bearer(world.p))
-        assert r.status_code == 200, r.text
-        assert [i["id"] for i in r.json()] == [str(seen.id)]
-        assert "shorthand" not in r.json()[0] and r.json()[0]["narrative"]
+        m = await client.get(missing_url, headers=bearer(world.p))
+        assert r.status_code == 404 and r.content == m.content, r.text
         r = await client.get(url, headers=bearer(world.owner))
         assert len(r.json()) == 3 and all("shorthand" in i for i in r.json())
+        assert str(seen.id) in {i["id"] for i in r.json()}
 
 
 async def _fake_llm_for(db, *users) -> None:

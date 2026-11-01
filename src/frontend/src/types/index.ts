@@ -161,7 +161,8 @@ export interface TagWithCount extends Tag {
 export interface JournalEntry {
   id: string;
   campaign_id: string;
-  shorthand: string;
+  // GM-only (E0-Access.4): absent from a Player's (Party) projection.
+  shorthand?: string;
   narrative: string;
   session_date: string | null;
   tags: Tag[];

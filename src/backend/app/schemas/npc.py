@@ -25,7 +25,10 @@ class NpcUpdate(BaseModel):
     notes: str | None = None
 
 
-class NpcResponse(BaseModel):
+# GM and Party projections (E0-Access.4), returned only through
+# app.access.project. The Party schema has no `notes` (GM notes).
+
+class NpcGMResponse(BaseModel):
     id: uuid.UUID
     campaign_id: uuid.UUID
     name: str
@@ -37,6 +40,23 @@ class NpcResponse(BaseModel):
     updated_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class NpcPartyResponse(BaseModel):
+    id: uuid.UUID
+    campaign_id: uuid.UUID
+    name: str
+    role: NpcRole
+    status: NpcStatus
+    description: str | None
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+# The pre-E0-Access.4 name is the GM schema.
+NpcResponse = NpcGMResponse
 
 
 class NpcExtractResponse(BaseModel):

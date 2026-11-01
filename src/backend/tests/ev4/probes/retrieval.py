@@ -17,11 +17,14 @@ from contextlib import contextmanager
 
 import sqlalchemy as sa
 
-from tests.ev4.families import assert_captured_context_clean, assert_counts_and_ranking_unchanged, assert_no_canary
+from tests.ev4.families import (
+    assert_captured_context_clean, assert_counts_and_ranking_unchanged, assert_hidden_equals_missing, assert_no_canary,
+)
 from tests.ev4.fixtures import mint_canary
 from tests.ev4.registry import ev4_probe
 from tests.ev4.report import record_leak
 
+MISSING_ID = "00000000-0000-4000-8000-000000000000"
 INN_QUESTION = "What happened at the Drowsy Dragon with the innkeeper?"
 
 
@@ -156,28 +159,35 @@ async def probe_journal_search(ev4, actor):
 
 # ── Entries for an NPC / a Quest ───────────────────────────────────────────
 
-async def _entity_entries_probe(ev4, actor, url: str, name: str) -> None:
+async def _entity_entries_probe(ev4, actor, url: str, name: str, missing_url: str) -> None:
+    """NPCs and Quests are always_gm until F3-world (B1-D4, E0-Access.4): a
+    non-GM of A gets the one 404, exactly as for a missing id, before and
+    after a GM-only change. A GM of A (co_gm) gets the list."""
     with fake_embeddings():
         await index_seeded(ev4)
         await add_entry(ev4, f"The party met {name} on the road and shared a meal.")
         r = await actor.get(url)
         assert_no_canary(actor, r)
-        if actor.user_id is None:
+        if actor.grants.get(ev4.a.campaign_id) != "gm":
+            await assert_hidden_equals_missing(actor, url, missing_url)
+            await gm_only_change(ev4, name)
+            await assert_hidden_equals_missing(actor, url, missing_url)
             return
         assert r.status_code == 200 and len(r.json()) >= 1, r.text
-        await assert_counts_and_ranking_unchanged(actor, url, lambda: gm_only_change(ev4, name))
 
 
-@ev4_probe("GET", "/api/npcs/{npc_id}/entries")
+@ev4_probe("GET", "/api/npcs/{npc_id}/entries", actors=("anon_share", "player", "cross_gm_player", "co_gm"))
 async def probe_npc_entries(ev4, actor):
     npc_id = ev4.a.ids["npcs"][0]
-    await _entity_entries_probe(ev4, actor, f"/api/npcs/{npc_id}/entries", "Barnaby")
+    await _entity_entries_probe(ev4, actor, f"/api/npcs/{npc_id}/entries", "Barnaby",
+                                f"/api/npcs/{MISSING_ID}/entries")
 
 
-@ev4_probe("GET", "/api/quests/{quest_id}/entries")
+@ev4_probe("GET", "/api/quests/{quest_id}/entries", actors=("anon_share", "player", "cross_gm_player", "co_gm"))
 async def probe_quest_entries(ev4, actor):
     quest_id = ev4.a.ids["quests"][0]
-    await _entity_entries_probe(ev4, actor, f"/api/quests/{quest_id}/entries", "Find the missing caravan")
+    await _entity_entries_probe(ev4, actor, f"/api/quests/{quest_id}/entries", "Find the missing caravan",
+                                f"/api/quests/{MISSING_ID}/entries")
 
 
 # ── The Chronicler ─────────────────────────────────────────────────────────

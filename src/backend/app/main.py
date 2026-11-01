@@ -10,6 +10,7 @@ from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 from app.core.limiter import limiter
+from app.access import VaryMiddleware
 
 from app.core.config import get_settings
 from app.core.errors import LLMError, llm_exception_handler
@@ -73,6 +74,10 @@ def create_app() -> FastAPI:
         # X-Lorekeeper-Preview: "Preview as Player" (E0-UX.6), honoured from E0-Access.3.
         allow_headers=["Authorization", "Content-Type", "X-Lorekeeper-Preview"],
     )
+    # ── Vary (E0-Access.4) ─────────────────────────────────────────────────────
+    # Bodies depend on who asks and on the preview header: every /api/ response
+    # says so. Added after CORS so it runs outside it and merges CORS's Origin.
+    app.add_middleware(VaryMiddleware)
 
     # ── Request timing ────────────────────────────────────────────────────────
     @app.middleware("http")

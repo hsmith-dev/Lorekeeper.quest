@@ -118,8 +118,9 @@ async def test_share_reads_as_anon_share_are_clean(ev4):
         r = await anon.get(f"/api/share/{token}{path}")
         assert r.status_code == 200, (path, r.text)
         assert_no_canary(anon, r)
+    # NPCs are always_gm until F3-world (Decision B1-D4, E0-Access.4).
     npcs = (await anon.get(f"/api/share/{token}/npcs")).json()
-    assert [n["name"] for n in npcs] == ["Barnaby"]
+    assert npcs == []
     journals = (await anon.get(f"/api/share/{token}/journals")).json()
     assert journals["total"] == len(ev4.a.ids["journal_entries"])
 

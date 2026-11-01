@@ -255,6 +255,21 @@ def _narrow_for_preview(request: Request, ctx: CampaignContext) -> CampaignConte
     return narrowed
 
 
+async def ctx_for_request(request: Request, db: AsyncSession, user: User | uuid.UUID,
+                          campaign_id: uuid.UUID | str, min_role: str = "player") -> CampaignContext:
+    """For routes whose Campaign is not a required `campaign_id` parameter (a
+    create's body, an optional `campaign_id` query on a list): the ctx
+    `require_campaign(min_role)` would build for this request, preview
+    narrowing included (a write in preview is `not_found()`). Every denial is
+    `not_found()`."""
+    min_role = check_min_role(min_role)
+    ctx = await ctx_for(db, user, campaign_id)
+    ctx = _narrow_for_preview(request, ctx)
+    if not meets(ctx, min_role):
+        not_found()
+    return ctx
+
+
 def require_campaign(min_role: str = "player", *, preview: bool = True):
     """FastAPI dependency: the caller's ctx in `campaign_id` (path parameter
     when the route has `{campaign_id}`, else a query parameter), with at least
@@ -357,22 +372,51 @@ async def role_map(db: AsyncSession, user: User | uuid.UUID) -> RoleMap:
     return out
 
 
+def _check_roles(roles: Mapping[uuid.UUID, str]) -> None:
+    unknown = {role for role in roles.values() if role not in (GM, PLAYER)}
+    if unknown:
+        raise ValueError(f"roles must be gm or player, got {sorted(unknown)}")
+
+
+def role_ctx(roles: Mapping[uuid.UUID, str], campaign_id: uuid.UUID, user_id: uuid.UUID | None = None) -> CampaignContext:
+    """The ctx a `role_map` grants in one of its Campaigns: a GM ctx for a gm
+    Campaign, a Player ctx (Owner(user)) for a player Campaign. A Campaign
+    not in the map is `not_found()`. Used per row of a cross-Campaign list
+    (`scoped_select_multi`, `project_all`). `user_id` defaults to
+    `roles.user_id`. The ctx carries no grant or epoch (it filters, it does
+    not authorize a write)."""
+    _check_roles(roles)
+    role = roles.get(campaign_id)
+    if role is None:
+        not_found()
+    uid = user_id if user_id is not None else getattr(roles, "user_id", None)
+    if uid is None:
+        raise ValueError("role_ctx: needs the user_id (a role_map carries it)")
+    return CampaignContext(campaign_id=campaign_id, user_id=uid, role=role, is_owner=False,
+                           audience=ctx_audience(role, uid))
+
+
 def scoped_select_multi(model: type, roles: Mapping[uuid.UUID, str], user_id: uuid.UUID | None = None) -> sa.Select:
     """`select(model)` of the rows, across the Campaigns in `roles` (a
     `role_map`), that the user may see: every row of a GM Campaign, and the
     rows of a Player Campaign that pass `visible_clause` for that Player. An
-    empty map selects nothing. `user_id` defaults to `roles.user_id`."""
+    empty map selects nothing. `user_id` defaults to `roles.user_id`.
+
+    Derived models without a `campaign_id` (journal_tags, tags) are scoped
+    through their parents: one `visible_clause` branch per Campaign."""
     from app.access import registry  # lazy: registry imports the whole models package
 
-    if not hasattr(model, "campaign_id"):
+    derived = isinstance(registry.REGISTRY.get(model), (registry.Derived, registry.DerivedFromSources))
+    if not derived and not hasattr(model, "campaign_id"):
         raise TypeError(f"scoped_select_multi: {getattr(model, '__name__', model)!r} has no campaign_id")
-    reg = registry.registration(model)
+    registry.registration(model)  # UnregisteredModel for an unregistered model
     stmt = sa.select(model)
     if not roles:
         return stmt.where(sa.false())
-    unknown = {role for role in roles.values() if role not in (GM, PLAYER)}
-    if unknown:
-        raise ValueError(f"scoped_select_multi: roles must be gm or player, got {sorted(unknown)}")
+    try:
+        _check_roles(roles)
+    except ValueError as exc:
+        raise ValueError(f"scoped_select_multi: {exc}") from None
     gm_ids = [cid for cid, role in roles.items() if role == GM]
     player_ids = [cid for cid, role in roles.items() if role == PLAYER]
     uid = user_id if user_id is not None else getattr(roles, "user_id", None)
@@ -387,13 +431,13 @@ def scoped_select_multi(model: type, roles: Mapping[uuid.UUID, str], user_id: uu
                                audience=ctx_audience(GM, uid))
 
     branches = []
-    if isinstance(reg, (registry.Derived, registry.DerivedFromSources)):
+    if derived:
         # A derived predicate is scoped to one Campaign (its parent EXISTS),
         # for GMs too: one branch per Campaign, exactly as scoped_select.
-        for cid in gm_ids:
-            branches.append(sa.and_(model.campaign_id == cid, registry.visible_clause(model, gm_ctx(cid))))
-        for cid in player_ids:
-            branches.append(sa.and_(model.campaign_id == cid, registry.visible_clause(model, player_ctx(cid))))
+        own_scope = getattr(model, "campaign_id", None)
+        for cid, make in [(c, gm_ctx) for c in gm_ids] + [(c, player_ctx) for c in player_ids]:
+            clause = registry.visible_clause(model, make(cid))
+            branches.append(sa.and_(own_scope == cid, clause) if own_scope is not None else clause)
         return stmt.where(sa.or_(*branches))
     # Stored / always_gm / membership predicates do not depend on the Campaign
     # (and are true() for a GM).
@@ -403,3 +447,47 @@ def scoped_select_multi(model: type, roles: Mapping[uuid.UUID, str], user_id: uu
         branches.append(sa.and_(model.campaign_id.in_(player_ids),
                                 registry.visible_clause(model, player_ctx(player_ids[0]))))
     return stmt.where(sa.or_(*branches))
+
+
+# ── Vary ───────────────────────────────────────────────────────────────────
+
+VARY_HEADERS: tuple[str, ...] = ("Authorization", PREVIEW_HEADER)
+
+
+class VaryMiddleware:
+    """ASGI middleware: every response under `prefix` (default `/api/`)
+    carries `Vary` naming `Authorization` and `X-Lorekeeper-Preview`, merged
+    with any Vary already set (CORS adds `Origin`). A response's body depends
+    on who asks and on the preview header, so no cache may share it across
+    either. Register it outside CORSMiddleware so it sees CORS's Vary."""
+
+    def __init__(self, app: Any, prefix: str = "/api/", vary: tuple[str, ...] = VARY_HEADERS) -> None:
+        self.app = app
+        self.prefix = prefix
+        self.vary = tuple(vary)
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope.get("type") != "http" or not str(scope.get("path", "")).startswith(self.prefix):
+            await self.app(scope, receive, send)
+            return
+
+        async def send_with_vary(message: Any) -> None:
+            if message.get("type") == "http.response.start":
+                from starlette.datastructures import MutableHeaders
+
+                message.setdefault("headers", [])  # ASGI allows omitting it
+                headers = MutableHeaders(scope=message)
+                values: list[str] = []
+                for raw in headers.getlist("vary"):
+                    values.extend(v.strip() for v in raw.split(",") if v.strip())
+                seen = {v.lower() for v in values}
+                if "*" not in seen:
+                    for name in self.vary:
+                        if name.lower() not in seen:
+                            values.append(name)
+                            seen.add(name.lower())
+                    del headers["vary"]
+                    headers["Vary"] = ", ".join(values)
+            await send(message)
+
+        await self.app(scope, receive, send_with_vary)

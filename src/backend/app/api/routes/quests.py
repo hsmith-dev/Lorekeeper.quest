@@ -1,18 +1,22 @@
 import uuid
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, or_
 from sqlalchemy.orm import selectinload
 
+from app.access import (
+    GM, LITE,
+    CampaignContext, check_create, ctx_for_request, project, project_all, require_campaign, require_campaign_for,
+    scoped_get, scoped_select,
+)
 from app.db.session import get_db
 from app.db.models.user import User
 from app.db.models.quest import Quest
 from app.db.models.campaign import Campaign
 from app.db.models.journal import JournalEntry
 from app.db.models.tag import Tag
-from app.schemas.quest import QuestCreate, QuestUpdate, QuestResponse, QuestSuggestResponse
-from app.schemas.journal import JournalLitePartyResponse, JournalLiteResponse
-from app.access import GM, ctx_for, visible_clause
+from app.schemas.quest import QuestCreate, QuestUpdate, QuestGMResponse, QuestSuggestResponse
+from app.schemas.journal import JournalLiteResponse
 from app.api.deps import get_current_user, get_user_llm_config, get_campaign_with_access
 from app.services.chat_service import suggest_quests, generate_quest_description
 from app.services.llm_provider import LLMConfig
@@ -20,130 +24,128 @@ from app.services import llm_config_service
 
 router = APIRouter()
 
-
-async def _get_accessible_quest(db: AsyncSession, quest_id: uuid.UUID, user: User) -> Quest:
-    """Fetch a quest and verify the requester has access to its campaign (owner
-    or member) — like NPCs, quests are shared campaign knowledge, so any member
-    may read/edit/delete them."""
-    quest = await db.get(Quest, quest_id)
-    if not quest:
-        raise HTTPException(status_code=404, detail="Quest not found")
-    await get_campaign_with_access(db, quest.campaign_id, user)
-    return quest
+# Quests are always_gm until F3-world (Decision B1-D4): a Player (or a GM in
+# member preview) lists none and gets the one 404 for every item route and
+# for a create. Bodies go through access.project (response_model=None:
+# FastAPI must not coerce a Party body into the GM schema).
+_GM_OR_PARTY = "GM: QuestGMResponse; Player or member preview: QuestPartyResponse (no `notes`)."
+_quest_ctx = require_campaign_for(Quest, "quest_id")
 
 
-@router.get("/", response_model=list[QuestResponse])
+async def _get_accessible_quest(db: AsyncSession, quest_id: uuid.UUID, ctx: CampaignContext) -> Quest:
+    """The quest `quest_id` if ctx (the caller's ctx in the quest's own
+    Campaign, from `require_campaign_for`) may see it; else the one
+    `not_found()` (hidden and missing are the same)."""
+    return await scoped_get(db, Quest, ctx, quest_id)
+
+
+async def _visible_quest(quest_id: uuid.UUID, ctx: CampaignContext = Depends(_quest_ctx),
+                         db: AsyncSession = Depends(get_db)) -> Quest:
+    """As a dependency, so a hidden quest is the 404 before any later
+    dependency (the LLM config's 402) can answer differently."""
+    return await _get_accessible_quest(db, quest_id, ctx)
+
+
+@router.get("/", response_model=None,
+            responses={200: {"model": list[QuestGMResponse], "description": _GM_OR_PARTY}})
 async def list_quests(
-    campaign_id: uuid.UUID,
-    user: User = Depends(get_current_user),
+    ctx: CampaignContext = Depends(require_campaign("player")),
     db: AsyncSession = Depends(get_db),
-) -> list[QuestResponse]:
-    await get_campaign_with_access(db, campaign_id, user)
+):
     result = await db.execute(
-        select(Quest)
-        .where(Quest.campaign_id == campaign_id)
-        .order_by(Quest.status, Quest.created_at.desc())
+        scoped_select(Quest, ctx).order_by(Quest.status, Quest.created_at.desc())
     )
-    return list(result.scalars().all())
+    return await project_all(db, result.scalars().all(), ctx)
 
 
-@router.post("/", response_model=QuestResponse, status_code=201)
+@router.post("/", response_model=None, status_code=201,
+             responses={201: {"model": QuestGMResponse, "description": _GM_OR_PARTY}})
 async def create_quest(
+    request: Request,
     body: QuestCreate,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
-) -> QuestResponse:
-    await get_campaign_with_access(db, body.campaign_id, user)
+):
+    ctx = await ctx_for_request(request, db, user, body.campaign_id)
     quest = Quest(user_id=user.id, **body.model_dump())
+    check_create(quest, ctx)  # a row the caller could not see is refused before writing
     db.add(quest)
     await db.commit()
     await db.refresh(quest)
-    return quest
+    return project(quest, ctx)
 
 
-@router.put("/{quest_id}", response_model=QuestResponse)
+@router.put("/{quest_id}", response_model=None,
+            responses={200: {"model": QuestGMResponse, "description": _GM_OR_PARTY}})
 async def update_quest(
     quest_id: uuid.UUID,
     body: QuestUpdate,
-    user: User = Depends(get_current_user),
+    ctx: CampaignContext = Depends(_quest_ctx),
     db: AsyncSession = Depends(get_db),
-) -> QuestResponse:
-    quest = await _get_accessible_quest(db, quest_id, user)
+):
+    quest = await _get_accessible_quest(db, quest_id, ctx)
     for field, value in body.model_dump(exclude_none=True).items():
         setattr(quest, field, value)
     await db.commit()
     await db.refresh(quest)
-    return quest
+    # The write response is projected like a read (AR-26).
+    return project(quest, ctx)
 
 
 @router.delete("/{quest_id}", status_code=204)
 async def delete_quest(
     quest_id: uuid.UUID,
-    user: User = Depends(get_current_user),
+    ctx: CampaignContext = Depends(_quest_ctx),
     db: AsyncSession = Depends(get_db),
 ) -> None:
-    quest = await _get_accessible_quest(db, quest_id, user)
+    quest = await _get_accessible_quest(db, quest_id, ctx)
     await db.delete(quest)
     await db.commit()
 
 
-@router.get("/{quest_id}", response_model=QuestResponse)
+@router.get("/{quest_id}", response_model=None,
+            responses={200: {"model": QuestGMResponse, "description": _GM_OR_PARTY}})
 async def get_quest(
     quest_id: uuid.UUID,
-    user: User = Depends(get_current_user),
+    ctx: CampaignContext = Depends(_quest_ctx),
     db: AsyncSession = Depends(get_db),
-) -> QuestResponse:
-    return await _get_accessible_quest(db, quest_id, user)
+):
+    return project(await _get_accessible_quest(db, quest_id, ctx), ctx)
 
 
-@router.get("/{quest_id}/entries", response_model=list[JournalLiteResponse] | list[JournalLitePartyResponse])
+@router.get("/{quest_id}/entries", response_model=None,
+            responses={200: {"model": list[JournalLiteResponse], "description": _GM_OR_PARTY}})
 async def get_quest_entries(
     quest_id: uuid.UUID,
-    user: User = Depends(get_current_user),
+    ctx: CampaignContext = Depends(_quest_ctx),
     db: AsyncSession = Depends(get_db),
-) -> list[JournalLiteResponse] | list[JournalLitePartyResponse]:
-    """Entries mentioning this Quest by name. A GM matches the Shorthand or
-    the Narrative; anyone else matches the Narrative only, among the entries
-    visible to them, and gets Party items (no Shorthand), so a Shorthand-only
-    mention never shows up or reorders their list (E0-Access.7)."""
-    quest = await _get_accessible_quest(db, quest_id, user)
-    ctx = await ctx_for(db, user.id, quest.campaign_id)
-    if ctx.role == GM:
-        entries_result = await db.execute(
-            select(JournalEntry)
-            .where(
-                JournalEntry.campaign_id == quest.campaign_id,
-                or_(
-                    JournalEntry.shorthand.ilike(f"%{quest.title}%"),
-                    JournalEntry.narrative.ilike(f"%{quest.title}%"),
-                ),
-            )
-            .order_by(JournalEntry.created_at.desc())
-            .limit(20)
-        )
-        return [JournalLiteResponse.model_validate(e) for e in entries_result.scalars().all()]
+):
+    """Entries mentioning this Quest by title, among the entries visible to
+    ctx. A GM matches the Shorthand or the Narrative and gets lite GM rows;
+    anyone else matches the Narrative only and gets Party entries, so a
+    Shorthand-only mention never shows up or reorders their list (E0-Access.7)."""
+    quest = await _get_accessible_quest(db, quest_id, ctx)
+    needle = f"%{quest.title}%"
+    match = (or_(JournalEntry.shorthand.ilike(needle), JournalEntry.narrative.ilike(needle))
+             if ctx.role == GM else JournalEntry.narrative.ilike(needle))
     entries_result = await db.execute(
-        select(JournalEntry)
-        .where(
-            JournalEntry.campaign_id == quest.campaign_id,
-            visible_clause(JournalEntry, ctx),
-            JournalEntry.narrative.ilike(f"%{quest.title}%"),
-        )
+        scoped_select(JournalEntry, ctx)
+        .where(match)
         .options(selectinload(JournalEntry.tags).selectinload(Tag.custom_category))
         .order_by(JournalEntry.created_at.desc(), JournalEntry.id)
         .limit(20)
     )
-    return [JournalLitePartyResponse.model_validate(e) for e in entries_result.scalars().all()]
+    return await project_all(db, entries_result.scalars().all(), ctx, variant=LITE)
 
 
 @router.post("/{quest_id}/generate")
 async def generate_quest_description_route(
     quest_id: uuid.UUID,
+    quest: Quest = Depends(_visible_quest),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     config: LLMConfig = Depends(get_user_llm_config),
 ) -> dict:
-    quest = await _get_accessible_quest(db, quest_id, user)
     campaign = await db.get(Campaign, quest.campaign_id)
     entries_result = await db.execute(
         select(JournalEntry)

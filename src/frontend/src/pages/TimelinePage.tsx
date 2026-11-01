@@ -81,9 +81,11 @@ function TimelineEntry({
         </div>
         <Link to={`/journal/${entry.id}`} className="block group">
           <div className="rounded-lg border border-border bg-card p-4 flex flex-col gap-2.5 transition-all group-hover:border-primary/40 group-hover:bg-card/80 group-hover:shadow-sm group-hover:-translate-y-0.5">
-            <p className="text-xs text-muted-foreground italic line-clamp-1">
-              Notes: {entry.shorthand}
-            </p>
+            {entry.shorthand && (
+              <p className="text-xs text-muted-foreground italic line-clamp-1">
+                Notes: {entry.shorthand}
+              </p>
+            )}
             <p className={`text-sm leading-relaxed text-card-foreground ${expanded ? "" : "line-clamp-3"}`}>
               {entry.narrative}
             </p>

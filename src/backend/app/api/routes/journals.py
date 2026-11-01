@@ -16,8 +16,7 @@ from app.schemas.journal import (
     GenerateDraftRequest,
     GenerateDraftResponse,
     JournalResponse,
-    JournalListResponse,
-    JournalListPartyResponse,
+    JournalGMListResponse,
     AutocompleteRequest,
     AutocompleteResponse,
     RecapRequest,
@@ -25,9 +24,12 @@ from app.schemas.journal import (
     SessionSummaryRequest,
     SessionSummaryResponse,
 )
-from app.schemas.tag import TagAttachRequest, TagResponse, TagCategoryRef
-from app.access import GM, NotFound, ctx_for, not_found, role_map, visible_clause
-from app.api.deps import get_current_user, get_user_llm_config, get_campaign_with_access, accessible_campaign_ids
+from app.schemas.tag import TagAttachRequest, TagGMResponse
+from app.access import (
+    GM, CampaignContext, ctx_for, ctx_for_request, not_found, project, project_all, require_campaign_for, role_ctx, role_map,
+    scoped_get, scoped_select, scoped_select_multi, visible_clause,
+)
+from app.api.deps import get_current_user, get_user_llm_config, get_campaign_with_access
 from app.services.journal_service import create_journal_entry, generate_draft_narrative
 from app.services.dedup_service import check_hash
 from app.services.chat_service import autocomplete_notes, generate_session_recap, summarize_session_transcript
@@ -37,6 +39,12 @@ from app.services.llm_provider import LLMConfig
 from app.services import llm_config_service
 
 router = APIRouter()
+
+# Routes whose body differs by Role return access.project output with
+# response_model=None (FastAPI must not coerce a Party body into the GM
+# schema); `responses=` keeps the GM schema in the OpenAPI docs.
+_GM_OR_PARTY = "GM: the GM schema; Player or member preview: the Party schema (no `shorthand`)."
+_ENTRY_TAGS = selectinload(JournalEntry.tags).selectinload(Tag.custom_category)
 
 
 @router.post("/generate-draft", response_model=GenerateDraftResponse)
@@ -60,15 +68,16 @@ async def generate_journal_draft(
     return GenerateDraftResponse(narrative=narrative)
 
 
-@router.post("/generate", response_model=JournalResponse, status_code=201)
+@router.post("/generate", response_model=None, status_code=201,
+             responses={201: {"model": JournalResponse, "description": _GM_OR_PARTY}})
 @limiter.limit("20/minute", key_func=user_or_ip)
 async def generate_journal(
     request: Request,
     body: GenerateRequest,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
-) -> JournalResponse:
-    await get_campaign_with_access(db, body.campaign_id, user)
+):
+    ctx = await ctx_for_request(request, db, user, body.campaign_id)
     if await check_hash(body.campaign_id, user.id, body.entry_hash):
         raise HTTPException(status_code=409, detail="Duplicate entry detected")
 
@@ -93,11 +102,14 @@ async def generate_journal(
     )
     if body.narrative is None:
         await llm_config_service.meter(db, user, config, body.notes, entry.narrative)
-    return entry
+    # The write response is projected like a read (AR-26).
+    return (await project_all(db, [entry], ctx))[0]
 
 
-@router.get("/", response_model=JournalListResponse | JournalListPartyResponse)
+@router.get("/", response_model=None,
+            responses={200: {"model": JournalGMListResponse, "description": _GM_OR_PARTY}})
 async def list_journals(
+    request: Request,
     campaign_id: uuid.UUID | None = None,
     search: str | None = None,
     tag_id: uuid.UUID | None = None,
@@ -105,28 +117,28 @@ async def list_journals(
     limit: int = Query(20, ge=1, le=100),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
-) -> JournalListResponse | JournalListPartyResponse:
+):
     """Entries of one Campaign, or (no `campaign_id`) of every Campaign the
-    user owns or belongs to. In a Campaign where the caller is GM every entry
-    is listed and `search` matches and ranks on `narrative_tsv` (Shorthand +
-    Narrative). In a Campaign where they are not, only entries visible to
-    them are listed and `search` uses `party_tsv` (Narrative only), so a
-    Shorthand-only word never changes what they find or its order
-    (E0-Access.7). A list that covers any non-GM Campaign returns Party
-    items (no Shorthand)."""
+    user owns or belongs to, each row projected by the caller's Role in its
+    own Campaign (access.project: a non-GM row never carries Shorthand). In a
+    Campaign where the caller is GM every entry is listed and `search`
+    matches and ranks on `narrative_tsv` (Shorthand + Narrative). Elsewhere
+    only entries visible to them are listed and `search` uses `party_tsv`
+    (Narrative only), so a Shorthand-only word never changes what they find
+    or its order (E0-Access.7). `total` counts visible rows only."""
     if campaign_id:
-        ctxs = [await ctx_for(db, user.id, campaign_id)]
+        ctx = await ctx_for_request(request, db, user, campaign_id)
+        ctxs = [ctx]
+        links = scoped_select(JournalTag, ctx)
+        scope = ctx
     else:
         # No specific campaign: everything across every campaign this user can
-        # see (owned or joined), not just entries they personally authored —
-        # a collaborator's entries are as much "yours to read" as your own.
+        # see (owned or joined), each row by the user's Role in its own
+        # Campaign (no preview: that narrows one Campaign).
         roles = await role_map(db, user)
-        ctxs = []
-        for cid in roles:
-            try:
-                ctxs.append(await ctx_for(db, user.id, cid))
-            except NotFound:
-                continue  # membership revoked mid-request: that Campaign drops out
+        ctxs = [role_ctx(roles, cid) for cid in roles]
+        links = scoped_select_multi(JournalTag, roles)
+        scope = roles
     gm_ids = [c.campaign_id for c in ctxs if c.role == GM]
     party_ctxs = [c for c in ctxs if c.role != GM]
 
@@ -139,13 +151,9 @@ async def list_journals(
         if search:
             branch = and_(branch, JournalEntry.party_tsv.op("@@")(tsq))
         party_branches.append(branch)
-    scope = or_(gm_branch, *party_branches) if party_branches else gm_branch
+    query = select(JournalEntry).where(or_(gm_branch, *party_branches) if party_branches else gm_branch)
 
-    query = (
-        select(JournalEntry)
-        .where(scope)
-        .options(selectinload(JournalEntry.tags).selectinload(Tag.custom_category))
-    )
+    query = query.options(_ENTRY_TAGS)
     if search:
         if party_ctxs:
             rank = case(
@@ -160,8 +168,10 @@ async def list_journals(
     else:
         query = query.order_by(JournalEntry.created_at.desc(), JournalEntry.id)
     if tag_id:
-        from app.db.models.tag import JournalTag
-        query = query.join(JournalTag).where(JournalTag.tag_id == tag_id)
+        # Only links the caller may see: a tag found only in the Shorthand
+        # matches nothing for a Player.
+        visible_links = links.where(JournalTag.tag_id == tag_id).with_only_columns(JournalTag.journal_id)
+        query = query.where(JournalEntry.id.in_(visible_links))
 
     count_query = select(func.count()).select_from(query.subquery())
     total = (await db.execute(count_query)).scalar()
@@ -170,62 +180,36 @@ async def list_journals(
     result = await db.execute(query)
     items = result.scalars().all()
 
-    if party_ctxs:
-        return JournalListPartyResponse(items=items, total=total, page=page, limit=limit)
-    return JournalListResponse(items=items, total=total, page=page, limit=limit)
+    return {"items": await project_all(db, items, scope), "total": total, "page": page, "limit": limit}
 
 
-@router.get("/{journal_id}", response_model=JournalResponse)
+@router.get("/{journal_id}", response_model=None,
+            responses={200: {"model": JournalResponse, "description": _GM_OR_PARTY}})
 async def get_journal(
     journal_id: uuid.UUID,
-    user: User = Depends(get_current_user),
+    ctx: CampaignContext = Depends(require_campaign_for(JournalEntry, "journal_id")),
     db: AsyncSession = Depends(get_db),
-) -> JournalResponse:
-    result = await db.execute(
-        select(JournalEntry)
-        .where(JournalEntry.id == journal_id, JournalEntry.campaign_id.in_(await accessible_campaign_ids(db, user)))
-        .options(selectinload(JournalEntry.tags).selectinload(Tag.custom_category))
-    )
-    entry = result.scalar_one_or_none()
-    if not entry:
-        raise HTTPException(status_code=404, detail="Journal entry not found")
-    return entry
+):
+    entry = await scoped_get(db, JournalEntry, ctx, journal_id, options=[_ENTRY_TAGS])
+    return (await project_all(db, [entry], ctx))[0]
 
 
-async def _get_accessible_entry(db: AsyncSession, journal_id: uuid.UUID, user: User) -> JournalEntry:
-    result = await db.execute(
-        select(JournalEntry)
-        .where(JournalEntry.id == journal_id, JournalEntry.campaign_id.in_(await accessible_campaign_ids(db, user)))
-        .options(selectinload(JournalEntry.tags).selectinload(Tag.custom_category))
-    )
-    entry = result.scalar_one_or_none()
-    if not entry:
-        raise HTTPException(status_code=404, detail="Journal entry not found")
-    return entry
-
-
-@router.post("/{journal_id}/tags", response_model=TagResponse, status_code=201)
+@router.post("/{journal_id}/tags", response_model=None, status_code=201,
+             responses={201: {"model": TagGMResponse, "description": _GM_OR_PARTY}})
 async def attach_tag(
     journal_id: uuid.UUID,
     body: TagAttachRequest,
-    user: User = Depends(get_current_user),
+    ctx: CampaignContext = Depends(require_campaign_for(JournalEntry, "journal_id")),
     db: AsyncSession = Depends(get_db),
-) -> TagResponse:
-    entry = await _get_accessible_entry(db, journal_id, user)
+):
+    entry = await scoped_get(db, JournalEntry, ctx, journal_id)
     name = body.name.strip().title()[:200]
     if not name:
         raise HTTPException(status_code=422, detail="Tag name cannot be empty.")
 
-    category = None
     if body.custom_category_id:
-        category_result = await db.execute(
-            select(TagCategory).where(
-                TagCategory.id == body.custom_category_id, TagCategory.campaign_id == entry.campaign_id
-            )
-        )
-        category = category_result.scalar_one_or_none()
-        if not category:
-            raise HTTPException(status_code=404, detail="Tag category not found for this campaign.")
+        # A hidden category is a missing one.
+        await scoped_get(db, TagCategory, ctx, body.custom_category_id)
 
     tag_filter = (
         (Tag.custom_category_id == body.custom_category_id) if body.custom_category_id
@@ -239,32 +223,31 @@ async def attach_tag(
         await db.flush()
 
     link_exists = await db.execute(
-        select(JournalTag).where(JournalTag.journal_id == journal_id, JournalTag.tag_id == tag.id)
+        select(JournalTag).where(JournalTag.journal_id == entry.id, JournalTag.tag_id == tag.id)
     )
     if not link_exists.scalar_one_or_none():
-        db.add(JournalTag(journal_id=journal_id, tag_id=tag.id))
+        db.add(JournalTag(journal_id=entry.id, tag_id=tag.id))
         await db.commit()
 
-    return TagResponse(
-        id=tag.id, name=tag.name, tag_type=tag.tag_type,
-        custom_category=TagCategoryRef.model_validate(category) if category else None,
-    )
+    await db.refresh(tag, attribute_names=["custom_category"])
+    return project(tag, ctx)
 
 
 @router.delete("/{journal_id}/tags/{tag_id}", status_code=204)
 async def detach_tag(
     journal_id: uuid.UUID,
     tag_id: uuid.UUID,
-    user: User = Depends(get_current_user),
+    ctx: CampaignContext = Depends(require_campaign_for(JournalEntry, "journal_id")),
     db: AsyncSession = Depends(get_db),
 ) -> None:
-    await _get_accessible_entry(db, journal_id, user)
+    entry = await scoped_get(db, JournalEntry, ctx, journal_id)
+    # A link the caller may not see (a Shorthand tag, for a Player) is missing.
     result = await db.execute(
-        select(JournalTag).where(JournalTag.journal_id == journal_id, JournalTag.tag_id == tag_id)
+        scoped_select(JournalTag, ctx).where(JournalTag.journal_id == entry.id, JournalTag.tag_id == tag_id)
     )
     link = result.scalar_one_or_none()
     if not link:
-        raise HTTPException(status_code=404, detail="Tag is not attached to this entry.")
+        not_found()
     await db.delete(link)
     await db.commit()
 
@@ -367,22 +350,14 @@ async def reindex_journal_embeddings(
 @router.delete("/{journal_id}", status_code=204)
 async def delete_journal(
     journal_id: uuid.UUID,
-    user: User = Depends(get_current_user),
+    ctx: CampaignContext = Depends(require_campaign_for(JournalEntry, "journal_id")),
     db: AsyncSession = Depends(get_db),
 ) -> None:
-    result = await db.execute(
-        select(JournalEntry).where(JournalEntry.id == journal_id, JournalEntry.campaign_id.in_(await accessible_campaign_ids(db, user)))
-    )
-    entry = result.scalar_one_or_none()
-    if not entry:
-        raise HTTPException(status_code=404, detail="Journal entry not found")
+    entry = await scoped_get(db, JournalEntry, ctx, journal_id)
     # Anyone with access can delete their own entry; only the campaign owner can
-    # delete someone else's (matches the minimal Party Mode permission model —
-    # no per-entry edit permissions, no roles beyond owner/member).
-    if entry.user_id != user.id:
-        campaign_result = await db.execute(select(Campaign).where(Campaign.id == entry.campaign_id))
-        campaign = campaign_result.scalar_one_or_none()
-        if not campaign or campaign.user_id != user.id:
-            raise HTTPException(status_code=403, detail="Only the entry's author or the campaign owner can delete it.")
+    # delete someone else's (the Player write rules arrive with E0-Access.6's
+    # can_write). Every denial is the one 404, never a 403.
+    if entry.user_id != ctx.user_id and not ctx.is_owner:
+        not_found()
     await db.delete(entry)
     await db.commit()

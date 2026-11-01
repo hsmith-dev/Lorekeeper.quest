@@ -108,7 +108,7 @@ export function SharedCampaignPage() {
         <div>
           <p className="text-xs text-muted-foreground uppercase tracking-widest mb-2">Shared Campaign (read-only)</p>
           {isLoading && <div className="h-10 w-64 bg-muted rounded animate-pulse" />}
-          {isError && <p className="text-sm text-danger">This link is invalid or has been revoked.</p>}
+          {isError && <p className="text-sm text-danger">This link is invalid, expired or revoked.</p>}
           {campaign && (
             <>
               <h1 className="text-2xl font-bold text-foreground" style={{ fontFamily: "var(--font-heading)" }}>

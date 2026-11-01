@@ -338,9 +338,11 @@ def scoped_select(model: type, ctx: "CampaignContext") -> sa.Select:
     return stmt.where(visible_clause(model, ctx))
 
 
-async def scoped_get(db: AsyncSession, model: type, ctx: "CampaignContext", row_id: Any) -> Any:
+async def scoped_get(db: AsyncSession, model: type, ctx: "CampaignContext", row_id: Any, *,
+                     options: Sequence[Any] = ()) -> Any:
     """The row `row_id` of `model` if it is in ctx's Campaign and visible to
-    ctx; else the one `not_found()` (hidden and missing are the same)."""
+    ctx; else the one `not_found()` (hidden and missing are the same).
+    `options` are loader options for the select (e.g. `selectinload(...)`)."""
     pk = sa.inspect(model).primary_key
     if len(pk) != 1:
         raise TypeError(f"scoped_get: {model.__name__!r} has a composite primary key")
@@ -349,7 +351,10 @@ async def scoped_get(db: AsyncSession, model: type, ctx: "CampaignContext", row_
             row_id = uuid.UUID(str(row_id))
         except (TypeError, ValueError, AttributeError):
             not_found()
-    row = (await db.execute(scoped_select(model, ctx).where(pk[0] == row_id))).scalar_one_or_none()
+    stmt = scoped_select(model, ctx).where(pk[0] == row_id)
+    if options:
+        stmt = stmt.options(*options)
+    row = (await db.execute(stmt)).scalar_one_or_none()
     if row is None:
         not_found()
     return row

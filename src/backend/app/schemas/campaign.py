@@ -30,7 +30,7 @@ class CampaignUpdate(BaseModel):
     description: str | None = None
 
 
-class CampaignResponse(BaseModel):
+class CampaignGMResponse(BaseModel):
     id: uuid.UUID
     name: str
     genre: Genre
@@ -47,6 +47,26 @@ class CampaignResponse(BaseModel):
     owner_display_name: str | None = None
 
     model_config = {"from_attributes": True}
+
+
+class CampaignPartyResponse(BaseModel):
+    # A Player's view of a Campaign they belong to (E0-Access.4). The
+    # Campaign row carries no GM field, so the keys match the GM schema; a
+    # read-only Share Link viewer gets PublicCampaignResponse (app/schemas/
+    # share.py) instead.
+    id: uuid.UUID
+    name: str
+    genre: Genre
+    description: str | None
+    created_at: datetime
+    is_owner: bool = True
+    owner_display_name: str | None = None
+
+    model_config = {"from_attributes": True}
+
+
+# The pre-E0-Access.4 name is the GM schema.
+CampaignResponse = CampaignGMResponse
 
 
 class WeeklyCount(BaseModel):
