@@ -1,0 +1,8 @@
+# EV-4 exemptions: routes that need no spoiler-leak probe, each with a reason
+# (tests/ev4/test_coverage.py fails on an empty reason, on a route that does
+# not exist, and on a route that is also probed).
+#
+# Format:
+#   - route: "GET /api/health"
+#     reason: "Static liveness payload; reads no Campaign data."
+[]

@@ -1,0 +1,83 @@
+{
+  "_doc": "EV-4 canary Campaign (tests/ev4/fixtures.py). Party-visible fields hold plain text; every GM-only field or record holds a {canary:KIND} placeholder, replaced by a unique CANARY-<KIND>-<uuid4> token each time the seed is loaded. KIND is [A-Z0-9]+. A token in a response to anyone but a GM of the token's Campaign is a leak. Add a placeholder here whenever a GM-only field or table lands.",
+  "campaign": {
+    "name": "EV-4 Canary Campaign",
+    "genre": "fantasy",
+    "description": "A quiet border town where the party keeps a journal."
+  },
+  "journal_entries": [
+    {
+      "narrative": "The party reached the Drowsy Dragon at dusk and met the innkeeper.",
+      "shorthand": "{canary:SHORTHAND} innkeeper is the lich",
+      "session_date": "2026-01-02"
+    },
+    {
+      "narrative": "On the north road the party found the caravan's broken wagons.",
+      "shorthand": "{canary:SHORTHAND} caravan taken by the cult",
+      "session_date": "2026-01-09"
+    }
+  ],
+  "npcs": [
+    {
+      "name": "Barnaby",
+      "role": "npc",
+      "status": "alive",
+      "description": "A jovial innkeeper.",
+      "notes": "{canary:NPCNOTES} secretly the lich"
+    }
+  ],
+  "quests": [
+    {
+      "title": "Find the missing caravan",
+      "description": "Merchants vanished on the north road.",
+      "status": "active",
+      "notes": "{canary:QUESTNOTES} the cult holds them in the mine"
+    }
+  ],
+  "shorthand_terms": [
+    {
+      "term": "{canary:TERM}",
+      "meaning": "{canary:TERMMEANING} the lich",
+      "usage": "{canary:TERMUSAGE}"
+    }
+  ],
+  "session_plans": [
+    {
+      "title": "{canary:PLANTITLE}",
+      "content": "{canary:PLAN} reveal the lich at the inn"
+    }
+  ],
+  "chat_sessions": [
+    {
+      "title": "{canary:CHATTITLE}",
+      "messages": [
+        {"role": "user", "content": "{canary:CHATMSG} who is the lich?"},
+        {"role": "assistant", "content": "{canary:CHATREPLY} Barnaby."}
+      ]
+    }
+  ],
+  "source_documents": [
+    {
+      "title": "{canary:SOURCETITLE}",
+      "filename": "{canary:SOURCEFILE}.pdf",
+      "chunks": [
+        {"content": "{canary:SOURCECHUNK} the lich's phylactery is in the cellar"}
+      ]
+    }
+  ],
+  "character_sheet_templates": [
+    {
+      "name": "Adventurer",
+      "fields": [
+        {"key": "class", "label": "Class", "type": "text"},
+        {"key": "secret", "label": "Secret", "type": "long_text"}
+      ],
+      "sheets": [
+        {
+          "name": "{canary:SHEET}",
+          "data": {"class": "{canary:SHEETDATA}", "secret": "{canary:SHEETSECRET}"}
+        }
+      ]
+    }
+  ]
+}
