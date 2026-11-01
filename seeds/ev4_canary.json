@@ -75,6 +75,7 @@
       "sheets": [
         {
           "name": "{canary:SHEET}",
+          "visibility": "gm",
           "data": {"class": "{canary:SHEETDATA}", "secret": "{canary:SHEETSECRET}"}
         }
       ]

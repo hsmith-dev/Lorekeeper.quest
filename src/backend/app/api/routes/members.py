@@ -15,7 +15,7 @@ router = APIRouter()
 
 @router.get("/{campaign_id}/me", response_model=CampaignRoleResponse)
 async def get_my_campaign_role(
-    ctx: CampaignContext = Depends(require_campaign("player")),
+    ctx: CampaignContext = Depends(require_campaign("player", preview=False)),
 ) -> CampaignRoleResponse:
     return CampaignRoleResponse(
         campaign_id=ctx.campaign_id,

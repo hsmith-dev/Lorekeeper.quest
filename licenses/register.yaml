@@ -566,6 +566,7 @@ entries:
   - {name: "anyio", kind: python, version: "4.15.1", license: "MIT", source_url: "https://pypi.org/project/anyio/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
   - {name: "async-timeout", kind: python, version: "5.0.1", license: "Apache-2.0", source_url: "https://pypi.org/project/async-timeout/", editions: [agpl, commercial], images: [backend], notes: ""}
   - {name: "asyncpg", kind: python, version: "0.29.0", license: "Apache-2.0", source_url: "https://pypi.org/project/asyncpg/", editions: [agpl, commercial], images: [backend], notes: ""}
+  - {name: "attrs", kind: python, version: "24.2.0", license: "MIT", source_url: "https://pypi.org/project/attrs/", editions: [agpl, commercial], notes: "dev/test only (requirements-dev.txt; a hypothesis dependency, E0-Access.3); not shipped"}
   - {name: "bcrypt", kind: python, version: "4.2.0", license: "Apache-2.0", source_url: "https://pypi.org/project/bcrypt/", editions: [agpl, commercial], images: [backend], notes: ""}
   - {name: "blis", kind: python, version: "0.7.11", license: "BSD-3-Clause", source_url: "https://pypi.org/project/blis/", editions: [agpl, commercial], images: [backend], notes: ""}
   - {name: "blis", kind: python, version: "1.3.4", license: "BSD-3-Clause", source_url: "https://pypi.org/project/blis/", editions: [agpl, commercial], images: [ml], notes: "ml sidecar (src/services/ml) lock; spaCy 3.8 stack, see E0-Platform.3. Metadata says 'BSD' (alias)."}
@@ -604,6 +605,7 @@ entries:
   - {name: "httpx", kind: python, version: "0.28.1", license: "BSD-3-Clause", source_url: "https://pypi.org/project/httpx/", editions: [agpl, commercial], images: [ml], notes: "ml sidecar (src/services/ml) lock; spaCy 3.8 stack, see E0-Platform.3."}
   - {name: "httpx2", kind: python, version: "2.16.0", license: "BSD-3-Clause", source_url: "https://pypi.org/project/httpx2/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
   - {name: "huggingface_hub", kind: python, version: "2.4.0", license: "Apache-2.0", source_url: "https://pypi.org/project/huggingface_hub/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
+  - {name: "hypothesis", kind: python, version: "6.112.1", license: "MPL-2.0", source_url: "https://pypi.org/project/hypothesis/", editions: [agpl, commercial], notes: "dev/test only (requirements-dev.txt; CI-11 registry property test, E0-Access.3); not shipped, used unmodified"}
   - {name: "idna", kind: python, version: "3.20", license: "BSD-3-Clause", source_url: "https://pypi.org/project/idna/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
   - {name: "ImageIO", kind: python, version: "2.38.1", license: "BSD-2-Clause", source_url: "https://pypi.org/project/ImageIO/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
   - {name: "import-linter", kind: python, version: "2.15", license: "BSD-2-Clause", scanned_license: "BSD License", source_url: "https://pypi.org/project/import-linter/", editions: [agpl, commercial], notes: "dev/CI only (requirements-dev.txt; AD-1 contracts in gates.yml, E0-QA.10); not shipped"}
