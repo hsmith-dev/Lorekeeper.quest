@@ -2,7 +2,7 @@
 title: 'E0-QA.15: EV-5 benchmark suite and the x86 spike re-run'
 type: 'feature'
 created: '2026-11-01'
-status: 'in-progress'
+status: 'done'
 baseline_revision: '9160cb62abe2d7cace054d4e95f6d85883b185f9'
 review_loop_iteration: 0
 followup_review_recommended: false
@@ -71,3 +71,36 @@ Store shape: `{"format": 1, "rows": {"<id>": {"cpu": M, "gpu": M}}, "spikes": [r
 **Commands:**
 - `cd src/backend && python -m pytest -q tests/test_eval_benchmarks.py tests/test_eval_common.py` (CI / desktop backend image) -- expected: all pass
 - `uv run --python 3.11 python -m py_compile src/backend/scripts/eval_benchmarks.py src/backend/scripts/spikes/*.py` -- expected: no output
+
+## Review Triage Log (pass 1)
+
+Two layers ran (blind-hunter, edge-case-hunter); verification-gap and the others were skipped to bound cost.
+
+- patch: SPIKE-2 chunk counting stated three ways. Fixed the comment and the table note: n counts chunks ≥ 5 s, the 7 s tail included.
+- patch: SPIKE-6 n silently dropped cache-hit runs. n now renders as `1 (+2 cached)`, with a note.
+- patch: the busy LLM thread could die silently. Errors are recorded, a result with errors or a dead thread is refused, and the thread is joined.
+- patch: the store could be saved before the doc's region check. The CLI now renders the current store first.
+- patch: `load_store` didn't re-validate measurements. It now does, and raises ValueError.
+- patch: `run_x86.sh` startup wait had no timeout, and the `num_thread` grep wasn't anchored. Both fixed.
+- patch: unpinned bench image. torch, sentence-transformers, transformers, misaki and numpy are now pinned.
+- patch: the doc listed only two over-limit cases. The third (Ollama uncapped, re-run at 14 GB) is now listed.
+- patch: the capped Change-Proposals time was presented as measured. It is now marked as an estimate, with the arithmetic.
+- patch: TTS OOM reported without the cu128 memory caveat. The caveat is added (CPU torch would still be about 2.8 GB, still over).
+- patch: the busy-lag figure didn't match the data. It now reads 2.49 s.
+- patch: the spike6 docstring claimed the nonce defeats the cache. Corrected, and a `--num-thread` warning added.
+- patch: input checks. An unknown `--shapes` value, an Ollama stream error, a stream with no done message, and `--n` < 1 are now refused.
+- false: "`docs/benchmarks.json` is not in the diff". It was excluded from the review diff on purpose (88 KB of raw runs); it is committed.
+- defer: Hardware cells don't show the cgroup limits. The 4-core/AD-7 limits are stated in the Method section; it is captured in env but not rendered.
+- defer: the cache-hit heuristic misses a shape where every run is cached. No measured shape has that, since run 1 is always cold after the flush call.
+- defer: SMT-sibling and other-stack idleness is not enforced. Contention is noted in the doc.
+
+## Auto Run Result
+
+Status: done. Measured on the desktop (online for this story).
+
+**Backend suite** (lorekeeper-backend-test against a throwaway pgvector): 1133 passed, 31 skipped. Then `test_eval_benchmarks.py`: 23 passed locally (`--noconftest`).
+
+**Needs desktop verification:** none for this PR. Follow-ups that other stories own:
+- The Kokoro-FastAPI tts image against 2.5 GB (E0-Platform.10 / E5).
+- The ollama 5.25 GB limit under the 12-thread runner, with the prompt cache on (E0-Platform.10).
+- The extraction_300 truncation (E0-LLM.6).

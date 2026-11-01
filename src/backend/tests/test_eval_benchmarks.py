@@ -269,6 +269,38 @@ def test_cli_record_ingest_and_errors(tmp_path, capsys):
     assert out.read_text() == doc
 
 
+def test_cli_doc_missing_region_leaves_store_unchanged(tmp_path, capsys):
+    """The doc is checked before ingest/record touch the store, so the two never drift."""
+    store, out = tmp_path / "s.json", tmp_path / "BENCHMARKS.md"
+    out.write_text("<!-- bench:nfr -->\n<!-- /bench:nfr -->\n")  # no bench:spikes region
+    spike = tmp_path / "spike.json"
+    spike.write_text(json.dumps(_spike(fifty_pairs_s=_stats(1.5, 1.4, 1.9))))
+    assert eval_benchmarks.main(["--store", str(store), "--out", str(out), "--ingest", str(spike)]) == 1
+    assert "bench:spikes" in capsys.readouterr().err
+    assert not store.exists()
+
+
+def test_load_store_rejects_a_malformed_measurement(tmp_path):
+    p = tmp_path / "s.json"
+    p.write_text(json.dumps({"format": 1, "rows": {"proposals": {"cpu": {"value": "1 s"}}}, "spikes": []}))
+    with pytest.raises(ValueError, match="proposals.cpu"):
+        load_store(p)
+    p.write_text(json.dumps({"format": 1, "rows": {"proposals": {"cpu": "1 s"}}, "spikes": []}))
+    with pytest.raises(ValueError, match="not a measurement"):
+        load_store(p)
+
+
+def test_spike6_cache_hits_are_shown_and_left_out_of_n():
+    shape = {"prompt_tokens": 2051, "cache_hits": 2, "total_s": _stats(75.2, 75.2, 75.2, n=1),
+             "ttft_s": _stats(23.4, 23.4, 23.4, n=1), "prompt_tok_s": _stats(87.7, 87.7, 87.7, n=1),
+             "gen_tok_s": _stats(7.8, 7.7, 7.8, n=3)}
+    store = {"format": 1, "rows": {}, "spikes": [
+        {**_spike("SPIKE-6", "cpu-ref4", "cpu", shapes={"extraction_300": shape}),
+         "env": {"date": "2026-11-01", "ollama": "0.40.3", "model_digest": "68ffea1422de"}}]}
+    text = render(store)["bench:spikes"]
+    assert "| 1 (+2 cached) |" in text and "prompt cache" in text
+
+
 # ── spikes/_bench.py ────────────────────────────────────────────────────────
 
 def _load_bench():

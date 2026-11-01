@@ -109,6 +109,13 @@ def load_store(path: str | os.PathLike = STORE_PATH) -> dict:
             raise ValueError(f"{p}: unknown row {row_id!r}")
         if not isinstance(cols, dict) or set(cols) - set(COLUMNS):
             raise ValueError(f"{p}: row {row_id!r} has columns other than {COLUMNS}")
+        for col, m in cols.items():
+            if not isinstance(m, dict):
+                raise ValueError(f"{p}: {row_id}.{col} is not a measurement object")
+            try:
+                measurement(row_id, col, **m)
+            except TypeError as exc:
+                raise ValueError(f"{p}: {row_id}.{col}: {exc}") from None
     for result in spikes:
         _check_spike(result, str(p))
     return store
@@ -389,9 +396,12 @@ def _render_spike6(results: list[dict]) -> list[str]:
         env = r["env"]
         model = f"{env.get('ollama') or DASH} / {env.get('model_digest') or DASH}"
         for shape, s in sorted((_get(r["metrics"], "shapes") or {}).items()):
+            n = _stat_n(s.get("total_s"))
+            if s.get("cache_hits"):  # served from the prompt cache: out of the prompt-side stats
+                n = f"{n} (+{s['cache_hits']} cached)"
             rows.append([r["config"], r["column"], shape, model]
                         + [_stat(s.get(k)) for _, k in SPIKE6_SHAPE_COLS]
-                        + _tail(r, _stat_n(s.get("total_s"))))
+                        + _tail(r, n))
     out.append(_table(["Config", "Column", "Shape", "Ollama / model digest"]
                       + [h for h, _ in SPIKE6_SHAPE_COLS] + list(TAIL), rows))
     struct = [r for r in results if isinstance(_get(r["metrics"], "structured"), dict)]
@@ -435,8 +445,14 @@ def render_spikes(store: dict) -> str:
                     _table(["Config", "Column"] + [h for h, _ in cols] + list(TAIL), rows)]
         else:
             out += _render_generic(spike, rs)
-    out += ["", "Timings are `median (min–max)` over n runs (for SPIKE-2, n counts every "
-            "full 15 s chunk of every run)."]
+    note = "Timings are `median (min–max)` over n runs."
+    if "SPIKE-2" in by_spike:
+        note += (" For SPIKE-2, n counts every chunk of 5 s or more in every run: the 15 s chunks"
+                 " and the clip's 7 s tail.")
+    if "SPIKE-6" in by_spike:
+        note += (" For SPIKE-6, runs served from Ollama's prompt cache are left out of n and"
+                 " of the prompt-side columns, and shown as `(+k cached)`.")
+    out += ["", note]
     return "\n".join(out)
 
 
@@ -482,6 +498,9 @@ def main(argv: list[str] | None = None) -> int:
             fields = dict(value=args.value, n=args.n, hardware=args.hardware,
                           peak_rss_mb=args.peak_rss_mb, note=args.note, date=args.date)
             measurement(args.record, args.column, **fields)  # validate before anything is written
+        # Render the current store first: a doc missing a region fails here,
+        # before ingest/record change the store (store and doc never drift).
+        write(load_store(args.store), args.out)
         if args.ingest:
             ingest(args.ingest, store=args.store)
         if args.record:

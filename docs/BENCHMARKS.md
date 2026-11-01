@@ -23,9 +23,11 @@ sign-off before the PRD changes.
   `docker run --cpus=4 --cpuset-cpus=0-3` (four physical Zen 5 cores; their
   SMT siblings stay idle), with the GPU hidden (`CUDA_VISIBLE_DEVICES=""`) and
   memory capped at the component's AD-7 limit: stt 1.25 GB, ml 2.5 GB,
-  ollama 5.25 GB. Two cases had to go over their limit, and each is reported
-  rather than hidden: TTS was OOM-killed at 2.5 GB, and `small` STT has no
-  limit of its own, so it ran at 2.5 GB. The host's 60 GB doesn't count
+  ollama 5.25 GB. Three cases had to go over their limit, and each is
+  reported rather than hidden: TTS was OOM-killed at 2.5 GB and re-ran at
+  6 GB; `small` STT has no limit of its own, so it ran at 2.5 GB; and the
+  uncapped Ollama run was OOM-killed at 5.25 GB and re-ran at the prod
+  compose's 14 GB. The host's 60 GB doesn't count
   toward the 16 GB box: only the container limits do.
 - **Ollama on CPU:** `ollama/ollama:0.40.3` in its own container, with AD-7's
   configuration (`OLLAMA_MAX_LOADED_MODELS=1`, `OLLAMA_NUM_PARALLEL=1`,
@@ -66,7 +68,7 @@ sign-off before the PRD changes.
 | GPU | NVIDIA RTX 5080 16 GB, driver 615.78.08 |
 | OS / runtime | CachyOS, kernel 7.2.9-2-cachyos, Docker 29.9.0 with the NVIDIA toolkit |
 | Ollama | 0.40.3, native (GPU) and `ollama/ollama:0.40.3` (CPU). `lorekeeper` is Q4_K_M, 7.2B, digest `68ffea1422de`. The `num_thread` Modelfile variants have the same weights under other manifest digests: `9e042e72bd1e` (4 threads) and `58b2a62db3a2` (3 threads). |
-| Bench image | Python 3.12, torch 2.11.0+cu128, faster-whisper 1.2.1, ctranslate2 4.8.4, kokoro 0.9.4, sentence-transformers (current) |
+| Bench image | Python 3.12, torch 2.11.0+cu128, faster-whisper 1.2.1, ctranslate2 4.8.4, kokoro / misaki 0.9.4, sentence-transformers 6.2.0, transformers 5.22.1 (pinned in `Dockerfile.bench`) |
 | ml image | torch 2.15.0+cpu, sentence-transformers 5.5.1, transformers 5.22.1, baked `nli-deberta-v3-xsmall` (the main-branch build, `qa9b-ml-new`) |
 
 **Read the CPU column as optimistic per core.** Four Zen 5 cores at 5.6 GHz
@@ -141,20 +143,20 @@ one another.
 | cpu-capped-3-t3 | cpu | continuity_verify | 0.40.3 / 58b2a62db3a2 | 87 | 47.4 (45.8–48) | 6.07 (5.74–6.21) | 1.84 (1.82–1.9) | 7.94 (5.84–8.33) | 3 | 2026-11-01 | AMD Ryzen 9 9900X 12-Core Processor, 60 GB host |
 | cpu-capped-3-t3 | cpu | npc_first_turn | 0.40.3 / 58b2a62db3a2 | 95 | 83.9 (50.5–107.7) | 5.8 (5.57–6.12) | 1.15 (0.89–1.92) | 11.93 (11.6–13.41) | 3 | 2026-11-01 | AMD Ryzen 9 9900X 12-Core Processor, 60 GB host |
 | cpu-ref4 | cpu | continuity_verify | 0.40.3 / 9e042e72bd1e | 88 | 92 (91.8–93.5) | 8.97 (8.97–9.05) | 0.94 (0.94–0.95) | 5.29 (3.7–5.29) | 3 | 2026-11-01 | AMD Ryzen 9 9900X 12-Core Processor, 60 GB host |
-| cpu-ref4 | cpu | extraction_300 | 0.40.3 / 9e042e72bd1e | 2051 | 87.7 (87.7–87.7) | 7.82 (7.72–7.82) | 23.43 (23.43–23.43) | 75.22 (75.22–75.22) | 1 | 2026-11-01 | AMD Ryzen 9 9900X 12-Core Processor, 60 GB host |
+| cpu-ref4 | cpu | extraction_300 | 0.40.3 / 9e042e72bd1e | 2051 | 87.7 (87.7–87.7) | 7.82 (7.72–7.82) | 23.43 (23.43–23.43) | 75.22 (75.22–75.22) | 1 (+2 cached) | 2026-11-01 | AMD Ryzen 9 9900X 12-Core Processor, 60 GB host |
 | cpu-ref4 | cpu | extraction_50 | 0.40.3 / 9e042e72bd1e | 1628 | 90.8 (89.3–90.9) | 7.85 (7.71–8.03) | 17.93 (17.93–18.35) | 68.89 (67.76–70.22) | 3 | 2026-11-01 | AMD Ryzen 9 9900X 12-Core Processor, 60 GB host |
 | cpu-ref4 | cpu | npc_first_turn | 0.40.3 / 9e042e72bd1e | 95 | 91.6 (85.4–92.5) | 8.33 (8.31–8.33) | 1.04 (1.03–1.12) | 19.08 (19.04–19.13) | 3 | 2026-11-01 | AMD Ryzen 9 9900X 12-Core Processor, 60 GB host |
 | cpu-ref4 | cpu | recap_draft_300 | 0.40.3 / 9e042e72bd1e | 941 | 92.8 (91–93.6) | 8.22 (7.94–8.31) | 10.13 (10.06–10.34) | 64.99 (64.22–66.78) | 3 | 2026-11-01 | AMD Ryzen 9 9900X 12-Core Processor, 60 GB host |
 | cpu-ref4 | cpu | rolling_recap | 0.40.3 / 9e042e72bd1e | 518 | 93.9 (92.3–95) | 8.46 (8.14–8.54) | 5.52 (5.43–5.71) | 24.16 (23.6–25.37) | 3 | 2026-11-01 | AMD Ryzen 9 9900X 12-Core Processor, 60 GB host |
 | cpu-ref4-default-threads | cpu | continuity_verify | 0.40.3 / 68ffea1422de | 88 | 25.8 (25.6–25.9) | 0.39 (0.39–0.39) | 3.41 (3.41–3.42) | 85.98 (85.76–86.22) | 3 | 2026-11-01 | AMD Ryzen 9 9900X 12-Core Processor, 60 GB host |
 | cpu-uncapped | cpu | continuity_verify | 0.40.3 / 68ffea1422de | 85 | 178.7 (178–182.8) | 8.4 (8.39–8.51) | 0.48 (0.48–0.49) | 5.13 (3.43–5.13) | 3 | 2026-11-01 | AMD Ryzen 9 9900X 12-Core Processor, 60 GB host |
-| cpu-uncapped | cpu | extraction_300 | 0.40.3 / 68ffea1422de | 2051 | 174.5 (174.5–174.5) | 7.63 (7.63–7.64) | 11.77 (11.77–11.77) | 64.11 (64.11–64.11) | 1 | 2026-11-01 | AMD Ryzen 9 9900X 12-Core Processor, 60 GB host |
+| cpu-uncapped | cpu | extraction_300 | 0.40.3 / 68ffea1422de | 2051 | 174.5 (174.5–174.5) | 7.63 (7.63–7.64) | 11.77 (11.77–11.77) | 64.11 (64.11–64.11) | 1 (+2 cached) | 2026-11-01 | AMD Ryzen 9 9900X 12-Core Processor, 60 GB host |
 | cpu-uncapped | cpu | extraction_50 | 0.40.3 / 68ffea1422de | 1629 | 163.3 (162.7–176.4) | 7.67 (7.35–7.73) | 9.97 (9.24–10.01) | 62.15 (60.97–64.44) | 3 | 2026-11-01 | AMD Ryzen 9 9900X 12-Core Processor, 60 GB host |
 | cpu-uncapped | cpu | npc_first_turn | 0.40.3 / 68ffea1422de | 97 | 176.9 (176.4–177.7) | 8.2 (8.18–8.24) | 0.55 (0.53–0.55) | 18.85 (12.94–18.86) | 3 | 2026-11-01 | AMD Ryzen 9 9900X 12-Core Processor, 60 GB host |
 | cpu-uncapped | cpu | recap_draft_300 | 0.40.3 / 68ffea1422de | 940 | 181 (180.7–181.2) | 7.91 (7.9–7.92) | 5.21 (5.2–5.21) | 60.7 (52.91–62.14) | 3 | 2026-11-01 | AMD Ryzen 9 9900X 12-Core Processor, 60 GB host |
 | cpu-uncapped | cpu | rolling_recap | 0.40.3 / 68ffea1422de | 514 | 179.3 (178.2–183.4) | 8.08 (8.08–8.09) | 2.9 (2.81–2.91) | 22.69 (22.59–22.71) | 3 | 2026-11-01 | AMD Ryzen 9 9900X 12-Core Processor, 60 GB host |
 | gpu | gpu | continuity_verify | 0.40.3 / 68ffea1422de | 89 | 5599.2 (5580.6–5660.5) | 177.78 (176.89–177.95) | 0.02 (0.02–0.02) | 0.23 (0.23–0.24) | 3 | 2026-11-01 | AMD Ryzen 9 9900X 12-Core Processor, 60 GB host |
-| gpu | gpu | extraction_300 | 0.40.3 / 68ffea1422de | 2051 | 8610.3 (8610.3–8610.3) | 163.34 (163.09–163.51) | 0.26 (0.26–0.26) | 2.7 (2.7–2.7) | 1 | 2026-11-01 | AMD Ryzen 9 9900X 12-Core Processor, 60 GB host |
+| gpu | gpu | extraction_300 | 0.40.3 / 68ffea1422de | 2051 | 8610.3 (8610.3–8610.3) | 163.34 (163.09–163.51) | 0.26 (0.26–0.26) | 2.7 (2.7–2.7) | 1 (+2 cached) | 2026-11-01 | AMD Ryzen 9 9900X 12-Core Processor, 60 GB host |
 | gpu | gpu | extraction_50 | 0.40.3 / 68ffea1422de | 1627 | 8415.5 (8415.5–8424.3) | 166.03 (166–166.26) | 0.2 (0.2–0.2) | 2.61 (2.61–2.61) | 3 | 2026-11-01 | AMD Ryzen 9 9900X 12-Core Processor, 60 GB host |
 | gpu | gpu | npc_first_turn | 0.40.3 / 68ffea1422de | 95 | 6016.1 (5945.7–6035.3) | 174.63 (174.3–174.67) | 0.02 (0.02–0.02) | 0.88 (0.83–0.88) | 3 | 2026-11-01 | AMD Ryzen 9 9900X 12-Core Processor, 60 GB host |
 | gpu | gpu | recap_draft_300 | 0.40.3 / 68ffea1422de | 940 | 8528.5 (8525.8–8548.5) | 168.58 (168.13–169.04) | 0.12 (0.12–0.12) | 2.69 (2.54–2.73) | 3 | 2026-11-01 | AMD Ryzen 9 9900X 12-Core Processor, 60 GB host |
@@ -168,7 +170,7 @@ Structured extraction:
 | cpu-uncapped | cpu | 10 | 10 | 0 | 0 | 34.9 (29.3–43.8) | 10 | 2026-11-01 | AMD Ryzen 9 9900X 12-Core Processor, 60 GB host |
 | gpu | gpu | 50 | 50 | 0 | 0 | 1.6 (1.2–2.5) | 50 | 2026-11-01 | AMD Ryzen 9 9900X 12-Core Processor, 60 GB host |
 
-Timings are `median (min–max)` over n runs (for SPIKE-2, n counts every full 15 s chunk of every run).
+Timings are `median (min–max)` over n runs. For SPIKE-2, n counts every chunk of 5 s or more in every run: the 15 s chunks and the clip's 7 s tail. For SPIKE-6, runs served from Ollama's prompt cache are left out of n and of the prompt-side columns, and shown as `(+k cached)`.
 <!-- /bench:spikes -->
 
 ## Verdicts
@@ -183,7 +185,8 @@ rows themselves.
   models give the same verdicts on the sanity set (4/6). Both still make the
   confident false contradiction on the neutral Aldric pair (p = 0.99 / 1.0),
   so the 7B confirmation step stays. xsmall is 3.1× cheaper for the same
-  verdicts. Base would now fit the 10 s budget easily, so it is still worth
+  verdicts. Base would now fit the 10 s per-entry budget of
+  `cpu-benchmarks.md` §3.3 easily, so it is still worth
   switching to if EV-2 shows it is more accurate. In the `ml` image (CPU
   torch) xsmall runs at the same speed and peaks at 767 MB RSS (1.23 GB
   cgroup), inside ml's 2.5 GB.
@@ -195,8 +198,9 @@ rows themselves.
     (406 MB against 608 MB), so `STT_COMPUTE_TYPE=int8` stays the default.
   - **LLM busy:** with the 7B generating on the same 4 cores, base int8 runs
     at a median RTF of 0.14 (worst 0.18). Sustained processing stays below
-    the chunk duration with more than 5× headroom, and processing lag stays
-    under 2.5 s. The LLM slows to 5.7 tok/s meanwhile.
+    the chunk duration with more than 5× headroom. Per-chunk latency is
+    1.88 s median and 2.49 s worst (`busy.chunk_latency_s` in the store). The
+    LLM slows to 5.7 tok/s meanwhile.
   - **small:** small int8 also fits live use on x86 (RTF 0.09, worst 0.14).
     Its cgroup peak is 1.16 GB, just under stt's 1.25 GB, so on an x86-class
     CPU it could be an opt-in accuracy setting.
@@ -212,8 +216,12 @@ rows themselves.
   ≤ 2 min / ≤ 30 s. No words were dropped, because espeak-ng is on, as in
   the AGPL tts container. **Peak RSS was 3.1 GB, and at the 2.5 GB tts limit
   the process was OOM-killed.** This was the `kokoro` torch package (cu128
-  build) in the bench image. AD-7 plans a Kokoro-FastAPI CPU image, and that
-  image must be measured against 2.5 GB before E5 ships (E0-Platform.10).
+  build) in the bench image. The cu128 build costs memory by itself: the
+  same NLI model peaked about 330 MB higher in the bench image than in the
+  CPU-torch `ml` image. Even so, a CPU-torch Kokoro would sit at about
+  2.8 GB, still over the limit. AD-7 plans a Kokoro-FastAPI CPU image, and
+  that image must be measured against 2.5 GB before E5 ships
+  (E0-Platform.10).
 - **SPIKE-6 (7B throughput, the input for E0-Platform.10 and E0-LLM.6):**
   - **Reference Box (4 threads, 5.25 GB):** prompts process at about
     91 tok/s and generation runs at about 8 tok/s.
@@ -265,15 +273,15 @@ measure the real rows):
 
 | NFR-6 row | Spike evidence (CPU / GPU) | Provisional target |
 |---|---|---|
-| Change Proposals | one extraction call 69 s (50 Entities) / 2.6 s; under the old 3.0 cap about 10 min | holds (≤ 3 min / ≤ 30 s), only without the CPU cap |
+| Change Proposals | one extraction call 69 s (50 Entities) / 2.6 s; under the old 3.0 cap an estimated 10 min (1,628 prompt tokens at 19–46 tok/s plus 400 at 0.7 tok/s; extraction itself was not run capped) | holds (≤ 3 min / ≤ 30 s), only without the CPU cap |
 | Continuity check | NLI 50 pairs 0.31 s plus about 5.3 s per 7B verify / 0.23 s | holds for up to about 30 verifies |
-| Live caption lag | processing 0.43 s per chunk, ≤ 2.5 s with the LLM busy / 0.11 s | holds; the CPU target could tighten (see `.memlog.md`) |
+| Live caption lag | processing 0.43 s per chunk, worst 2.49 s with the LLM busy / 0.11 s | holds; the CPU target could tighten (see `.memlog.md`) |
 | Rolling Recap update | 24 s alone / 1 s; but the gate has no preemption, so a recap queued behind a 69 s extraction misses 45 s | holds only if E0-LLM.6 caps the wait |
 | NPC first token | 1.0 s first token on a 95-token card; at 91 tok/s a 1,500-token memory prompt would take about 17 s / 0.02 s | holds if E6 keeps the prompt ≤ about 1,500 tokens |
 | 300-word narration | 13.6 s / 0.49 s (Kokoro, per sentence) | holds; the CPU target could tighten (see `.memlog.md`) |
 | Quick lookup, Chronicle, Portal | not model-bound; not measured by the spikes | pending |
 
-**Proposed target resets:** the pending entries in `/.memlog.md`. None takes
+**Proposed target resets:** the pending entries in `.memlog.md` (repo root). None takes
 effect until the owner signs off there.
 
 ## Reproducing

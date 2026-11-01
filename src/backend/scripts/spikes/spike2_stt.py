@@ -44,7 +44,8 @@ def _load(path: Path):
     import numpy as np
 
     w = wave.open(str(path))
-    assert w.getframerate() == 16000 and w.getnchannels() == 1 and w.getsampwidth() == 2, "need 16 kHz mono PCM16"
+    if not (w.getframerate() == 16000 and w.getnchannels() == 1 and w.getsampwidth() == 2):
+        raise SystemExit(f"{path}: need 16 kHz mono PCM16")
     return np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16).astype(np.float32) / 32768
 
 
@@ -70,6 +71,7 @@ class Busy:
         self.url, self.model, self.num_thread = url.rstrip("/"), model, num_thread
         self.stop = threading.Event()
         self.calls, self.tokens, self.eval_s = 0, 0, 0.0
+        self.errors: list[str] = []
         self.thread = threading.Thread(target=self._run, daemon=True)
 
     def _run(self) -> None:
@@ -80,8 +82,12 @@ class Busy:
         while not self.stop.is_set():
             req = urllib.request.Request(f"{self.url}/api/generate", data=body,
                                          headers={"Content-Type": "application/json"})
-            with urllib.request.urlopen(req, timeout=900) as r:
-                out = json.loads(r.read())
+            try:
+                with urllib.request.urlopen(req, timeout=900) as r:
+                    out = json.loads(r.read())
+            except Exception as exc:  # recorded; main() refuses a "busy" result with errors
+                self.errors.append(f"{type(exc).__name__}: {exc}")
+                return
             self.calls += 1
             self.tokens += out.get("eval_count", 0)
             self.eval_s += out.get("eval_duration", 0) / 1e9
@@ -93,6 +99,8 @@ class Busy:
 
     def __exit__(self, *exc):
         self.stop.set()
+        self.alive_at_exit = self.thread.is_alive()  # False: the load stopped mid-measurement
+        self.thread.join(timeout=900)
         return False
 
 
@@ -134,7 +142,7 @@ def main(argv=None) -> int:
         lat, rtf, full_len = [], [], []
         for _ in range(args.n):
             for c in chunks:
-                if len(c) < 5 * sr:      # the 7 s tail is not a full chunk; skip anything this short
+                if len(c) < 5 * sr:      # measured: every 15 s chunk and the clip's 7 s tail; skip anything shorter
                     continue
                 dt, _ = tr(c)
                 lat.append(dt)
@@ -168,8 +176,13 @@ def main(argv=None) -> int:
             "chunk_latency_s": _bench.stats(blat, 2),
             "chunk_rtf": _bench.stats(brtf, 3),
             "llm_calls": busy.calls,
+            "llm_errors": busy.errors,
+            "llm_still_generating_at_end": busy.alive_at_exit,
             "llm_gen_tok_s": round(busy.tokens / busy.eval_s, 2) if busy.eval_s else None,
         }
+
+        if busy.errors or not busy.alive_at_exit:
+            raise SystemExit(f"the LLM load stopped during the busy runs: {busy.errors or 'thread exited'}")
 
     metrics["peak_rss_mb"] = _bench.peak_rss_mb()
     metrics["cgroup_peak_mb"] = _bench.cgroup_peak_mb()

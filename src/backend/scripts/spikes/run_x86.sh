@@ -57,7 +57,8 @@ ollama_cpu_up() {  # ollama_cpu_up [docker run CPU flags...]: (re)create the CPU
   docker run -d --name "$OLLAMA_CPU" "$@" -p 127.0.0.1:"$OLLAMA_CPU_PORT":11434 --memory="$mem" --memory-swap="$mem" \
     -e OLLAMA_MAX_LOADED_MODELS=1 -e OLLAMA_NUM_PARALLEL=1 -e OLLAMA_CONTEXT_LENGTH=4096 -e OLLAMA_KEEP_ALIVE=30m \
     -v qa15-ollama:/root/.ollama -v "$HOME/lorekeeper-dev/models":/import-models:ro "$OLLAMA_IMAGE" >/dev/null
-  until curl -sf "http://127.0.0.1:$OLLAMA_CPU_PORT/api/version" >/dev/null; do sleep 1; done
+  for _ in $(seq 120); do curl -sf "$CPU_URL/api/version" >/dev/null && return 0; sleep 1; done
+  docker logs --tail 20 "$OLLAMA_CPU" >&2; echo "ollama_cpu_up: Ollama did not start" >&2; exit 1
 }
 ollama_threads() {  # ollama_threads [N]: re-create the CPU container's lorekeeper with num_thread N (none = Ollama's pick)
   # A model PARAMETER, not a request option, so complete_structured's calls
@@ -65,7 +66,7 @@ ollama_threads() {  # ollama_threads [N]: re-create the CPU container's lorekeep
   docker exec "$OLLAMA_CPU" sh -c "sed 's#^FROM .*#FROM /import-models/lorekeeper-7b-q4.gguf#' /import-models/lorekeeper-Modelfile > /tmp/Modelfile \
     && echo >> /tmp/Modelfile ${1:+&& echo 'PARAMETER num_thread $1' >> /tmp/Modelfile} && ollama create lorekeeper -f /tmp/Modelfile" >/dev/null
   if [ -n "${1:-}" ]; then  # `ollama create` can print an error and still exit 0
-    docker exec "$OLLAMA_CPU" ollama show lorekeeper --modelfile | grep -q "num_thread $1" \
+    docker exec "$OLLAMA_CPU" ollama show lorekeeper --modelfile | grep -qE "num_thread $1\$" \
       || { echo "ollama_threads: num_thread $1 not set" >&2; exit 1; }
   fi
 }

@@ -15,8 +15,10 @@ and the client-side time to first token and total time:
   npc_first_turn                  an NPC card and the Player's opening line
   recap_draft_300                 session summaries in, a 300-word recap out
 
-Every call's user turn starts with a unique nonce, so Ollama's prompt cache can't make
-runs 2..n cheaper than run 1. num_ctx is never sent (AD-8): the server's
+Every call's user turn starts with a unique nonce, and an unrelated one-token
+call runs before it, to keep Ollama's prompt cache from serving runs 2..n. A
+prompt Ollama truncates (it keeps the tail) still hits llama-server's RAM
+prompt cache; summarise() flags those runs as cache_hit. num_ctx is never sent (AD-8): the server's
 OLLAMA_CONTEXT_LENGTH applies.
 
 --structured N then runs complete_structured (app/services/llm_provider, the
@@ -155,11 +157,15 @@ async def stream_once(client, url: str, model: str, messages: list[dict], max_to
             if not line:
                 continue
             msg = json.loads(line)
+            if msg.get("error"):
+                raise RuntimeError(f"Ollama: {msg['error']}")
             if ttft is None and (msg.get("message") or {}).get("content"):
                 ttft = time.perf_counter() - t0
             if msg.get("done"):
                 final = msg
     total = time.perf_counter() - t0
+    if not final:
+        raise RuntimeError("Ollama stream ended without a done message")
     pe_n, pe_s = final.get("prompt_eval_count", 0), final.get("prompt_eval_duration", 0) / 1e9
     ev_n, ev_s = final.get("eval_count", 0), final.get("eval_duration", 0) / 1e9
     return {"ttft_s": round(ttft or total, 2), "total_s": round(total, 2),
@@ -262,6 +268,9 @@ async def run(args) -> dict:
         # load the model (not measured)
         await stream_once(client, url, args.model, [{"role": "user", "content": "Say ok."}], 2)
         results = {}
+        unknown = sorted(set(wanted) - set(all_shapes))
+        if unknown:
+            raise SystemExit(f"unknown shapes {unknown}; known: {sorted(all_shapes)}")
         for name in wanted:
             msgs, max_tokens = all_shapes[name]
             if args.max_tokens:
@@ -296,8 +305,9 @@ def main(argv=None) -> int:
     p.add_argument("--max-tokens", type=int, default=None, help="cap every shape's output tokens")
     p.add_argument("--structured", type=int, default=0, help="complete_structured calls to run (0 = skip)")
     p.add_argument("--num-thread", type=int, default=None,
-                   help="Ollama num_thread for every call (default: Ollama's own pick, one per HOST core, "
-                        "which ignores a container's --cpus/--cpuset; see BENCHMARKS.md)")
+                   help="send num_thread with every call (default: none). Prefer a Modelfile PARAMETER "
+                        "(run_x86.sh ollama_threads): a per-request value reloads the model whenever it "
+                        "differs, and complete_structured never sends one")
     args = p.parse_args(argv)
     global NUM_THREAD
     NUM_THREAD = args.num_thread

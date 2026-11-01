@@ -35,13 +35,15 @@ cd ~/lorekeeper-dev/runs/qa15
 docker build -t lorekeeper-bench -f backend/scripts/spikes/Dockerfile.bench backend/scripts/spikes
 TTS_MEM=6g ML_IMAGE=qa9b-ml-new backend/scripts/spikes/run_x86.sh all   # sections: nli stt tts ollama[-ref|-capped|-uncapped|-gpu]
 backend/scripts/spikes/run_x86.sh down
-python src/backend/scripts/eval_benchmarks.py --ingest results/*.json  # back in the repo
+rsync -az desktop:~/lorekeeper-dev/runs/qa15/results/ results/        # back on the laptop
+python src/backend/scripts/eval_benchmarks.py --ingest results/*.json
 ```
 
 ## n per measurement
 
 - SPIKE-1: 5 runs of 50 pairs, plus 30 batch-1 calls.
-- SPIKE-2: 5 runs × 5 chunks = 25. The fifth chunk is the 7 s tail.
+- SPIKE-2: 5 runs × 5 chunks = 25. The fifth chunk is the 7 s tail, so the
+  latency minimum (0.28 s for base int8) comes from the tail.
 - SPIKE-3: 5 syntheses of the 316-word recap.
 - SPIKE-6: 3 runs per shape. Structured extraction: 10 calls on CPU, 50 on
   the GPU.
@@ -116,4 +118,4 @@ python src/backend/scripts/eval_benchmarks.py --ingest results/*.json  # back in
 - `small` is viable for live use on an x86-class CPU. Whether to offer it is
   a product call, not a requirement.
 - Proposed target resets (caption lag, narration) are pending in
-  `/.memlog.md`.
+  `.memlog.md` (repo root).

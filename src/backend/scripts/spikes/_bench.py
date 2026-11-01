@@ -88,10 +88,17 @@ def column(device: str) -> str:
     return "gpu" if device.startswith("cuda") else "cpu"
 
 
+def _positive(v: str) -> int:
+    n = int(v)
+    if n < 1:
+        raise argparse.ArgumentTypeError("must be >= 1")
+    return n
+
+
 def base_parser(description: str) -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=description)
     p.add_argument("--out", default=None, help="also write the JSON result here")
-    p.add_argument("--n", type=int, default=5, help="measured repetitions (default %(default)s)")
+    p.add_argument("--n", type=_positive, default=5, help="measured repetitions (default %(default)s)")
     return p
 
 
