@@ -973,3 +973,138 @@ def test_world_service_builds_no_system_ctx():
     assert _as_system_refs(app_dir / "services" / "world_service.py") == []
     users = {p.relative_to(app_dir.parent).as_posix() for p in app_dir.rglob("*.py") if _as_system_refs(p)}
     assert users <= {"app/access/context.py", "app/services/journal_service.py"}
+
+
+# ── Adversarial review: gaps and probes ────────────────────────────────────
+
+async def test_two_steps_under_one_proposal_both_apply(db, ev4, gm):
+    proposal = uuid.uuid4()
+    quest = await _create(db, gm, type="quest")
+    s1 = await apply_change(db, gm, AddQuestStep(entity_id=quest.id, text="one", proposal_id=proposal))
+    s2 = await apply_change(db, gm, AddQuestStep(entity_id=quest.id, text="two", proposal_id=proposal))
+    assert s1.id != s2.id
+    assert (await apply_change(db, gm, AddQuestStep(entity_id=quest.id, text="two", proposal_id=proposal))).id == s2.id
+    steps = (await db.execute(sa.select(QuestStep.text).where(QuestStep.quest_entity_id == quest.id))).scalars().all()
+    assert sorted(steps) == ["one", "two"]
+
+
+async def test_entry_deleted_ctx_cannot_revert_add_or_delete(db, ev4, gm):
+    entity = await _create(db, gm)
+    create = (await _changes(db, entity.id))[0]
+    system = gm.as_system("entry_deleted")
+    before = await _counts(db, ev4.a.campaign_id)
+    for change in (Revert(change_id=create.id), AddMention(entity_id=entity.id, journal_id=_entry(ev4)),
+                   DeleteEntity(entity_id=entity.id), ConfirmMention(mention_id=uuid.uuid4())):
+        with pytest.raises(NotFound):
+            await apply_change(db, system, change)
+    assert await _counts(db, ev4.a.campaign_id) == before
+
+
+async def _floored(db, ev4, gm):
+    """A Party survivor holding a `gm`-floored alias and Mention from a GM-only absorbed Entity."""
+    survivor, absorbed = await _create(db, gm), await _create(db, gm)
+    await set_visibility(db, gm, RecordRef(kind="entity", id=survivor.id), "party")
+    await apply_change(db, gm, AddAlias(entity_id=absorbed.id, alias="Grey Lady"))
+    mention = await apply_change(db, gm, AddMention(entity_id=absorbed.id, journal_id=_entry(ev4)))
+    await apply_change(db, gm.as_system("merge"), Merge(entity_id=absorbed.id, survivor_id=survivor.id))
+    return survivor, uuid.UUID(mention.new_value["mention_id"])
+
+
+async def test_reverting_a_floored_remove_restores_the_floor(db, ev4, gm):
+    survivor, mention_id = await _floored(db, ev4, gm)
+    alias = await apply_change(db, gm, RemoveAlias(entity_id=survivor.id, alias="Grey Lady"))
+    mention = await apply_change(db, gm, RemoveMention(mention_id=mention_id))
+    await revert_change(db, gm, alias.id)
+    await revert_change(db, gm, mention.id)
+    row = (await db.execute(sa.select(EntityAlias).where(EntityAlias.entity_id == survivor.id,
+                                                         EntityAlias.normalized_alias == "grey lady")
+                            .execution_options(populate_existing=True))).scalar_one()
+    assert row.visibility_floor == "gm"
+    assert (await _get(db, EntityMention, mention_id)).visibility_floor == "gm"
+    player = await _player(ev4, db)
+    assert "Grey Lady" not in {a.alias for a in (await db.execute(ws.scoped_select(EntityAlias, player))).scalars()}
+
+
+async def test_a_floored_remove_alias_repeats_under_its_proposal(db, ev4, gm):
+    survivor, _ = await _floored(db, ev4, gm)
+    proposal = uuid.uuid4()
+    first = await apply_change(db, gm, RemoveAlias(entity_id=survivor.id, alias="Grey Lady", proposal_id=proposal))
+    assert first.field is None  # floored: its history stays GM
+    again = await apply_change(db, gm, RemoveAlias(entity_id=survivor.id, alias="Grey Lady", proposal_id=proposal))
+    assert again.id == first.id
+
+
+async def test_an_entity_ref_repeat_matches_its_canonical_id(db, ev4, gm):
+    item, holder = await _create(db, gm, type="item"), await _create(db, gm)
+    proposal = uuid.uuid4()
+    change = UpdateField(entity_id=item.id, field="attributes.holder_entity_id", value=str(holder.id).upper(),
+                         proposal_id=proposal)
+    first = await apply_change(db, gm, change)
+    assert (await apply_change(db, gm, change)).id == first.id
+    assert [r.op for r in await _changes(db, item.id)] == ["create_entity", "update_field"]
+
+
+async def test_concurrent_applies_of_one_proposal_write_once(db, ev4, gm):
+    """Two sessions apply the same approved proposal at once (E1 replay)."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+    await db.commit()
+    proposal, eid = uuid.uuid4(), uuid.uuid4()
+    factory = async_sessionmaker(db.bind, expire_on_commit=False)
+    for change in (CreateEntity(type="item", name="Bell", proposal_id=proposal),
+                   CreateEntity(entity_id=eid, type="item", name="Rope", proposal_id=proposal)):
+        async with factory() as s1, factory() as s2:
+            first = await apply_change(s1, gm, change)
+            second = asyncio.create_task(apply_change(s2, gm, change))
+            await asyncio.sleep(0.3)  # s2 is now waiting (or done)
+            await s1.commit()
+            again = await second
+            await s2.commit()
+            assert again.id == first.id
+    names = (await db.execute(sa.select(Entity.name).where(Entity.campaign_id == ev4.a.campaign_id,
+                                                           Entity.name.in_(["Bell", "Rope"])))).scalars().all()
+    assert sorted(names) == ["Bell", "Rope"]
+
+
+async def test_an_outer_rollback_drops_canon_changed(db, ev4, gm, events):
+    await db.commit()
+    with pytest.raises(RuntimeError):
+        async with db.begin_nested():
+            await apply_change(db, gm, CreateEntity(type="item", name="Undone"))
+            raise RuntimeError
+    await db.commit()
+    await hooks.drain()
+    assert events == []
+
+
+async def test_revert_of_a_revert_and_after_a_merge(db, ev4, gm):
+    quest = await _create(db, gm, type="quest")
+    done = await apply_change(db, gm, SetStatus(entity_id=quest.id, status="completed"))
+    stamp = (await _get(db, Entity, quest.id)).attributes["completed_at"]
+    undo = await revert_change(db, gm, done.id)
+    assert "completed_at" not in ((await _get(db, Entity, quest.id)).attributes or {})
+    redo = await revert_change(db, gm, undo.id)
+    q = await _get(db, Entity, quest.id)
+    assert (q.attributes["completed_at"], redo.new_value["completed_at"]) == (stamp, stamp)
+    assert await _code(revert_change(db, gm, undo.id)) == "superseded"  # redo changed it since
+    survivor, absorbed = await _create(db, gm), await _create(db, gm)
+    edit = await apply_change(db, gm, UpdateField(entity_id=absorbed.id, field="description", value="x"))
+    await apply_change(db, gm.as_system("merge"), Merge(entity_id=absorbed.id, survivor_id=survivor.id))
+    for force in (False, True):
+        assert await _code(revert_change(db, gm, edit.id, force=force)) == "merged"
+
+
+@pytest.mark.xfail(strict=True, reason="open: a Quest status row holds completed_at, which hidden attributes "
+                   "do not narrow (needs a decision: refuse GM edits of completed_at, or a two-field rule)")
+async def test_a_quest_status_row_does_not_carry_a_hidden_attribute(db, ev4, gm):
+    """Party Quest, attributes hidden: a status row must not show a GM-edited completed_at."""
+    quest = await _create(db, gm, type="quest", status="completed")
+    await set_visibility(db, gm, RecordRef(kind="entity", id=quest.id), "party")
+    await set_visibility(db, gm, RecordRef(kind="entity", id=quest.id, field="attributes"), "gm")
+    secret = "1999-12-31T23:59:00+00:00"
+    await apply_change(db, gm, UpdateField(entity_id=quest.id, field="attributes.completed_at", value=secret))
+    await apply_change(db, gm, SetStatus(entity_id=quest.id, status="active"))
+    await db.commit()
+    player = await _player(ev4, db)
+    rows = (await db.execute(ws.scoped_select(EntityChange, player).where(EntityChange.entity_id == quest.id)
+                             .execution_options(populate_existing=True))).scalars().all()
+    assert secret not in repr([(r.old_value, r.new_value) for r in rows])

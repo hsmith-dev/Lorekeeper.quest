@@ -503,6 +503,12 @@ async def _create_entity(run: _Run, c: CreateEntity) -> EntityChange:
 async def _field_change(run: _Run, op: Op, entity_id: uuid.UUID, name: str, value: Any) -> EntityChange:
     entity = await _entity(run, entity_id)
     requested = _json(value)
+    if name.startswith(ATTRIBUTES_PREFIX):  # as stored: an ENTITY_REF is its canonical id
+        key = name[len(ATTRIBUTES_PREFIX):]
+        try:
+            requested = _json(et.validate_attributes(entity.type, {key: value})[key])
+        except ValueError:
+            pass  # _write_field reports it
     repeat = await _repeat(run, op, entity.id, name, lambda r: (
         r.new_value == requested or (isinstance(r.new_value, dict) and r.new_value.get("status") == requested)))
     if repeat is not None:
@@ -553,7 +559,9 @@ async def _add_alias(run: _Run, c: AddAlias) -> EntityChange:
 async def _remove_alias(run: _Run, c: RemoveAlias) -> EntityChange:
     entity = await _entity(run, c.entity_id)
     key = _alias_key(c.alias)
-    repeat = await _repeat(run, Op.REMOVE_ALIAS, entity.id, "aliases", _alias_matches(key, "old"))
+    # A floored remove wrote field NULL (below), so a repeat looks under both.
+    repeat = (await _repeat(run, Op.REMOVE_ALIAS, entity.id, "aliases", _alias_matches(key, "old"))
+              or await _repeat(run, Op.REMOVE_ALIAS, entity.id, None, _alias_matches(key, "old")))
     if repeat is not None:
         return repeat
     row = next((a for a in await _aliases(run, entity.id) if a.normalized_alias == key), None)
@@ -1157,6 +1165,12 @@ async def apply_change(db: AsyncSession, ctx: CampaignContext, change: Any, *, _
     op = Op(change.op)
     _check_caller(ctx, op)
     run = _Run(db, ctx, change)
+    proposal = getattr(change, "proposal_id", None)
+    if proposal is not None:
+        # Held to the end of the transaction: a concurrent apply of the same
+        # proposal waits here, then its _repeat sees this one's committed row.
+        await db.execute(sa.select(sa.func.pg_advisory_xact_lock(
+            sa.func.hashtextextended(f"canon_proposal:{proposal}", 0))))
     try:
         async with db.begin_nested():
             await _check_source(run)
