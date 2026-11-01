@@ -61,7 +61,7 @@ class Settings(BaseSettings):
     jobs_eager: bool = False
     # WORKER_PROCESSES: how many LorekeeperWorker processes `python -m
     # app.jobs.worker` runs in its RQ WorkerPool (AD-2: 2).
-    worker_processes: int = 2
+    worker_processes: int = Field(default=2, ge=1)
 
     # JWT
     secret_key: str

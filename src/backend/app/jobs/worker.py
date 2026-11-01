@@ -31,6 +31,15 @@ never an exception's own text. Logs carry job_id, kind and campaign_id (also
 from code the handler calls, through app.core.logging's JobContextFilter),
 never the payload.
 
+The timeout is cooperative: it cancels the handler at its next await, so a
+handler that blocks the event loop is not interrupted (sync CPU work belongs
+in `asyncio.to_thread`). RQ's `job_timeout` (timeout_s + 60 s) is the
+backstop: it kills the work horse and leaves the row `running` for the
+E0-Jobs.4 reaper.
+
+`_perform` swaps the process-wide Valkey client (app.core.valkey_client) for
+its own; that is safe only because RQ runs one Job per work horse.
+
 `python -m app.jobs.worker` runs `settings.worker_processes` LorekeeperWorker
 processes in an RQ WorkerPool on the three queues, highest priority first.
 """
@@ -77,6 +86,7 @@ HEARTBEAT_INTERVAL_S: float = 10
 # How long the heartbeat and `job.report` wait for the row lock (the handler's
 # own session may hold it if it changed the Job row) before giving up.
 _LOCK_TIMEOUT = "2s"
+_LOCK_NOT_AVAILABLE = "55P03"  # SQLSTATE lock_not_available (asyncpg LockNotAvailableError)
 _HEARTBEAT_JOIN_S = 5
 
 INTERNAL_MESSAGE = "Something went wrong while running this job"
@@ -167,6 +177,8 @@ async def _record_failure(db: AsyncSession, job_id: uuid.UUID, code: JobErrorCod
     job.finished_at = None
     job.error_code = code
     job.error_message = message
+    # The dead attempt's run state goes; its error stays (the last attempt's).
+    job.progress = job.stage = job.eta_seconds = job.worker_id = job.heartbeat_at = None
     await db.commit()
     logger.warning("job attempt failed: %s; retry in %ss", code.value, delay, extra=extra)
     return JobStatus.QUEUED
@@ -178,6 +190,8 @@ def _failure(exc: BaseException, timed_out: bool = False) -> tuple[JobErrorCode,
         return JobErrorCode.TIMEOUT, TIMEOUT_MESSAGE
     if isinstance(exc, StructuredOutputError):
         return JobErrorCode.AI_OUTPUT_UNUSABLE, AI_OUTPUT_MESSAGE
+    if isinstance(exc, LLMConfigError):
+        return JobErrorCode.LLM_CONFIG, LLM_CONFIG_MESSAGE
     if isinstance(exc, LLMError):
         try:
             code = JobErrorCode(exc.code)
@@ -290,7 +304,9 @@ def _reporter(session_factory: async_sessionmaker[AsyncSession], job: Job, worke
                     .execution_options(synchronize_session=False)
                 )
                 await s.commit()
-        except DBAPIError:
+        except DBAPIError as exc:
+            if getattr(exc.orig, "sqlstate", None) != _LOCK_NOT_AVAILABLE:
+                raise
             # The handler's session holds the row (it changed the Job): the
             # values go out with the Job's own commit instead.
             logger.warning("job progress not written early; it is saved with the job", extra=extra)
@@ -327,6 +343,47 @@ async def run_job(job_id: uuid.UUID | str, session_factory: async_sessionmaker[A
             job_log_context.reset(log_token)
 
 
+async def _fail_attempt(db: AsyncSession, session_factory: async_sessionmaker[AsyncSession], job_id: uuid.UUID,
+                        code: JobErrorCode, message: str, extra: dict[str, str]) -> JobStatus:
+    """Roll the attempt's writes back and record the failure (`_record_failure`)."""
+    try:
+        await db.rollback()
+    except Exception:
+        # A cancelled query can leave the connection unusable (and holding the
+        # Job row): drop it, then record the outcome from a fresh session.
+        logger.warning("job session rollback failed; recording the outcome on a new session", extra=extra)
+        try:
+            await db.invalidate()
+        except Exception:
+            logger.warning("job session invalidate failed", exc_info=True, extra=extra)
+        async with session_factory() as fresh:
+            return await _record_failure(fresh, job_id, code, message, extra)
+    return await _record_failure(db, job_id, code, message, extra)
+
+
+async def _prepare(db: AsyncSession, job: Job, kind: JobKind,
+                   extra: dict[str, str]) -> tuple[CampaignContext, llm_gate.GateClass] | JobStatus:
+    """Rights check, starter, LLM config and gate class. Returns the JobStatus
+    when the Job ends here (permission_changed, llm_config)."""
+    job_id = job.id  # read before any rollback expires the instance
+    ctx = await _current_ctx(db, job)
+    starter = await db.get(User, job.ctx_user_id) if ctx is not None else None
+    if ctx is None or starter is None:
+        await db.rollback()
+        logger.info("job starter lost access", extra=extra)
+        return await _finish(db, job_id, JobStatus.FAILED, JobErrorCode.PERMISSION_CHANGED, PERMISSION_MESSAGE)
+    job.starter = starter
+    job.llm_config = None
+    if "llm" in kind.resources:
+        try:
+            job.llm_config = await llm_config_service.resolve_llm_config(db, starter)
+        except LLMConfigError:
+            await db.rollback()
+            logger.info("job has no LLM config", extra=extra)
+            return await _finish(db, job_id, JobStatus.FAILED, JobErrorCode.LLM_CONFIG, LLM_CONFIG_MESSAGE)
+    return ctx, kind.gate_class or llm_gate.class_for_queue(job.queue)
+
+
 async def _run_claimed(db: AsyncSession, session_factory: async_sessionmaker[AsyncSession], job: Job,
                        worker_id: str, extra: dict[str, str]) -> JobStatus:
     job_id = job.id
@@ -337,24 +394,19 @@ async def _run_claimed(db: AsyncSession, session_factory: async_sessionmaker[Asy
         logger.exception("job kind cannot be loaded", extra=extra)
         return await _finish(db, job_id, JobStatus.FAILED, JobErrorCode.INTERNAL, UNKNOWN_KIND_MESSAGE)
 
-    ctx = await _current_ctx(db, job)
-    if ctx is None:
-        await db.rollback()
-        logger.info("job starter lost access", extra=extra)
-        return await _finish(db, job_id, JobStatus.FAILED, JobErrorCode.PERMISSION_CHANGED, PERMISSION_MESSAGE)
-
-    job.starter = await db.get(User, job.ctx_user_id)
-    job.llm_config = None
-    if "llm" in kind.resources:
-        try:
-            job.llm_config = await llm_config_service.resolve_llm_config(db, job.starter)
-        except LLMConfigError:
-            await db.rollback()
-            logger.info("job has no LLM config", extra=extra)
-            return await _finish(db, job_id, JobStatus.FAILED, JobErrorCode.LLM_CONFIG, LLM_CONFIG_MESSAGE)
+    try:
+        prepared = await _prepare(db, job, kind, extra)
+    except Exception:
+        logger.exception("job setup failed", extra=extra)
+        job.starter = job.llm_config = None
+        return await _fail_attempt(db, session_factory, job_id, JobErrorCode.INTERNAL, INTERNAL_MESSAGE, extra)
+    if isinstance(prepared, JobStatus):
+        job.starter = job.llm_config = None
+        return prepared
+    ctx, gate_class = prepared
 
     job._reporter = _reporter(session_factory, job, worker_id, extra)
-    gate_token = llm_gate.current_class.set(kind.gate_class or llm_gate.class_for_queue(job.queue))
+    gate_token = llm_gate.current_class.set(gate_class)
     deadline_token = llm_gate.current_deadline.set(time.monotonic() + kind.timeout_s)
     heartbeat = _Heartbeat(_bind_url(session_factory), job_id, worker_id, extra).start()
     error: Exception | None = None
@@ -368,30 +420,30 @@ async def _run_claimed(db: AsyncSession, session_factory: async_sessionmaker[Asy
         except Exception as exc:
             error = exc
             timed_out = timeout.expired()
+        if error is None and timeout.expired():
+            # The handler swallowed the cancellation and returned: still a timeout.
+            error, timed_out = TimeoutError(), True
     finally:
         heartbeat.stop()
         llm_gate.current_deadline.reset(deadline_token)
         llm_gate.current_class.reset(gate_token)
-        job._reporter = None
+        # Never leave the decrypted config (or the User) on the instance.
+        job._reporter = job.starter = job.llm_config = None
 
     if error is None:
-        # The handler's writes and `done` commit together.
-        status = await _finish(db, job_id, JobStatus.DONE)
+        try:
+            # The handler's writes and `done` commit together.
+            status = await _finish(db, job_id, JobStatus.DONE)
+        except Exception:
+            logger.exception("job done commit failed", extra=extra)
+            return await _fail_attempt(db, session_factory, job_id, JobErrorCode.INTERNAL, INTERNAL_MESSAGE, extra)
         logger.info("job done", extra=extra)
         return status
 
     code, message = _failure(error, timed_out)
     if code == JobErrorCode.INTERNAL:
         logger.error("job handler raised %s", type(error).__name__, exc_info=error, extra=extra)
-    try:
-        await db.rollback()
-    except Exception:
-        # A cancelled query can leave the connection unusable: record the
-        # outcome from a fresh session.
-        logger.warning("job session rollback failed; recording the outcome on a new session", extra=extra)
-        async with session_factory() as fresh:
-            return await _record_failure(fresh, job_id, code, message, extra)
-    return await _record_failure(db, job_id, code, message, extra)
+    return await _fail_attempt(db, session_factory, job_id, code, message, extra)
 
 
 # ── The RQ side ────────────────────────────────────────────────────────────

@@ -25,7 +25,7 @@ import pytest
 import redis
 import sqlalchemy as sa
 from rq import Queue
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.access.context import ctx_for
 from app.clients.errors import ModelServiceUnavailable
@@ -34,7 +34,10 @@ from app.core import llm_gate
 from app.core.config import get_settings
 from app.core.errors import LLMBusy, LLMConfigError, LLMError, LLMUnavailable, StructuredOutputError
 from app.core.llm_gate import GateClass
-from app.core.logging import JobContextFilter, JSONFormatter
+from app.core import logging as core_logging
+from app.core import valkey_client
+from app.core.logging import RECENT_LOGS, JobContextFilter, JSONFormatter, configure_logging
+from app.core.valkey_client import get_valkey
 from app.db.models import Campaign, Genre, Job, User
 from app.db.models.campaign_member import CampaignMember
 from app.db.models.journal import JournalEntry
@@ -103,6 +106,16 @@ async def write_then_fail(job, ctx, db):
     raise RuntimeError("after the write")
 
 
+async def record_valkey(job, ctx, db):
+    SEEN[job.id] = {"valkey": get_valkey()}
+
+
+async def change_row_then_report(job, ctx, db):
+    job.stage = "x"
+    await db.flush()  # this session now holds the Job row
+    await job.report(0.5, "S")
+
+
 def _kind(name, handler, queue=JobQueue.INTERACTIVE, timeout_s=5, **kw):
     return register(JobKind(name=name, queue=queue, timeout_s=timeout_s, handler=f"{__name__}:{handler}", **kw))
 
@@ -115,6 +128,8 @@ _kind("test_w.block", "block_loop")
 _kind("test_w.report", "report")
 _kind("test_w.log", "log_inside")
 _kind("test_w.write_fail", "write_then_fail")
+_kind("test_w.valkey", "record_valkey")
+_kind("test_w.self_report", "change_row_then_report")
 _kind("test_w.gate_live", "record", queue=JobQueue.ONSAVE, gate_class=GateClass.live_recap)
 _kind("test_w.gate_default", "record", queue=JobQueue.ONSAVE)
 
@@ -354,6 +369,7 @@ async def test_retryable_failure_requeues_twice_then_fails(db, error, code, mess
         r = await _row(db, row.id)
         assert r.status == JobStatus.QUEUED and r.attempts == attempt
         assert r.error_code == code and r.error_message == message
+        assert r.worker_id is None and r.heartbeat_at is None and r.stage is None and r.progress is None
         assert r.finished_at is None and _close_to(r.next_run_at, before + timedelta(seconds=delay))
         # Not due yet: a second delivery does nothing.
         assert await run_job(row.id, factory, "w") is None
@@ -369,7 +385,8 @@ async def test_retryable_failure_requeues_twice_then_fails(db, error, code, mess
 
 @pytest.mark.parametrize("error, code, message", [
     ("structured", JobErrorCode.AI_OUTPUT_UNUSABLE, "AI output unusable"),
-    ("config", JobErrorCode.LLM_CONFIG, "Add your own LLM API key in Settings"),
+    # Any LLMConfigError stores the fixed reason, not its own detail.
+    ("config", JobErrorCode.LLM_CONFIG, "No AI model is configured for your account"),
 ])
 async def test_terminal_failure_does_not_retry(db, error, code, message):
     c = await _campaign(db)
@@ -474,6 +491,8 @@ async def test_report_outside_a_running_job_raises():
     for bad in (-0.1, 1.01, float("nan"), True, "0.5"):
         with pytest.raises(ValueError):
             await Job().report(bad)
+    with pytest.raises(ValueError):
+        await Job().report(0.5, 3)  # stage must be a str
 
 
 async def test_logs_carry_the_job_fields_and_never_the_payload(db):
@@ -582,3 +601,108 @@ def test_forking_lorekeeper_worker_runs_a_pushed_job_on_valkey(monkeypatch):
         conn.close()
     assert row.status == JobStatus.DONE
     assert row.worker_id == name  # the RQ worker's name, as its registry knows it
+
+
+# ── Review follow-ups ──────────────────────────────────────────────────────
+
+class _FakeValkey:
+    closed = False
+
+    async def aclose(self):
+        self.closed = True
+
+
+async def test_perform_installs_its_own_valkey_and_restores_the_previous(db, monkeypatch):
+    fake, previous = _FakeValkey(), object()
+    monkeypatch.setattr(get_settings(), "database_url", db.bind.url.render_as_string(hide_password=False))
+    monkeypatch.setattr(worker.aioredis, "from_url", lambda *a, **kw: fake)
+    monkeypatch.setattr(valkey_client, "_valkey", previous)
+    c = await _campaign(db)
+    row = await _job(db, c, "test_w.valkey")
+    assert await worker._perform(str(row.id)) == JobStatus.DONE
+    assert SEEN[row.id]["valkey"] is fake and fake.closed
+    assert valkey_client._valkey is previous
+
+
+async def test_configure_logging_puts_job_fields_on_handler_logs(db):
+    root = logging.getLogger()
+    saved_handlers, saved_level = root.handlers[:], root.level
+    try:
+        configure_logging("INFO", None)
+        c = await _campaign(db)
+        row = await _job(db, c, "test_w.log")
+        assert await run_job(row.id, _factory(db), "w") == JobStatus.DONE
+    finally:
+        root.handlers, root.level = saved_handlers, saved_level
+    inside = [json.loads(line) for line in RECENT_LOGS if "inside the handler" in line]
+    assert inside and inside[-1]["job_id"] == str(row.id) and inside[-1]["kind"] == "test_w.log"
+
+
+async def test_report_while_the_handler_holds_the_row_is_saved_with_the_job(db, monkeypatch):
+    monkeypatch.setattr(worker, "_LOCK_TIMEOUT", "100ms")
+    c = await _campaign(db)
+    row = await _job(db, c, "test_w.self_report")
+    assert await run_job(row.id, _factory(db), "w") == JobStatus.DONE
+    r = await _row(db, row.id)
+    assert r.status == JobStatus.DONE and r.stage == "S"
+
+
+async def test_failed_rollback_still_records_the_outcome(db):
+    calls = {"n": 0}
+
+    class FlakyRollback(AsyncSession):
+        async def rollback(self):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("connection is broken")
+            return await super().rollback()
+
+    c = await _campaign(db)
+    row = await _job(db, c, "test_w.raise", payload={"error": "runtime"})
+    factory = async_sessionmaker(db.bind, expire_on_commit=False, class_=FlakyRollback)
+    assert await run_job(row.id, factory, "w") == JobStatus.QUEUED
+    r = await _row(db, row.id)
+    assert calls["n"] >= 1
+    assert r.status == JobStatus.QUEUED and r.error_code == JobErrorCode.INTERNAL
+
+
+def test_main_starts_a_worker_pool(monkeypatch):
+    import rq.worker_pool
+
+    calls = {}
+
+    class Pool:
+        def __init__(self, queues, connection, num_workers, worker_class):
+            calls.update(queues=queues, num_workers=num_workers, worker_class=worker_class)
+
+        def start(self, burst, logging_level):
+            calls.update(burst=burst, logging_level=logging_level)
+
+    monkeypatch.setattr(rq.worker_pool, "WorkerPool", Pool)
+    monkeypatch.setattr(core_logging, "configure_logging", lambda *a, **kw: calls.setdefault("logging", True))
+    worker.main()
+    assert calls["queues"] == ["interactive", "onsave", "backfill"]
+    assert calls["num_workers"] == get_settings().worker_processes
+    assert calls["worker_class"] is LorekeeperWorker
+    assert calls["burst"] is False and calls["logging"] is True
+
+
+async def test_single_attempt_job_fails_on_its_first_retryable_error(db):
+    c = await _campaign(db)
+    row = await _job(db, c, "test_w.raise", payload={"error": "busy"}, max_attempts=1)
+    assert await run_job(row.id, _factory(db), "w") == JobStatus.FAILED
+    r = await _row(db, row.id)
+    assert r.attempts == 1 and r.error_code == JobErrorCode.LLM_BUSY
+
+
+async def test_pre_handler_failure_requeues_instead_of_staying_running(db, monkeypatch):
+    async def broken(db, job):
+        raise RuntimeError("db went away")
+
+    monkeypatch.setattr(worker, "_current_ctx", broken)
+    c = await _campaign(db)
+    row = await _job(db, c, "test_w.record")
+    assert await run_job(row.id, _factory(db), "w") == JobStatus.QUEUED
+    r = await _row(db, row.id)
+    assert r.status == JobStatus.QUEUED and r.error_code == JobErrorCode.INTERNAL
+    assert r.error_message == worker.INTERNAL_MESSAGE and r.id not in SEEN

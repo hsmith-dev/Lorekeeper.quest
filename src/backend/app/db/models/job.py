@@ -92,6 +92,8 @@ class Job(Base):
         Only inside a running Job (the wrapper injects the writer)."""
         if isinstance(progress, bool) or not isinstance(progress, (int, float)) or not 0 <= progress <= 1:
             raise ValueError(f"Job.report: progress must be a number in [0, 1], got {progress!r}")
+        if stage is not None and not isinstance(stage, str):
+            raise ValueError(f"Job.report: stage must be a str or None, got {stage!r}")
         if eta_seconds is not None and (isinstance(eta_seconds, bool) or not isinstance(eta_seconds, int)
                                         or eta_seconds < 0):
             raise ValueError(f"Job.report: eta_seconds must be a non-negative int or None, got {eta_seconds!r}")
