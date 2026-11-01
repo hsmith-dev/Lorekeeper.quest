@@ -15,6 +15,7 @@ from app.domain.enums import (
     EntityChangeOp,
     EntityType,
     EntryKind,
+    LocationKind,
     MentionOrigin,
     MentionSourceField,
     TagSourceField,
@@ -39,6 +40,7 @@ EXPECTED: dict[type[StrEnum], list[str]] = {
     MentionSourceField: ["narrative", "shorthand", "gm_notes"],
     TagSourceField: ["shorthand", "narrative", "manual"],
     EntryKind: ["gm", "player"],
+    LocationKind: ["settlement", "dungeon", "wilderness", "building", "region", "plane", "other"],
     # PG enum mirrors (AD-12): the order is the pg_enum sort order.
     Visibility: ["party", "gm", "private"],
     CampaignRole: ["co_gm", "player"],
