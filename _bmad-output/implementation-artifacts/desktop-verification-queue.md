@@ -60,3 +60,6 @@ Stories were merged on green GitHub CI while the desktop was offline (owner deci
 - [ ] Same with `OLLAMA_TEST_MODEL=lorekeeper-base` (set `LOCAL_LLM_MODEL` or a different `KOBOLD_URL`, otherwise the test skips)
 - [ ] Grep `structured_attempt` log lines with `valid:false` for recurring error locations (= schema features Ollama silently ignores)
 - [ ] Note: the E1 relationship fields (`source,target,kind`) in the integration schema are a placeholder until E1.1 fixes the extraction schema
+
+## E0-QA.11 — EV-4 harness scaffolding (PR #34)
+- [ ] Sync the WHOLE repo (the harness reads `seeds/` and `nginx/` from the root), then run the docker test command with `python -m pytest -q tests/ev4`
