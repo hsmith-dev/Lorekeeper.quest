@@ -84,3 +84,7 @@ Stories were merged on green GitHub CI while the desktop was offline (owner deci
 ## E0-LLM.5 — Deterministic fake LLM + EV-4 capture hook (PR #41)
 - [ ] `python -m pytest -m ollama -s tests/integration/test_llm_structured_ollama.py` in `lorekeeper-backend-test` with `OLLAMA_TEST_URL=http://100.119.62.5:11434` reaches the real Ollama (fake + socket guard both off for that marker)
 - [ ] Known: a user can save provider `"fake"` in production and get canned replies (affects only that user; eval scripts rely on it)
+
+## E0-QA.9 (OCR half) — RapidOCR replaces EasyOCR; python-bidi gone (PR #46)
+- [x] ~~OCR quality vs easyocr~~ — measured on the desktop in the built ml images (54 synthetic images, 8 handwriting fonts): handwriting CER 0.108 → 0.011, photo 0.032 → 0.000, printed 0.015 → 0.000; latency 2.3 s → 3.3 s; OCR RSS +374 → +230 MB
+- [ ] Real phone photos of handwritten session notes: compare `/v1/ocr` output against what the GM actually wrote; if latency matters, try the PP-OCRv6 tiny models (handwriting CER 0.029, ~1.6 s)
