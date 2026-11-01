@@ -26,5 +26,11 @@ export const forestTheme: Theme = {
     border:                 "130 22% 20%",
     input:                  "140 18% 13%",
     ring:                   "130 50% 42%",
+    success:                "100 45% 55%",
+    warning:                "38 85% 58%",
+    info:                   "200 50% 65%",
+    gm:                     "290 40% 72%",
+    live:                   "8 80% 68%",
+    danger:                 "0 75% 72%",
   },
 };

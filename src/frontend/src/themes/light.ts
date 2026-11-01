@@ -29,5 +29,11 @@ export const lightTheme: Theme = {
     border:                 "214.3 31.8% 91.4%",
     input:                  "214.3 31.8% 91.4%",
     ring:                   "222.2 84% 4.9%",
+    success:                "142 70% 26%",
+    warning:                "28 90% 32%",
+    info:                   "205 80% 34%",
+    gm:                     "275 55% 40%",
+    live:                   "0 72% 42%",
+    danger:                 "0 72% 42%",
   },
 };

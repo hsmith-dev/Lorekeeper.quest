@@ -1,7 +1,8 @@
 import { createContext, useContext, useEffect, useState, useCallback } from "react";
 import type { ReactNode } from "react";
 import type { Theme } from "../types/theme";
-import { themes as builtinThemes, defaultTheme } from "../themes";
+import { themes as builtinThemes, defaultTheme, dndTheme, lightTheme } from "../themes";
+import { withSemanticFallback } from "../themes/semantic";
 
 interface ThemeContextValue {
   theme: Theme;
@@ -17,7 +18,9 @@ const CUSTOM_STORAGE_KEY = "lorekeeper-custom-themes";
 
 function applyTheme(theme: Theme) {
   const root = document.documentElement;
-  for (const [key, value] of Object.entries(theme.colors)) {
+  // Custom themes saved before the semantic tokens existed may lack them.
+  const colors = withSemanticFallback(theme.colors, dndTheme.colors, lightTheme.colors);
+  for (const [key, value] of Object.entries(colors)) {
     root.style.setProperty(`--${key}`, value);
   }
   if (theme.radius) {

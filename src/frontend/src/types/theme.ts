@@ -18,6 +18,13 @@ export interface ThemeColors {
   border: string;
   input: string;
   ring: string;
+  /* Semantic tokens (DESIGN.md): text/icon-safe hues, stable in meaning across themes. */
+  success: string;
+  warning: string;
+  info: string;
+  gm: string;
+  live: string;
+  danger: string;
 }
 
 export interface Theme {

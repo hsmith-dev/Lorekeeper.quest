@@ -29,5 +29,11 @@ export const dndTheme: Theme = {
     border:                 "43 28% 20%",
     input:                  "25 12% 13%",
     ring:                   "43 72% 48%",
+    success:                "130 40% 55%",
+    warning:                "32 85% 58%",
+    info:                   "205 55% 65%",
+    gm:                     "285 45% 70%",
+    live:                   "4 80% 68%",
+    danger:                 "0 75% 72%",
   },
 };

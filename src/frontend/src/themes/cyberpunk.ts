@@ -26,5 +26,11 @@ export const cyberpunkTheme: Theme = {
     border:                 "180 60% 20%",
     input:                  "220 18% 11%",
     ring:                   "180 100% 50%",
+    success:                "120 90% 55%",
+    warning:                "50 100% 55%",
+    info:                   "200 100% 65%",
+    gm:                     "270 100% 75%",
+    live:                   "340 100% 68%",
+    danger:                 "0 100% 72%",
   },
 };
