@@ -43,13 +43,13 @@ from ml_service.config import (
 )
 from ml_service.models import (
     NLI_LABELS,
-    EasyOcrReader,
     Embedder,
     InvalidImage,
     ModelSlot,
     NerModel,
     NliModel,
     OcrModel,
+    RapidOcrReader,
     SentenceTransformerEmbedder,
     SpacyNer,
     TransformersNli,
@@ -144,7 +144,7 @@ def create_app(
     )
     make_ner = ner_factory or (lambda c: SpacyNer(c.ner_model_name))
     make_nli = nli_factory or (lambda c: TransformersNli(c.nli_model_path))
-    make_ocr = ocr_factory or (lambda c: EasyOcrReader(c.ocr_model_dir))
+    make_ocr = ocr_factory or (lambda c: RapidOcrReader(c.ocr_model_dir))
 
     embed_slot = ModelSlot(cfg.embed_model_name, "embedding", lambda: make_embedder(cfg))
     ner_slot = ModelSlot(cfg.ner_model_name, "ner", lambda: make_ner(cfg))

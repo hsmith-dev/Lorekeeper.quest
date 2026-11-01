@@ -1,7 +1,7 @@
 """Lazy NLI and OCR under the resident-memory budget (the E0-Platform.4 matrix).
 
-Fake NLI and OCR models; no torch, transformers or easyocr needed. The
-EasyOcrReader post-processing test needs PIL and numpy and skips without them.
+Fake NLI and OCR models; no torch, transformers or rapidocr needed. The
+RapidOcrReader post-processing test needs PIL and skips without it.
 """
 
 from __future__ import annotations
@@ -25,13 +25,10 @@ from ml_service.config import (
     MAX_NLI_PAIRS,
     MAX_OCR_BYTES,
     NLI_MODEL_SHA256,
-    OCR_DETECTOR_SHA256,
-    OCR_DETECTOR_URL,
-    OCR_RECOGNIZER_SHA256,
-    OCR_RECOGNIZER_URL,
+    OCR_MODELS,
     Config,
 )
-from ml_service.models import NLI_LABELS, EasyOcrReader, InvalidImage, ModelSlot
+from ml_service.models import NLI_LABELS, InvalidImage, ModelSlot, RapidOcrReader
 
 from .conftest import FakeEmbedder, FakeNer
 
@@ -232,7 +229,7 @@ def test_default_costs_fit_both_models():
         assert c.post("/v1/nli", json={"pairs": _pairs(1)}).status_code == 200
         assert _ocr(c).status_code == 200
         assert _states(c)["nli"] == "loaded" and _states(c)["ocr"] == "loaded"
-        assert c.get("/v1/status").json()["lazy_resident_mb"] == 1500
+        assert c.get("/v1/status").json()["lazy_resident_mb"] == 1000
     assert app.state.budget.evictions == 0
 
 
@@ -336,62 +333,77 @@ def test_release_memory_is_safe_everywhere():
     release_memory()  # glibc: malloc_trim(0); elsewhere only gc.collect()
 
 
-# ── EasyOcrReader post-processing (the vision_service rule) ──────────────
+# ── RapidOcrReader post-processing (the old vision_service rule) ─────────
 
-class StubReader:
+class StubEngine:
+    """Stands in for rapidocr.RapidOCR: called with a PIL image, returns an
+    object with .txts (None when nothing was found)."""
+
     def __init__(self, lines):
         self.lines, self.calls = lines, []
 
-    def readtext(self, image, **kw):
-        self.calls.append((getattr(image, "shape", None), kw))
-        return self.lines
+    def __call__(self, image):
+        self.calls.append((image.mode, image.size))
+
+        class Out:
+            txts = self.lines
+
+        return Out()
 
 
-needs_pil = pytest.mark.skipif(
-    importlib.util.find_spec("PIL") is None or importlib.util.find_spec("numpy") is None,
-    reason="PIL / numpy not installed",
-)
+needs_pil = pytest.mark.skipif(importlib.util.find_spec("PIL") is None, reason="PIL not installed")
 
 
-def _png(mode: str = "RGBA", size=(12, 7)) -> bytes:
+def _png(mode: str = "RGBA", size=(12, 7), exif_orientation: int | None = None) -> bytes:
     from PIL import Image
 
     buf = io.BytesIO()
-    Image.new(mode, size).save(buf, format="PNG")
+    image = Image.new(mode, size)
+    if exif_orientation is None:
+        image.save(buf, format="PNG")
+    else:
+        exif = Image.Exif()
+        exif[0x0112] = exif_orientation
+        image.convert("RGB").save(buf, format="JPEG", exif=exif.tobytes())
     return buf.getvalue()
 
 
 @needs_pil
 @pytest.mark.parametrize("mode", ["RGBA", "L", "P", "RGB"])
-def test_easyocr_reader_matches_vision_service(mode):
-    stub = StubReader(["  Mira died in the fire  ", "", "   ", "at the Silver Stag\t"])
-    reader = EasyOcrReader("/unused", reader=stub)
+def test_rapidocr_reader_keeps_the_vision_service_rule(mode):
+    stub = StubEngine(("  Mira died in the fire  ", "", "   ", "at the Silver Stag\t"))
+    reader = RapidOcrReader("/unused", engine=stub)
     assert reader.read(_png(mode)) == "Mira died in the fire\nat the Silver Stag"
-    ((shape, kw),) = stub.calls
-    assert shape == (7, 12, 3)  # convert("RGB") before readtext
-    assert kw == {"detail": 0, "paragraph": True}
+    assert stub.calls == [("RGB", (12, 7))]  # convert("RGB") before OCR
 
 
 @needs_pil
-def test_easyocr_reader_rejects_non_images():
-    stub = StubReader(["x"])
-    reader = EasyOcrReader("/unused", reader=stub)
+def test_rapidocr_reader_applies_exif_orientation():
+    stub = StubEngine(("x",))
+    RapidOcrReader("/unused", engine=stub).read(_png("RGB", size=(12, 7), exif_orientation=6))
+    assert stub.calls == [("RGB", (7, 12))]  # a phone photo taken sideways, turned upright
+
+
+@needs_pil
+def test_rapidocr_reader_no_text_is_empty_string():
+    assert RapidOcrReader("/unused", engine=StubEngine(None)).read(_png()) == ""
+
+
+@needs_pil
+def test_rapidocr_reader_rejects_non_images():
+    stub = StubEngine(("x",))
+    reader = RapidOcrReader("/unused", engine=stub)
     for data in (b"", b"not an image", _png()[:40]):
         with pytest.raises(InvalidImage):
             reader.read(data)
     assert stub.calls == []
 
 
-VISION_SERVICE = REPO / "src" / "backend" / "app" / "services" / "vision_service.py"
-
-
-@pytest.mark.skipif(not VISION_SERVICE.exists(), reason="backend not in this checkout")
-def test_vision_service_rule_unchanged():
-    """EasyOcrReader copies vision_service._run_extraction; flag drift on either side."""
-    src = VISION_SERVICE.read_text()
-    assert '.convert("RGB")' in src
-    assert "readtext(img_array, detail=0, paragraph=True)" in src
-    assert 'return "\\n".join(line.strip() for line in results if line.strip())' in src
+def test_rapidocr_reader_needs_the_baked_files(tmp_path):
+    if importlib.util.find_spec("rapidocr") is None:
+        pytest.skip("rapidocr not installed")
+    with pytest.raises(FileNotFoundError):
+        RapidOcrReader(str(tmp_path))
 
 
 REGISTER = REPO / "licenses" / "register.yaml"
@@ -400,8 +412,7 @@ REGISTER = REPO / "licenses" / "register.yaml"
 @pytest.mark.skipif(not REGISTER.exists(), reason="licence register not in this checkout")
 @pytest.mark.parametrize("name,url,sha", [
     ("nli-deberta-v3-xsmall", None, NLI_MODEL_SHA256),
-    ("easyocr-craft-mlt-25k", OCR_DETECTOR_URL, OCR_DETECTOR_SHA256),
-    ("easyocr-english-g2", OCR_RECOGNIZER_URL, OCR_RECOGNIZER_SHA256),
+    *[(name, url, sha) for name, _file, url, sha in OCR_MODELS],
 ])
 def test_baked_weights_match_the_register(name, url, sha):
     m = re.search(rf"^  - name: {re.escape(name)}\n(?P<body>(?:    .*\n)+)", REGISTER.read_text(), re.M)

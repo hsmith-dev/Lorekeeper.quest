@@ -5,27 +5,26 @@
    the sha256 in licenses/register.yaml.
 2. Download nli-deberta-v3-xsmall at the pinned revision into
    ML_NLI_MODEL_PATH (default /models/nli-deberta-v3-xsmall), same check.
-3. Download the EasyOCR "en" zips (CRAFT detector, english_g2 recogniser),
-   verify each zip's sha256, and extract the .pth files into ML_OCR_MODEL_DIR
-   (default /models/easyocr).
+3. Download the RapidOCR PP-OCRv6 small detector and recogniser and the
+   PP-OCR mobile orientation classifier (.onnx), verify each file's sha256,
+   into ML_OCR_MODEL_DIR (default /models/rapidocr).
 4. Load every model once (MiniLM, spaCy en_core_web_trf from its pip
    package, NLI, OCR) so a broken bake fails the build, not the first
-   request. NLI must call the CPU spike's Mira pair a contradiction; the OCR
-   output for a rendered text image is printed.
+   request. NLI must call the CPU spike's Mira pair a contradiction; OCR
+   must read the rendered check text back (case-insensitive).
 
 The container then runs with HF_HUB_OFFLINE=1 / TRANSFORMERS_OFFLINE=1, and
-EasyOCR is built with download_enabled=False.
+RapidOCR is given every model by path, so it has nothing to download.
 """
 
 from __future__ import annotations
 
 import hashlib
 import io
+import re
 import shutil
 import sys
-import tempfile
 import urllib.request
-import zipfile
 from pathlib import Path
 
 from ml_service.config import (
@@ -36,7 +35,7 @@ from ml_service.config import (
     NLI_MODEL_REPO,
     NLI_MODEL_REVISION,
     NLI_MODEL_SHA256,
-    OCR_ZIPS,
+    OCR_MODELS,
     load_config,
 )
 
@@ -73,20 +72,17 @@ def bake_hf(repo: str, revision: str, sha256: str, target: Path, allow_patterns:
 
 def bake_ocr(target: Path) -> None:
     target.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory() as tmp:
-        for url, sha256 in OCR_ZIPS:
-            archive = Path(tmp) / url.rsplit("/", 1)[1]
-            with urllib.request.urlopen(url, timeout=300) as resp, archive.open("wb") as out:
-                shutil.copyfileobj(resp, out)
-            _check_sha(archive, sha256)
-            with zipfile.ZipFile(archive) as zf:
-                members = [m for m in zf.infolist() if m.filename.endswith(".pth") and not m.is_dir()]
-                if not members:
-                    raise BakeError(f"{archive.name} holds no .pth file")
-                for m in members:
-                    # Flatten: EasyOCR looks for <model_storage_directory>/<name>.pth.
-                    with zf.open(m) as src, (target / Path(m.filename).name).open("wb") as dst:
-                        shutil.copyfileobj(src, dst)
+    for _name, filename, url, sha256 in OCR_MODELS:
+        dest = target / filename
+        part = dest.with_suffix(dest.suffix + ".part")
+        with urllib.request.urlopen(url, timeout=300) as resp, part.open("wb") as out:
+            shutil.copyfileobj(resp, out)
+        _check_sha(part, sha256)
+        part.rename(dest)
+
+
+def _words(text: str) -> list[str]:
+    return re.findall(r"[a-z0-9]+", text.lower())
 
 
 def _text_png(text: str) -> bytes:
@@ -96,15 +92,17 @@ def _text_png(text: str) -> bytes:
         font = ImageFont.load_default(size=48)
     except TypeError:  # Pillow without FreeType sizing
         font = ImageFont.load_default()
-    image = Image.new("RGB", (900, 120), "white")
-    ImageDraw.Draw(image).text((20, 30), text, fill="black", font=font)
+    # A white margin round the text, as on a page: PP-OCRv6's detector splits
+    # text that touches a tight crop's edges.
+    image = Image.new("RGB", (1000, 200), "white")
+    ImageDraw.Draw(image).text((40, 70), text, fill="black", font=font)
     buf = io.BytesIO()
     image.save(buf, format="PNG")
     return buf.getvalue()
 
 
 def main() -> int:
-    from ml_service.models import EasyOcrReader, SentenceTransformerEmbedder, SpacyNer, TransformersNli
+    from ml_service.models import RapidOcrReader, SentenceTransformerEmbedder, SpacyNer, TransformersNli
 
     cfg = load_config()
     embed_dir, nli_dir, ocr_dir = Path(cfg.embed_model_path), Path(cfg.nli_model_path), Path(cfg.ocr_model_dir)
@@ -138,14 +136,15 @@ def main() -> int:
         print(f"NLI called the Mira pair {verdict!r}, expected 'contradiction'", file=sys.stderr)
         return 1
 
-    text = EasyOcrReader(str(ocr_dir)).read(_text_png(OCR_CHECK_TEXT))
+    text = RapidOcrReader(str(ocr_dir)).read(_text_png(OCR_CHECK_TEXT))
     print(f"OCR of a rendered {OCR_CHECK_TEXT!r}: {text!r}")
-    if not text.strip():
-        print("OCR read no text from the rendered check image", file=sys.stderr)
+    if _words(text) != _words(OCR_CHECK_TEXT):
+        print(f"OCR read {text!r} from the rendered check image, expected {OCR_CHECK_TEXT!r}",
+              file=sys.stderr)
         return 1
 
     print(f"baked {EMBED_MODEL_REPO}@{EMBED_MODEL_REVISION} into {embed_dir}; "
-          f"{NLI_MODEL_REPO}@{NLI_MODEL_REVISION} into {nli_dir}; EasyOCR en into {ocr_dir}; "
+          f"{NLI_MODEL_REPO}@{NLI_MODEL_REVISION} into {nli_dir}; RapidOCR PP-OCRv6 small into {ocr_dir}; "
           f"{cfg.ner_model_name}, NLI and OCR load")
     return 0
 

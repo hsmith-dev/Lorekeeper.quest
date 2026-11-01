@@ -20,7 +20,7 @@ _spec.loader.exec_module(cmp)
 # The ceiling: the baseline may lose entries, never gain them. Shrink this set
 # in the same PR that removes a line from model_packages_baseline.txt.
 FROZEN_BASELINE = frozenset({
-    "torch", "torchvision", "spacy", "en-core-web-trf", "sentence-transformers", "openai-whisper", "easyocr",
+    "torch", "torchvision", "spacy", "en-core-web-trf", "sentence-transformers", "openai-whisper",
 })
 
 

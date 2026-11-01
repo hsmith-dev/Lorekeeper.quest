@@ -118,7 +118,7 @@ class FakeMLClient:
             models=[ModelState(EMBEDDING_MODEL, "embedding", "loaded"),
                     ModelState("en_core_web_trf", "ner", "loaded"),
                     ModelState("nli-deberta-v3-xsmall", "nli", "not_loaded", lazy=True, cost_mb=600),
-                    ModelState("easyocr-en", "ocr", "not_loaded", lazy=True, cost_mb=900)],
+                    ModelState("rapidocr-ppocrv6-small", "ocr", "not_loaded", lazy=True, cost_mb=400)],
             rss_bytes=0,
             resident_budget_mb=2000,
             lazy_resident_mb=0,

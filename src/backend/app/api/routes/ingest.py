@@ -3,6 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File
 from pydantic import BaseModel
 
 from app.api.deps import get_current_user
+from app.clients.errors import ModelServiceError, ModelServiceUnavailable
 from app.core.limiter import limiter, user_or_ip
 from app.db.models.user import User
 from app.services.vision_service import extract_notes_from_image
@@ -55,7 +56,17 @@ async def ingest_image(
     contents = await file.read()
     if len(contents) > _MAX_IMAGE_BYTES:
         raise HTTPException(status_code=413, detail="Image exceeds 10 MB limit.")
-    text = await extract_notes_from_image(contents)
+    try:
+        text = await extract_notes_from_image(contents, file.filename or "image")
+    except ModelServiceUnavailable:
+        raise HTTPException(
+            status_code=503,
+            detail="Text recognition is unavailable right now. Try again in a minute.",
+        )
+    except ModelServiceError as exc:
+        if exc.status_code == 413:
+            raise HTTPException(status_code=413, detail="Image exceeds 10 MB limit.")
+        text = ""  # 422: empty or undecodable image, same answer as no text
     if not text:
         raise HTTPException(
             status_code=422,

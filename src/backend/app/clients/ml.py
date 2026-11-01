@@ -15,8 +15,9 @@ Failure contract:
 The client never retries (see app/clients/errors.py).
 
 NLI and OCR load on their first request in the sidecar, so that request can
-take a few seconds longer. Nothing calls this yet: embedding_service /
-nlp_service / vision_service move over in E0-Platform.6.
+take a few seconds longer. vision_service calls ocr() (E0-QA.9, when
+EasyOCR left the backend); embedding_service / nlp_service move over in
+E0-Platform.6.
 """
 
 from __future__ import annotations

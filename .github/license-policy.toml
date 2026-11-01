@@ -252,12 +252,6 @@ license = "LGPL-3.0-only"
 reason = "Direct dep (app/services/export_service.py PDF export); LGPL-3.0, imported unmodified. OWNER TO CONFIRM. Permissive alternative if wanted: reportlab (BSD) or WeasyPrint (BSD, already planned)."
 
 [[exception]]
-ecosystem = "python"
-package = "python-bidi"
-license = "GNU Library or Lesser General Public License (LGPL)"
-reason = "Transitive via easyocr; LGPL-3.0, compiled extension imported unmodified. OWNER TO CONFIRM."
-
-[[exception]]
 ecosystem = "npm"
 package = "caniuse-lite"
 license = "CC-BY-4.0"

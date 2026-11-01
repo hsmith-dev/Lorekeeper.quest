@@ -172,12 +172,27 @@ proprietary terms that the commercial and AGPL editions cannot pass on.
 ## Owner-approved exceptions
 
 `[[exception]]` entries in the policy record packages the owner accepts despite
-the rules: fpdf2 (LGPL-3.0), python-bidi (LGPL, via easyocr) and caniuse-lite
-(CC-BY-4.0). All three are marked `OWNER TO CONFIRM`. E0-QA.9 records the
-decisions.
+the rules: fpdf2 (LGPL-3.0) and caniuse-lite (CC-BY-4.0). Both are marked
+`OWNER TO CONFIRM`. E0-QA.9 records the decisions.
 
 The former fourth exception, the `redis:7-alpine` image (Redis 7.4.x, RSALv2 /
 SSPLv1), is gone: on 2026-11-01 the owner replaced Redis with Valkey
 (`valkey/valkey:8.1.11-alpine`, BSD-3-Clause, Linux Foundation), which needs no
 exception in either edition. The app still talks to it with the redis-py client
 (MIT) over the `redis://` wire protocol; neither is the Redis server.
+
+### OCR: python-bidi replaced, not excepted (E0-QA.9)
+
+Owner decision, 2026-11-01: replace rather than accept the python-bidi
+(LGPL-3.0) exception. python-bidi arrived only through EasyOCR, so EasyOCR is
+gone from both images. OCR is now RapidOCR (`rapidocr`, Apache-2.0) on
+`onnxruntime` (MIT) in the `ml` sidecar, with the PP-OCRv6 small detector and
+recogniser and the PP-OCR mobile orientation classifier (PaddleOCR models,
+Apache-2.0, in RapidAI's ONNX export). The three `.onnx` files are register
+rows (`rapidocr-*`) with sha256, verified at bake time. The backend reads
+photos through the sidecar's `/v1/ocr` (`app/services/vision_service.py`), so
+the web image installs no OCR package at all. `rapidocr` lists python-bidi
+only under its optional `rtl` extra, which we do not install; the
+`image-licenses (ml)` scan would fail if it came back, since its register row
+and exception are gone. torchvision also left the `ml` image (only EasyOCR
+needed it); the backend image still installs it until E0-Platform.6.

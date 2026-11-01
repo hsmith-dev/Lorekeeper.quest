@@ -151,17 +151,23 @@ def test_denied_package_fails_even_if_registered(tmp_path):
 
 @pytest.mark.parametrize("edition", cl.EDITIONS)
 def test_owner_exceptions_keep_working(tmp_path, edition):
-    reg = make_register(tmp_path, [
-        entry("fpdf2", license="LGPL-3.0-only"),
-        entry("python-bidi", license="LGPL-3.0-or-later",
-              scanned_license="GNU Library or Lesser General Public License (LGPL)"),
-    ])
-    deps = [("fpdf2", "2.8.7", "LGPL-3.0-only"),
-            ("python-bidi", "0.6", "GNU Library or Lesser General Public License (LGPL)")]
+    reg = make_register(tmp_path, [entry("fpdf2", license="LGPL-3.0-only")])
+    deps = [("fpdf2", "2.8.7", "LGPL-3.0-only")]
     failures, excepted, matched, _ = scan(reg, deps, edition)
-    assert failures == [] and len(excepted) == 2
+    assert failures == [] and len(excepted) == 1
     failures, excepted = entries_check(reg, edition)
-    assert failures == [] and len(excepted) == 2
+    assert failures == [] and len(excepted) == 1
+
+
+@pytest.mark.parametrize("edition", cl.EDITIONS)
+def test_python_bidi_is_no_longer_excepted(tmp_path, edition):
+    """E0-QA.9: the owner replaced EasyOCR rather than accept python-bidi
+    (LGPL-3.0), so it fails again if anything brings it back."""
+    reg = make_register(tmp_path, [entry("python-bidi", license="LGPL-3.0-or-later",
+                                         scanned_license="GNU Library or Lesser General Public License (LGPL)")])
+    failures, excepted, _, _ = scan(reg, [("python-bidi", "0.6", "GNU Library or Lesser General Public License (LGPL)")],
+                                    edition)
+    assert excepted == [] and [f[0] for f in failures] == ["python-bidi"]
 
 
 def test_pip_package_model_matches_scan(tmp_path):

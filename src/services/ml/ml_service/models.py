@@ -1,6 +1,6 @@
 """Model interfaces, the real loaders, and the per-model slots the app serves.
 
-torch / sentence_transformers / spacy / transformers / easyocr / PIL /
+torch / sentence_transformers / spacy / transformers / rapidocr / PIL /
 numpy are imported only inside the real loader and reader classes below,
 never at module import time, so the HTTP app runs (and is tested) with fakes.
 """
@@ -142,39 +142,53 @@ class TransformersNli:
         return [dict(zip(self._labels, row)) for row in probs]
 
 
-class EasyOcrReader:
-    """EasyOCR "en" from the weights baked into model_dir (never downloads).
+class RapidOcrReader:
+    """RapidOCR (PP-OCRv6 small, onnxruntime) from the .onnx files baked into
+    model_dir. Every model is passed by path, so RapidOCR never downloads.
 
-    read() follows the backend's vision_service._run_extraction exactly:
-    PIL convert("RGB"), readtext(detail=0, paragraph=True), then the stripped
-    non-empty lines joined with "\\n". `reader` is injectable for tests.
+    read(): PIL decode, EXIF orientation applied (phone photos), convert("RGB"),
+    then RapidOCR's text lines (top to bottom), stripped, empty ones dropped,
+    joined with "\\n": the rule the backend's EasyOCR vision_service had.
+    `engine` is injectable for tests.
     """
 
-    def __init__(self, model_dir: str, reader: object | None = None):
-        if reader is None:
-            import easyocr
+    def __init__(self, model_dir: str, engine: object | None = None):
+        if engine is None:
+            from pathlib import Path
 
-            reader = easyocr.Reader(
-                ["en"], gpu=False, model_storage_directory=model_dir,
-                download_enabled=False, verbose=False,
-            )
-        self._reader = reader
+            from rapidocr import RapidOCR
+
+            from ml_service.config import OCR_CLS_FILE, OCR_DET_FILE, OCR_REC_FILE
+
+            d = Path(model_dir)
+            params: dict[str, object] = {
+                "Global.log_level": "warning",
+                "Det.model_path": str(d / OCR_DET_FILE),
+                "Cls.model_path": str(d / OCR_CLS_FILE),
+                "Rec.model_path": str(d / OCR_REC_FILE),
+            }
+            for key in ("Det.model_path", "Cls.model_path", "Rec.model_path"):
+                if not Path(str(params[key])).is_file():
+                    raise FileNotFoundError(f"{params[key]} (baked by bake_models.py) is missing")
+            engine = RapidOCR(params=params)
+        self._engine = engine
 
     def read(self, image_bytes: bytes) -> str:
         import io
 
-        import numpy as np
-        from PIL import Image
+        from PIL import Image, ImageOps
 
         if not image_bytes:
             raise InvalidImage("empty upload")
         try:
-            image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+            image = Image.open(io.BytesIO(image_bytes))
+            image = (ImageOps.exif_transpose(image) or image).convert("RGB")
         except (OSError, EOFError, ValueError, SyntaxError, Image.DecompressionBombError) as exc:
             # UnidentifiedImageError and truncated files are OSErrors.
             raise InvalidImage(f"not a decodable image: {type(exc).__name__}") from exc
-        results = self._reader.readtext(np.array(image), detail=0, paragraph=True)
-        return "\n".join(line.strip() for line in results if line.strip())
+        result = self._engine(image)
+        lines = getattr(result, "txts", None) or ()
+        return "\n".join(line.strip() for line in lines if line and line.strip())
 
 
 class ModelSlot:

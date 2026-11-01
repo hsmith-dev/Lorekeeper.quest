@@ -105,7 +105,7 @@ def test_status(client):
         {"name": "all-MiniLM-L6-v2", "kind": "embedding", "state": "loaded", "lazy": False, "cost_mb": None},
         {"name": "en_core_web_trf", "kind": "ner", "state": "loaded", "lazy": False, "cost_mb": None},
         {"name": "nli-deberta-v3-xsmall", "kind": "nli", "state": "not_loaded", "lazy": True, "cost_mb": 600},
-        {"name": "easyocr-en", "kind": "ocr", "state": "not_loaded", "lazy": True, "cost_mb": 900},
+        {"name": "rapidocr-ppocrv6-small", "kind": "ocr", "state": "not_loaded", "lazy": True, "cost_mb": 400},
     ]
     assert body["resident_budget_mb"] == 2000
     assert body["lazy_resident_mb"] == 0
@@ -125,9 +125,9 @@ def test_config_from_env():
 
 def test_lazy_config_from_env():
     cfg = load_config({})
-    assert (cfg.resident_budget_mb, cfg.nli_cost_mb, cfg.ocr_cost_mb, cfg.nli_batch_size) == (2000, 600, 900, 32)
+    assert (cfg.resident_budget_mb, cfg.nli_cost_mb, cfg.ocr_cost_mb, cfg.nli_batch_size) == (2000, 600, 400, 32)
     assert cfg.nli_model_path == "/models/nli-deberta-v3-xsmall"
-    assert cfg.ocr_model_dir == "/models/easyocr"
+    assert cfg.ocr_model_dir == "/models/rapidocr"
     cfg = load_config({"ML_RESIDENT_BUDGET_MB": "1500", "ML_NLI_COST_MB": "1200", "ML_OCR_COST_MB": "1000",
                        "ML_NLI_BATCH_SIZE": "8", "ML_NLI_MODEL_PATH": "/m/nli", "ML_OCR_MODEL_DIR": "/m/ocr"})
     assert (cfg.resident_budget_mb, cfg.nli_cost_mb, cfg.ocr_cost_mb, cfg.nli_batch_size) == (1500, 1200, 1000, 8)
@@ -145,7 +145,8 @@ def test_lazy_config_from_env():
 
 def test_no_backend_or_heavy_imports_at_module_level():
     """ml_service never imports `app`, and only the loaders import the ML stack."""
-    heavy = {"torch", "sentence_transformers", "spacy", "transformers", "easyocr", "PIL", "numpy", "cv2"}
+    heavy = {"torch", "sentence_transformers", "spacy", "transformers", "rapidocr", "onnxruntime", "PIL", "numpy",
+             "cv2"}
     for path in PKG.glob("*.py"):
         tree = ast.parse(path.read_text())
         for node in ast.walk(tree):
@@ -163,7 +164,7 @@ def test_no_backend_or_heavy_imports_at_module_level():
 
 
 def test_importing_app_loads_no_models():
-    for mod in ("torch", "sentence_transformers", "spacy", "transformers", "easyocr"):
+    for mod in ("torch", "sentence_transformers", "spacy", "transformers", "rapidocr", "onnxruntime"):
         if mod in sys.modules:
             continue  # already imported by another test (e.g. test_nlp); nothing to assert
         import ml_service.app  # noqa: F401
