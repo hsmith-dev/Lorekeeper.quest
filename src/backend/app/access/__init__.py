@@ -22,9 +22,9 @@ from app.access.policy import (
     ANON, GM, OWNER, PLAYER, MinRole, NotFound, Role, SystemReason, ctx_role, display_role, meets, not_found,
 )
 from app.access.registry import (
-    DERIVED_REGISTRY, REGISTRY, DerivedType, UnregisteredModel, always_gm, audience_of, derived, gm_fields,
-    membership, parent, reached_through, register_derived, registration, scoped_get, scoped_select, stored,
-    visible_clause,
+    DERIVED_REGISTRY, REGISTRY, SOURCE_KIND_MODELS, DerivedType, UnregisteredModel, always_gm, audience_of,
+    derived, derived_from_sources, gm_fields, membership, parent, reached_through, register_derived,
+    register_source_kind, registration, scoped_get, scoped_select, stored, visible_clause,
 )
 
 __all__ = [
@@ -49,6 +49,7 @@ __all__ = [
     "PREVIEW_HEADER",
     "PUBLIC",
     "REGISTRY",
+    "SOURCE_KIND_MODELS",
     "Role",
     "RoleMap",
     "SystemReason",
@@ -63,6 +64,7 @@ __all__ = [
     "ctx_for",
     "ctx_role",
     "derived",
+    "derived_from_sources",
     "display_role",
     "field_audience",
     "get_current_user",
@@ -76,6 +78,7 @@ __all__ = [
     "parent",
     "reached_through",
     "register_derived",
+    "register_source_kind",
     "registration",
     "require_campaign",
     "require_campaign_for",

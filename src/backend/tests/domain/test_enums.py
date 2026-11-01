@@ -15,6 +15,9 @@ from app.domain.enums import (
     EntityChangeOp,
     EntityType,
     EntryKind,
+    JobErrorCode,
+    JobQueue,
+    JobStatus,
     LocationKind,
     MentionOrigin,
     MentionSourceField,
@@ -40,6 +43,13 @@ EXPECTED: dict[type[StrEnum], list[str]] = {
     MentionSourceField: ["narrative", "shorthand", "gm_notes"],
     TagSourceField: ["shorthand", "narrative", "manual"],
     EntryKind: ["gm", "player"],
+    JobStatus: ["queued", "running", "done", "failed", "cancelled"],
+    JobQueue: ["interactive", "onsave", "backfill"],
+    # Append-only (AD-4): the story's list, then E0-LLM.1's prompt_too_large.
+    JobErrorCode: [
+        "llm_config", "ai_output_unusable", "permission_changed", "model_unavailable", "llm_unavailable",
+        "llm_busy", "timeout", "interrupted", "internal", "prompt_too_large",
+    ],
     LocationKind: ["settlement", "dungeon", "wilderness", "building", "region", "plane", "other"],
     # PG enum mirrors (AD-12): the order is the pg_enum sort order.
     Visibility: ["party", "gm", "private"],

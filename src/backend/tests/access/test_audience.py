@@ -1,5 +1,7 @@
 """E0-Access.3: the Audience lattice, the AD-12 mapping, the Mention formula,
-the registry's shape and derived types. Pure: no database."""
+the registry's shape and derived types; E0-Jobs.1: the jobs owner rule, the
+stored_files `derived_from_sources` class and the global always_gm models.
+Pure: no database."""
 from __future__ import annotations
 
 import itertools
@@ -17,9 +19,9 @@ from app.access import (
 )
 from app.access import registry as reg
 from app.db.models import (
-    Campaign, CampaignMember, CampaignShareToken, CharacterSheet, CharacterSheetTemplate, ChatSession, Feedback,
-    JournalEntry, JournalTag, NpcEntry, Quest, SessionPlan, ShorthandTerm, SourceChunk, SourceDocument, Tag,
-    TagCategory,
+    Campaign, CampaignMember, CampaignShareToken, CharacterSheet, CharacterSheetTemplate, ChatSession,
+    DataBackfill, DerivedSource, Feedback, Job, JournalEntry, JournalTag, NpcEntry, Quest, SessionPlan,
+    ShorthandTerm, SourceChunk, SourceDocument, StoredFile, Tag, TagCategory,
 )
 from app.db.models.journal import JournalEntry as JE
 
@@ -155,8 +157,13 @@ def test_every_current_table_is_registered_as_the_story_says():
         NpcEntry: reg.AlwaysGM, Quest: reg.AlwaysGM,
         Campaign: reg.Membership, CampaignMember: reg.Membership, CampaignShareToken: reg.Membership,
         CharacterSheetTemplate: reg.Membership,
+        Job: reg.AlwaysGM, StoredFile: reg.DerivedFromSources, DerivedSource: reg.AlwaysGM,
+        DataBackfill: reg.AlwaysGM,
     }
     assert {m: type(r) for m, r in REGISTRY.items()} == expect
+    assert REGISTRY[Job].owner_field == "created_by"
+    assert REGISTRY[DerivedSource].owner_field is REGISTRY[DataBackfill].owner_field is None
+    assert REGISTRY[NpcEntry].owner_field is None
     assert REGISTRY[JournalEntry].kind_field == "kind"
     assert REGISTRY[ChatSession].column is None and REGISTRY[ChatSession].owner_field == "user_id"
     assert REGISTRY[CharacterSheet].owner_field == REGISTRY[TagCategory].owner_field == "created_by_user_id"
@@ -414,3 +421,162 @@ def test_register_derived_rejects_a_bare_str(derived_registry):
     with pytest.raises(TypeError):
         register_derived("recap", [None])
     assert derived_registry == []
+
+
+# ── E0-Jobs.1: jobs, stored_files and the global always_gm models ───────────
+
+def test_job_owner_rule():
+    cid = uuid.uuid4()
+    assert audience_of(Job(campaign_id=cid, created_by=A)) == OA
+    assert audience_of(Job(campaign_id=cid, created_by=None)) == GM_AUDIENCE
+    gm, p = _gm(cid), _player(cid, A)
+    assert _sql(scoped_select(Job, gm)).rstrip().endswith(f"jobs.campaign_id = '{cid}'")
+    assert f"jobs.created_by = '{A}'" in _sql(scoped_select(Job, p))
+    for reduced in (audience_ctx(cid, MEMBER_VIEW, by=gm), audience_ctx(cid, ANON_VIEW, by=gm)):
+        assert _sql(scoped_select(Job, reduced)).rstrip().lower().endswith("false")
+
+
+@pytest.mark.parametrize("model", [DerivedSource, DataBackfill])
+def test_global_always_gm_models_are_refused_by_scoped_select(model):
+    cid = uuid.uuid4()
+    assert reg.scope_column(model) is None
+    for ctx in (_gm(cid), _player(cid)):
+        with pytest.raises(UnregisteredModel, match="no Campaign scope"):
+            scoped_select(model, ctx)
+    with pytest.raises(TypeError):
+        scoped_select_multi(model, {cid: "gm"})
+    row = DerivedSource(derived_type="x", derived_id=A, ref_kind="journal", ref_id=B) if model is DerivedSource \
+        else DataBackfill(name="suggested_mentions_v1")
+    assert audience_of(row) == GM_AUDIENCE
+
+
+def test_completeness_check_accepts_only_always_gm_without_a_campaign_scope(monkeypatch):
+    reg._check_complete()
+    monkeypatch.setitem(reg.REGISTRY, DataBackfill, reg.stored())
+    with pytest.raises(RuntimeError, match="DataBackfill has no Campaign scope"):
+        reg._check_complete()
+    monkeypatch.setitem(reg.REGISTRY, DataBackfill, reg.membership(PUBLIC))
+    with pytest.raises(RuntimeError, match="DataBackfill"):
+        reg._check_complete()
+
+
+@pytest.fixture
+def file_types(derived_registry):
+    register_derived("test_file", ["journal", "test_unmodelled"])
+    register_derived("test_entity_file", ["test_entity"])
+    return derived_registry
+
+
+CID = uuid.uuid4()
+
+
+def _file(kind="test_file", *, stale=False, owner_id=None, campaign_id=CID) -> StoredFile:
+    return StoredFile(id=uuid.uuid4(), campaign_id=campaign_id, kind=kind, storage_key="k", content_type="t",
+                      size=1, sha256="0" * 64, stale=stale, audience_owner_id=owner_id)
+
+
+def _entry(vis="party", kind="gm", author=A, campaign_id=CID) -> JournalEntry:
+    return JournalEntry(id=uuid.uuid4(), user_id=author, campaign_id=campaign_id, shorthand="s", narrative="n",
+                        entry_hash="h", kind=kind, visibility=vis)
+
+
+def _pair(f, ref, *, ref_kind="journal", ref_field=None, ref_id=None):
+    ds = DerivedSource(derived_type=f.kind, derived_id=f.id, ref_kind=ref_kind,
+                       ref_id=ref_id or (ref.id if ref is not None else uuid.uuid4()), ref_field=ref_field)
+    return (ds, ref)
+
+
+def test_file_audience_matrix(file_types):
+    f = _file()
+    party, private_a, gm_entry = _entry(), _entry("private"), _entry("gm")
+    # every source visible: the most restrictive of them
+    assert audience_of(f, parents=[_pair(f, party)]) == PUBLIC
+    assert audience_of(f, parents=[_pair(f, party), _pair(f, private_a)]) == OA
+    assert audience_of(f, parents=[_pair(f, party), _pair(f, _entry(kind="player"))]) == MEMBERS
+    # one hidden source hides it
+    assert audience_of(f, parents=[_pair(f, party), _pair(f, gm_entry)]) == GM_AUDIENCE
+    # no sources
+    assert audience_of(f, parents=[]) == GM_AUDIENCE
+    # unknown / unmodelled / disallowed ref_kind, missing or foreign source row
+    assert audience_of(f, parents=[_pair(f, party, ref_kind="nope")]) == GM_AUDIENCE
+    assert audience_of(f, parents=[_pair(f, party, ref_kind="test_unmodelled")]) == GM_AUDIENCE
+    ef = _file("test_entity_file")
+    assert audience_of(ef, parents=[_pair(ef, party)]) == GM_AUDIENCE
+    assert audience_of(f, parents=[_pair(f, None)]) == GM_AUDIENCE
+    assert audience_of(f, parents=[_pair(f, _entry(campaign_id=uuid.uuid4()))]) == GM_AUDIENCE
+    assert audience_of(f, parents=[_pair(f, party, ref_id=uuid.uuid4())]) == GM_AUDIENCE
+    # a GM ref_field
+    assert audience_of(f, parents=[_pair(f, party, ref_field="shorthand")]) == GM_AUDIENCE
+    assert audience_of(f, parents=[_pair(f, party, ref_field="narrative")]) == PUBLIC
+    # stale; unregistered kind
+    stale = _file(stale=True)
+    assert audience_of(stale, parents=[_pair(stale, party)]) == GM_AUDIENCE
+    unreg = _file("never_registered")
+    assert audience_of(unreg, parents=[_pair(unreg, party)]) == GM_AUDIENCE
+    # audience_owner_id: self, or another owner
+    mine = _file(owner_id=A)
+    assert audience_of(mine, parents=[_pair(mine, party)]) == OA
+    assert audience_of(mine, parents=[_pair(mine, _entry("private", author=B))]) == GM_AUDIENCE
+
+
+def test_file_audience_needs_its_own_source_pairs(file_types):
+    f, other = _file(), _file()
+    with pytest.raises(ValueError, match="parents"):
+        audience_of(f)
+    with pytest.raises(ValueError, match="not a source"):
+        audience_of(f, parents=[_pair(other, _entry())])
+    with pytest.raises(TypeError):
+        audience_of(f, parents=[_entry()])
+
+
+def test_file_visible_clause_sql(file_types):
+    gm, p = _gm(CID), _player(CID, A)
+    assert "derived_sources" not in _sql(scoped_select(StoredFile, gm))
+    sql = _sql(scoped_select(StoredFile, p))
+    assert "NOT stored_files.stale" in sql
+    assert "stored_files.kind IN ('test_file', 'test_entity_file')" in sql
+    assert f"stored_files.audience_owner_id = '{A}'" in sql
+    assert "ds.ref_kind = 'journal'" in sql and "test_unmodelled" not in sql
+    assert f"journal_entries.campaign_id = '{CID}'" in sql and "'shorthand'" in sql
+    member = _sql(scoped_select(StoredFile, audience_ctx(CID, MEMBER_VIEW, by=gm)))
+    assert "stored_files.audience_owner_id IS NULL" in member and str(A) not in member
+
+
+def test_register_source_kind(monkeypatch):
+    monkeypatch.setattr(reg, "SOURCE_KIND_MODELS", dict(reg.SOURCE_KIND_MODELS))
+    assert reg.SOURCE_KIND_MODELS == {"journal": JournalEntry}
+    reg.register_source_kind("session_plan", SessionPlan)
+    assert reg.SOURCE_KIND_MODELS["session_plan"] is SessionPlan
+    with pytest.raises(ValueError, match="already"):
+        reg.register_source_kind("journal", JournalEntry)
+    for ref_kind, derived_model in (("tag", Tag), ("chunk", SourceChunk), ("journal_tag", JournalTag)):
+        with pytest.raises(ValueError, match="derived"):  # its Audience needs its parents
+            reg.register_source_kind(ref_kind, derived_model)
+    with pytest.raises(ValueError):
+        reg.register_source_kind("file", StoredFile)
+    with pytest.raises(ValueError):
+        reg.register_source_kind("backfill", DataBackfill)  # global
+    with pytest.raises(UnregisteredModel):
+        reg.register_source_kind("feedback", Feedback)
+    with pytest.raises(TypeError):
+        reg.register_source_kind("", JournalEntry)
+
+
+def test_file_source_model_gm_fields_narrow_in_sql_and_python(monkeypatch, file_types):
+    # A source model with its own GM-only field ("content", not an always-GM field).
+    monkeypatch.setitem(reg.REGISTRY, SessionPlan, reg.stored(gm_fields=("content",)))
+    monkeypatch.setattr(reg, "SOURCE_KIND_MODELS", dict(reg.SOURCE_KIND_MODELS))
+    reg.register_source_kind("plan", SessionPlan)
+    register_derived("test_plan_file", ["plan", "journal"])
+    f = _file("test_plan_file")
+    plan = SessionPlan(id=uuid.uuid4(), user_id=A, campaign_id=CID, title="t", content="c", visibility="party")
+    assert audience_of(f, parents=[_pair(f, plan, ref_kind="plan", ref_field="title")]) == PUBLIC
+    assert audience_of(f, parents=[_pair(f, plan, ref_kind="plan", ref_field="content")]) == GM_AUDIENCE
+    assert audience_of(f, parents=[_pair(f, plan, ref_kind="plan", ref_field="shorthand")]) == GM_AUDIENCE
+    # "content" is GM only for the plan branch, not for journal sources.
+    assert audience_of(f, parents=[_pair(f, _entry(), ref_field="content")]) == PUBLIC
+    sql = _sql(scoped_select(StoredFile, _player(CID, A)))
+    journal_branch = sql.split("ds.ref_kind = 'journal'")[1].split("ds.ref_kind = 'plan'")[0]
+    plan_branch = sql.split("ds.ref_kind = 'plan'")[1]
+    assert "ds.ref_field NOT IN ('gm_notes', 'shorthand', 'voice_notes')" in journal_branch
+    assert "ds.ref_field NOT IN ('content', 'gm_notes', 'shorthand', 'voice_notes')" in plan_branch

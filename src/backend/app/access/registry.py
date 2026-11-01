@@ -13,7 +13,14 @@ Each model registers exactly one class:
     through `parent(...)` links (the most restrictive parent, plus a
     `field=` rule such as `journal_tags.source_field`), or through
     `reached_through(...)` (any one visible child is enough: tags).
-  * `always_gm()`: GM only (npcs and quests until F3-world, Decision B1-D4).
+  * `always_gm(owner_field=None)`: GM only (npcs and quests until F3-world,
+    Decision B1-D4). With `owner_field`, a non-GM Owner(u) ctx also reads
+    the rows whose owner_field = u (jobs: a Player sees the Jobs they
+    started). A global table (no `campaign_id`: data_backfills,
+    derived_sources) may register always_gm; `scoped_select` refuses it.
+  * `derived_from_sources()`: the row's Audience is the most restrictive of
+    the rows its `derived_sources` name (stored_files, E0-Jobs.1). See
+    "Derived from sources" below.
   * `membership(audience)`: a constant Audience for a membership-scoped
     table of the ctx's Campaign; management rules stay in the routes.
 
@@ -25,6 +32,16 @@ read from the same registration; tests/access/test_registry_property.py
 files, E4's `live_recap`), each `{derived_type, derive_from: [ref_kind, ...]}`;
 `audience_of` on such an object is the most restrictive Audience of its
 `derived_sources` (GM when it has none).
+
+Derived from sources (stored_files): the file's `kind` is its derived type
+in DERIVED_REGISTRY, and its sources are the `derived_sources` rows with
+`derived_type = kind`, `derived_id = id`. Each `ref_kind` resolves to a
+model through SOURCE_KIND_MODELS (`register_source_kind`). For a non-GM the
+file is visible only when it is not stale, its kind is registered, its
+`audience_owner_id` is NULL or the viewer, it has at least one source, and
+every source is allowed by the type's `derive_from`, has a model, is a row
+of the same Campaign that the viewer may see, and does not come from an
+always-GM `ref_field`. Anything else fails closed (GM only).
 
 At import, every mapped table with a `campaign_id` column (plus `tags` and
 `journal_tags`) must be registered or listed in `UNSCOPED` with a reason;
@@ -38,6 +55,7 @@ from typing import TYPE_CHECKING, Any, Iterable, Mapping, Sequence
 
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 import app.db.models  # noqa: F401  (every model is mapped before the completeness check)
 from app.access.audience import (
@@ -50,6 +68,7 @@ from app.db.models.campaign import Campaign
 from app.db.models.campaign_member import CampaignMember
 from app.db.models.character_sheet import CharacterSheet, CharacterSheetTemplate
 from app.db.models.chat import ChatSession
+from app.db.models.job import DataBackfill, Job
 from app.db.models.journal import JournalEntry
 from app.db.models.npc import NpcEntry
 from app.db.models.quest import Quest
@@ -57,6 +76,7 @@ from app.db.models.session_plan import SessionPlan
 from app.db.models.share_token import CampaignShareToken
 from app.db.models.shorthand import ShorthandTerm
 from app.db.models.source import SourceChunk, SourceDocument
+from app.db.models.stored_file import DerivedSource, StoredFile
 from app.db.models.tag import JournalTag, Tag
 from app.db.models.tag_category import TagCategory
 from app.domain.enums import EntryKind, Visibility
@@ -121,6 +141,19 @@ class Derived:
 @dataclass(frozen=True)
 class AlwaysGM:
     gm_fields: tuple[str, ...] = ()
+    # A non-GM Owner(u) ctx reads the rows whose owner_field = u.
+    owner_field: str | None = None
+
+
+@dataclass(frozen=True)
+class DerivedFromSources:
+    """The Audience comes from the row's `derived_sources` (stored_files)."""
+
+    id_field: str = "id"
+    kind_field: str = "kind"
+    stale_field: str = "stale"
+    owner_field: str = "audience_owner_id"
+    gm_fields: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -129,7 +162,7 @@ class Membership:
     gm_fields: tuple[str, ...] = ()
 
 
-Registration = Stored | Derived | AlwaysGM | Membership
+Registration = Stored | Derived | AlwaysGM | Membership | DerivedFromSources
 
 
 def stored(column: str | None = "visibility", owner_field: str = "user_id", kind_field: str | None = None,
@@ -150,8 +183,12 @@ def derived(derive_from: Sequence[Parent | ReachedThrough], *, field: str | None
     return Derived(tuple(derive_from), field, tuple(gm_fields))
 
 
-def always_gm(*, gm_fields: Iterable[str] = ()) -> AlwaysGM:
-    return AlwaysGM(tuple(gm_fields))
+def always_gm(*, owner_field: str | None = None, gm_fields: Iterable[str] = ()) -> AlwaysGM:
+    return AlwaysGM(tuple(gm_fields), owner_field)
+
+
+def derived_from_sources(*, gm_fields: Iterable[str] = ()) -> DerivedFromSources:
+    return DerivedFromSources(gm_fields=tuple(gm_fields))
 
 
 def membership(audience: Audience, *, gm_fields: Iterable[str] = ()) -> Membership:
@@ -175,6 +212,12 @@ REGISTRY: dict[type, Registration] = {
     ChatSession: stored(column=None),
     NpcEntry: always_gm(gm_fields=("notes",)),
     Quest: always_gm(gm_fields=("notes",)),
+    # E0-Jobs.1 (F2-jobs-files).
+    Job: always_gm(owner_field="created_by"),
+    StoredFile: derived_from_sources(),
+    # Global (no campaign_id): never read through scoped_select.
+    DerivedSource: always_gm(),
+    DataBackfill: always_gm(),
     Campaign: membership(PUBLIC),
     CampaignMember: membership(MEMBERS),
     CampaignShareToken: membership(GM_AUDIENCE),
@@ -271,9 +314,15 @@ def visible_clause(model: type, ctx: "CampaignContext"):
     if isinstance(reg, Derived):
         return _derived_clause(model, reg, ctx)
     if isinstance(reg, AlwaysGM):
-        return sa.true() if viewer.level is AudienceLevel.GM else sa.false()
+        if viewer.level is AudienceLevel.GM:
+            return sa.true()
+        if reg.owner_field is not None and viewer.level is AudienceLevel.OWNER:
+            return _col(model, reg.owner_field) == viewer.user_id
+        return sa.false()
     if isinstance(reg, Membership):
         return sa.true() if covers(reg.audience, viewer) else sa.false()
+    if isinstance(reg, DerivedFromSources):
+        return _sources_clause(model, reg, ctx)
     raise TypeError(f"unknown registration {reg!r}")  # pragma: no cover
 
 
@@ -284,7 +333,7 @@ def scoped_select(model: type, ctx: "CampaignContext") -> sa.Select:
     scope = scope_column(model)
     if scope is not None:
         stmt = stmt.where(scope == ctx.campaign_id)
-    elif not isinstance(reg, Derived):  # pragma: no cover - guarded by the import check
+    elif not isinstance(reg, Derived):  # a global always_gm table (derived_sources, data_backfills)
         raise UnregisteredModel(f"{model.__name__!r} has no Campaign scope")
     return stmt.where(visible_clause(model, ctx))
 
@@ -395,6 +444,130 @@ def _derived_type_audience(obj: Any, sources: Iterable[Any] | None) -> Audience:
     return most_restrictive(auds)
 
 
+# ── Derived from sources (stored_files) ─────────────────────────────────────
+
+# ref_kind -> the model whose `id` a derived_sources.ref_id names. Feature
+# epics add theirs with register_source_kind (E0-WorldCore: `entity`, ...).
+SOURCE_KIND_MODELS: dict[str, type] = {
+    "journal": JournalEntry,
+}
+
+
+def register_source_kind(ref_kind: str, model: type) -> None:
+    """Let `derived_sources.ref_kind = ref_kind` resolve to rows of `model`
+    (a registered, Campaign-scoped model with an `id` key whose Audience
+    needs no parents: stored, always_gm or membership)."""
+    if not isinstance(ref_kind, str) or not ref_kind:
+        raise TypeError(f"register_source_kind: ref_kind must be a non-empty str, got {ref_kind!r}")
+    if ref_kind in SOURCE_KIND_MODELS:
+        raise ValueError(f"register_source_kind: {ref_kind!r} is already registered")
+    reg = registration(model)
+    if isinstance(reg, (Derived, DerivedFromSources)):
+        raise ValueError(f"register_source_kind: {model.__name__} is derived; its Audience needs its parents")
+    if scope_column(model) is None:
+        raise ValueError(f"register_source_kind: {model.__name__} has no Campaign scope")
+    if not hasattr(model, "id"):
+        raise ValueError(f"register_source_kind: {model.__name__} has no `id` column")
+    SOURCE_KIND_MODELS[ref_kind] = model
+
+
+def _source_gm_fields(src: type) -> list[str]:
+    """The ref_field values that make a source GM: the always-GM fields plus
+    the source model's own gm_fields."""
+    return sorted(ALWAYS_GM_FIELDS | set(registration(src).gm_fields))
+
+
+def _derived_types() -> list[DerivedType]:
+    return [_derived_entry(raw) for raw in DERIVED_REGISTRY]
+
+
+def _sources_clause(model: type, reg: DerivedFromSources, ctx: "CampaignContext"):
+    """SQL twin of `_sources_audience`. Every comparison is on a NOT NULL
+    column or NULL-guarded, so `NOT ok(ds)` is never NULL (fail closed)."""
+    viewer = ctx.audience
+    if viewer.level is AudienceLevel.GM:
+        return sa.true()
+    ds = aliased(DerivedSource, name="ds")
+    kind = _col(model, reg.kind_field)
+    owner_col = _col(model, reg.owner_field)
+    types = _derived_types()
+    if viewer.level is AudienceLevel.OWNER:
+        owner_ok = sa.or_(owner_col.is_(None), owner_col == viewer.user_id)
+    else:
+        owner_ok = owner_col.is_(None)
+
+    branches = []
+    for ref_kind, src in SOURCE_KIND_MODELS.items():
+        allowed = [t.derived_type for t in types if ref_kind in t.derive_from]
+        if not allowed:
+            continue
+        where = [_col(src, "id") == ds.ref_id]
+        scope = scope_column(src)
+        if scope is not None:
+            where.append(scope == ctx.campaign_id)
+        where.append(visible_clause(src, ctx))
+        field_ok = sa.or_(ds.ref_field.is_(None), ds.ref_field.notin_(_source_gm_fields(src)))
+        branches.append(sa.and_(ds.ref_kind == ref_kind, kind.in_(allowed), field_ok, sa.exists().where(*where)))
+    ok = sa.or_(*branches) if branches else sa.false()
+
+    link = sa.and_(ds.derived_type == kind, ds.derived_id == _col(model, reg.id_field))
+    return sa.and_(
+        sa.not_(_col(model, reg.stale_field)),
+        kind.in_([t.derived_type for t in types]),
+        owner_ok,
+        sa.exists().where(link),
+        sa.not_(sa.exists().where(link, sa.not_(ok))),
+    )
+
+
+def _source_row_audience(obj: Any, entry: DerivedType, source: Any, ref: Any) -> Audience | None:
+    """The Audience one (derived_sources row, source row) pair contributes,
+    or None when it cannot be resolved or is not allowed."""
+    if source.ref_kind not in entry.derive_from:
+        return None
+    src = SOURCE_KIND_MODELS.get(source.ref_kind)
+    if src is None or ref is None or not isinstance(ref, src) or ref.id != source.ref_id:
+        return None
+    scope = scope_column(src)
+    if scope is not None and getattr(ref, scope.key) != getattr(obj, "campaign_id"):
+        return None
+    aud = audience_of(ref)
+    if isinstance(aud, AnyOf):
+        return None
+    if source.ref_field is not None and str(source.ref_field) in _source_gm_fields(src):
+        return GM_AUDIENCE
+    return aud
+
+
+def _sources_audience(obj: Any, reg: DerivedFromSources, parents: Any) -> Audience:
+    """`parents` is the file's sources as `(derived_sources row, source row or
+    None)` pairs. GM when the file is stale, its kind is unregistered, it has
+    no sources, or any source is unresolvable or not allowed; else the most
+    restrictive of the sources (with their ref_field) and Owner(audience_owner_id)."""
+    if parents is None:
+        raise ValueError(f"audience_of: {type(obj).__name__} needs parents=[(derived_source, source_row), ...]")
+    pairs = list(parents) if isinstance(parents, (list, tuple)) else [parents]
+    kind, row_id = getattr(obj, reg.kind_field), getattr(obj, reg.id_field)
+    for pair in pairs:
+        if not (isinstance(pair, tuple) and len(pair) == 2):
+            raise TypeError(f"audience_of: expected (derived_source, source_row) pairs, got {pair!r}")
+        if pair[0].derived_type != kind or pair[0].derived_id != row_id:
+            raise ValueError(f"audience_of: {pair[0]!r} is not a source of this {type(obj).__name__}")
+    entry = _derived_type(kind, missing_ok=True)
+    if getattr(obj, reg.stale_field) or entry is None or not pairs:
+        return GM_AUDIENCE
+    auds: list[Audience] = []
+    for source, ref in pairs:
+        aud = _source_row_audience(obj, entry, source, ref)
+        if aud is None:
+            return GM_AUDIENCE
+        auds.append(aud)
+    owner_id = getattr(obj, reg.owner_field)
+    if owner_id is not None:
+        auds.append(owner(owner_id))
+    return most_restrictive(auds)
+
+
 def _loaded(obj: Any, attr: str) -> Any:
     state = sa.inspect(obj)
     if attr in state.unloaded:
@@ -425,9 +598,12 @@ def audience_of(obj: Any, *, parents: Any = None) -> Audience | AnyOf:
         kind = getattr(obj, reg.kind_field) if reg.kind_field else None
         return stored_audience(getattr(obj, reg.column), owner_id, kind)
     if isinstance(reg, AlwaysGM):
-        return GM_AUDIENCE
+        owner_id = getattr(obj, reg.owner_field) if reg.owner_field is not None else None
+        return owner(owner_id) if owner_id is not None else GM_AUDIENCE
     if isinstance(reg, Membership):
         return reg.audience
+    if isinstance(reg, DerivedFromSources):
+        return _sources_audience(obj, reg, parents)
     # Derived
     links = reg.derive_from
     if isinstance(links[0], ReachedThrough):
@@ -488,7 +664,8 @@ def _check_complete() -> None:
             f"both registered and UNSCOPED: {stale}"
         )
     for model, reg in REGISTRY.items():
-        if scope_column(model) is None and not isinstance(reg, Derived):
+        # A global table may only be always_gm; scoped_select refuses it.
+        if scope_column(model) is None and not isinstance(reg, (Derived, AlwaysGM)):
             raise RuntimeError(f"app/access/registry.py: {model.__name__} has no Campaign scope column")
 
 

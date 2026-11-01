@@ -1,0 +1,93 @@
+"""`jobs` and `data_backfills` (F2-jobs-files, E0-Jobs.1; AD-2, AD-4).
+
+The `jobs` row is the authority for a Job; RQ only carries its id. Nothing
+here enqueues or runs anything: `enqueue` and the worker come in E0-Jobs.2
+and E0-Jobs.3.
+
+`kind`, `ctx_kind` and `ctx_audience` are open sets with no CHECK: the kind
+registry (E0-Jobs.2) and the ctx rebuild (E0-Jobs.3) own their vocabularies.
+"""
+import uuid
+from datetime import datetime
+from typing import Any
+
+from sqlalchemy import REAL, CheckConstraint, DateTime, ForeignKey, Index, Integer, String, Text, func, text
+from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.orm import Mapped, mapped_column
+
+from app.db.base import Base
+from app.domain.enums import JobErrorCode, JobQueue, JobStatus, check_expr
+
+# The statuses a Job holds its idempotency key in (AD-4): a key is unique
+# among unfinished Jobs only, so a `done` Job's key can be used again.
+ACTIVE_STATUSES = (JobStatus.QUEUED, JobStatus.RUNNING)
+_ACTIVE_WHERE = text("status IN (" + ", ".join(f"'{s.value}'" for s in ACTIVE_STATUSES) + ")")
+
+
+class Job(Base):
+    __tablename__ = "jobs"
+    __table_args__ = (
+        CheckConstraint(check_expr(JobStatus, "status"), name="ck_jobs_status"),
+        CheckConstraint(check_expr(JobQueue, "queue"), name="ck_jobs_queue"),
+        CheckConstraint(check_expr(JobErrorCode, "error_code"), name="ck_jobs_error_code"),
+        Index("uq_jobs_idempotency_key_active", "idempotency_key", unique=True, postgresql_where=_ACTIVE_WHERE),
+        Index("ix_jobs_campaign_status_created", "campaign_id", "status", "created_at"),
+        Index("ix_jobs_status_queue_created", "status", "queue", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    campaign_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("campaigns.id", ondelete="CASCADE"), nullable=False)
+    kind: Mapped[str] = mapped_column(String(64), nullable=False)
+    queue: Mapped[JobQueue] = mapped_column(String(16), nullable=False)
+    status: Mapped[JobStatus] = mapped_column(
+        String(16), nullable=False, default=JobStatus.QUEUED, server_default=JobStatus.QUEUED.value)
+    priority: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    payload: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
+    idempotency_key: Mapped[str] = mapped_column(Text, nullable=False)
+    # The starter's ctx, rebuilt against current membership when the Job runs (AD-13).
+    ctx_kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    ctx_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    ctx_audience: Mapped[str | None] = mapped_column(Text, nullable=True)
+    access_epoch: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=3, server_default="3")
+    progress: Mapped[float | None] = mapped_column(REAL, nullable=True)
+    stage: Mapped[str | None] = mapped_column(Text, nullable=True)
+    eta_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    error_code: Mapped[JobErrorCode | None] = mapped_column(String(32), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    result_ref: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    depends_on_job_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("jobs.id", ondelete="SET NULL"), nullable=True)
+    worker_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # The owner read rule (app/access/registry.py): a Player sees the Jobs they started.
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now())
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    next_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class DataBackfill(Base):
+    """One per-row backfill (AD-18), run as a cursor Job (E0-Jobs.5). Global:
+    no campaign_id; the name is the key."""
+
+    __tablename__ = "data_backfills"
+    __table_args__ = (
+        CheckConstraint(check_expr(JobStatus, "status"), name="ck_data_backfills_status"),
+    )
+
+    name: Mapped[str] = mapped_column(String(128), primary_key=True)
+    status: Mapped[JobStatus] = mapped_column(
+        String(16), nullable=False, default=JobStatus.QUEUED, server_default=JobStatus.QUEUED.value)
+    cursor: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    job_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("jobs.id", ondelete="SET NULL"), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())

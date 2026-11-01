@@ -11,7 +11,12 @@ F1-core (c95acb56c595) is the first revision after SNAPSHOT_REVISION: its
 checks below cover the members -> Player migration, the chat archive, the
 collaborate-token Role, party_tsv and the entry_hash uniqueness swap, and
 test_c95acb56c595_data_steps_are_idempotent re-applies its data steps. The
-a3e7c1f9d258 round trip downgrades through F1-core and upgrades again.
+a3e7c1f9d258 round trip downgrades through F2-jobs-files and F1-core and
+upgrades again.
+
+F2-jobs-files (cf62d979bc8a, E0-Jobs.1) only creates four empty tables; its
+check below pins their indexes, and test_cf62d979bc8a_downgrade_drops_its_tables
+proves its downgrade removes exactly those tables.
 
 pytest collects tests/migrations/ before tests/test_*.py, so the module
 fixture rebuilds the clean session schema in teardown.
@@ -50,6 +55,8 @@ def _load(name: str, path: Path):
 # The seed (ids, narratives) and the F1-core revision's DATA_STEPS.
 make_snapshot = _load("make_snapshot", BACKEND_DIR / "scripts" / "make_snapshot.py")
 F1_CORE = "c95acb56c595"
+F2_JOBS_FILES = "cf62d979bc8a"
+F2_TABLES = ("data_backfills", "derived_sources", "jobs", "stored_files")
 f1_core = _load(
     "f1_core_revision",
     BACKEND_DIR / "migrations" / "versions" / "c95acb56c595_f1_core_roles_visibility_party_search.py",
@@ -92,8 +99,13 @@ EXPECTED_FK_ON_DELETE = {
     "character_sheets.template_id": "CASCADE",
     "chat_sessions.campaign_id": "SET NULL",
     "chat_sessions.user_id": "CASCADE",
+    "data_backfills.job_id": "SET NULL",
     "feedback.campaign_id": "SET NULL",
     "feedback.user_id": "CASCADE",
+    "jobs.campaign_id": "CASCADE",
+    "jobs.created_by": "SET NULL",
+    "jobs.ctx_user_id": "SET NULL",
+    "jobs.depends_on_job_id": "SET NULL",
     "journal_entries.campaign_id": "CASCADE",
     "journal_entries.user_id": "CASCADE",
     "journal_tags.journal_id": "CASCADE",
@@ -115,6 +127,10 @@ EXPECTED_FK_ON_DELETE = {
     "source_chunks.user_id": "CASCADE",
     "source_documents.campaign_id": "CASCADE",
     "source_documents.user_id": "CASCADE",
+    # SET NULL here would widen the file's Audience (Owner(u) -> unnarrowed).
+    "stored_files.audience_owner_id": "CASCADE",
+    "stored_files.campaign_id": "CASCADE",
+    "stored_files.created_by": "SET NULL",
     "subscriptions.user_id": "CASCADE",
     "tag_categories.campaign_id": "CASCADE",
     "tag_categories.created_by_user_id": "CASCADE",
@@ -252,6 +268,40 @@ async def entry_hash_unique_per_campaign_and_author(conn: AsyncConnection) -> No
     assert uniques == {
         "uq_journal_entries_campaign_user_entry_hash": "UNIQUE (campaign_id, user_id, entry_hash)",
     }
+
+
+# F2-jobs-files (E0-Jobs.1): four new, empty tables.
+
+async def _f2_indexes(conn: AsyncConnection) -> dict[str, str]:
+    return dict((await conn.execute(sa.text(
+        "SELECT indexname, indexdef FROM pg_indexes "
+        "WHERE schemaname = current_schema() AND tablename = ANY(:t) AND indexname NOT LIKE '%_pkey'"
+    ), {"t": list(F2_TABLES)})).all())
+
+
+@post_upgrade_check(F2_JOBS_FILES)
+async def f2_tables_exist_empty_with_their_indexes(conn: AsyncConnection) -> None:
+    for table in F2_TABLES:
+        assert await conn.scalar(sa.text(f"SELECT count(*) FROM {table}")) == 0, table
+    defs = await _f2_indexes(conn)
+    assert set(defs) == {
+        "uq_jobs_idempotency_key_active", "ix_jobs_campaign_status_created", "ix_jobs_status_queue_created",
+        "uq_stored_files_cache_key_fresh", "ix_derived_sources_ref", "ix_derived_sources_derived",
+    }
+    active = defs["uq_jobs_idempotency_key_active"]
+    assert active.startswith("CREATE UNIQUE INDEX") and "(idempotency_key)" in active
+    assert "'queued'" in active and "'running'" in active and "'done'" not in active
+    fresh = defs["uq_stored_files_cache_key_fresh"]
+    assert fresh.startswith("CREATE UNIQUE INDEX") and "(campaign_id, kind, cache_key)" in fresh
+    assert "WHERE (NOT stale)" in fresh
+    assert "(campaign_id, status, created_at)" in defs["ix_jobs_campaign_status_created"]
+    assert "(status, queue, created_at)" in defs["ix_jobs_status_queue_created"]
+    assert "(ref_kind, ref_id)" in defs["ix_derived_sources_ref"]
+    assert "(derived_type, derived_id)" in defs["ix_derived_sources_derived"]
+    assert await conn.scalar(sa.text(
+        "SELECT column_default FROM information_schema.columns "
+        "WHERE table_schema = current_schema() AND table_name = 'jobs' AND column_name = 'max_attempts'"
+    )) == "3"
 
 
 # Every F1-core column, by table: (key columns, F1-core columns). The
@@ -511,6 +561,29 @@ def test_c95acb56c595_downgrade_restores_baseline(upgraded_snapshot):
     }
     assert asyncio.run(_with_conn(TEST_DB_URL, _f1_core_values))["campaign_members"] == [
         (SEED_ID("301"), "player", "0"), (SEED_ID("302"), "player", "0")]
+
+
+async def _public_tables(conn: AsyncConnection) -> set[str]:
+    return set((await conn.execute(sa.text(
+        "SELECT table_name FROM information_schema.tables "
+        "WHERE table_schema = 'public' AND table_type = 'BASE TABLE'"
+    ))).scalars())
+
+
+def test_cf62d979bc8a_downgrade_drops_its_tables(upgraded_snapshot):
+    # Dev only (NFR-8): downgrading to F1-core removes exactly the four tables.
+    cfg = alembic_config(TEST_DB_URL)
+    at_head = asyncio.run(_with_conn(TEST_DB_URL, _public_tables))
+    command.downgrade(cfg, F1_CORE)
+    try:
+        at_f1 = asyncio.run(_with_conn(TEST_DB_URL, _public_tables))
+        f1_version = asyncio.run(_state(TEST_DB_URL))[0]
+    finally:
+        command.upgrade(cfg, "head")
+    assert f1_version == F1_CORE
+    assert at_head - at_f1 == set(F2_TABLES)
+    assert at_f1 <= at_head
+    assert asyncio.run(_with_conn(TEST_DB_URL, _public_tables)) == at_head
 
 
 def test_a3e7c1f9d258_backfills_shorthand(upgraded_snapshot):
