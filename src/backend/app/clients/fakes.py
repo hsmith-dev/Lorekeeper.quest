@@ -8,14 +8,26 @@ from its sha256; OCR returns the bytes' UTF-8 text (so a test can "scan" a
 known string) or "" for real image bytes. The fake mirrors the sidecar's
 size and emptiness limits only (raising ModelServiceError with 422 / 413),
 not image decoding: it accepts non-image bytes the sidecar would reject.
+
+FakeLLM is the LLM stand-in behind llm_provider's "fake" provider (also
+used for every config under ENVIRONMENT=test, see llm_provider.fake_llm_active).
+It replies with the next scripted item if any (an exception instance is
+raised), else with fake_json(schema) for a structured call, else with
+"[fake-llm <sha256(messages)[:8]>] <first 12 words of the last user turn>".
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import re
 import struct
+from collections import deque
+from collections.abc import Iterable
+from typing import Any
+
+from pydantic import BaseModel
 
 from app.clients.errors import ModelServiceError
 from app.clients.ml import NLI_LABELS, MLStatus, ModelState, NamedEntity, NliScores
@@ -111,3 +123,134 @@ class FakeMLClient:
             resident_budget_mb=2000,
             lazy_resident_mb=0,
         )
+
+
+# ── LLM ─────────────────────────────────────────────────────────────────────
+
+_FAKE_STRING_FORMATS = {
+    "date-time": "1970-01-01T00:00:00Z",
+    "date": "1970-01-01",
+    "time": "00:00:00",
+    "uuid": "00000000-0000-0000-0000-000000000000",
+}
+
+
+def fake_json(json_schema: dict) -> Any:
+    """A minimal value for a flat JSON schema (app/schemas/llm inlines every
+    $ref, so this walks one tree): enums and consts take their first member,
+    strings are "fake" (padded or cut to minLength/maxLength), integers and
+    numbers 0 (or their lower bound, else clamped to their upper bound),
+    booleans false, lists max(1, minItems) elements ([] if maxItems is 0),
+    objects every property."""
+    node = json_schema if isinstance(json_schema, dict) else {}
+    if "const" in node:
+        return node["const"]
+    if node.get("enum"):
+        return node["enum"][0]
+    kind = node.get("type")
+    if isinstance(kind, list):
+        kind = next((k for k in kind if k != "null"), kind[0] if kind else None)
+    if kind is None:
+        if "properties" in node:
+            kind = "object"
+        elif "items" in node:
+            kind = "array"
+    if kind == "object":
+        return {name: fake_json(sub) for name, sub in (node.get("properties") or {}).items()}
+    if kind == "array":
+        items = node.get("items")
+        if node.get("maxItems") == 0:
+            return []
+        n = max(1, int(node.get("minItems") or 0))
+        return [fake_json(items if isinstance(items, dict) else {}) for _ in range(n)]
+    if kind in ("integer", "number"):
+        if "minimum" in node:
+            value = node["minimum"]
+        elif "exclusiveMinimum" in node:
+            value = node["exclusiveMinimum"] + 1
+        elif "maximum" in node and node["maximum"] < 0:
+            value = node["maximum"]
+        elif "exclusiveMaximum" in node and node["exclusiveMaximum"] <= 0:
+            value = node["exclusiveMaximum"] - 1
+        else:
+            value = 0
+        return math.ceil(value) if kind == "integer" else value
+    if kind == "boolean":
+        return False
+    if kind == "null":
+        return None
+    text = _FAKE_STRING_FORMATS.get(node.get("format"), "fake")
+    min_len = int(node.get("minLength") or 0)
+    if len(text) < min_len:
+        text += "x" * (min_len - len(text))
+    if "maxLength" in node:
+        text = text[: int(node["maxLength"])]
+    return text
+
+
+def _last_user_text(messages: list[dict]) -> str:
+    for m in reversed(messages):
+        if m.get("role") == "user":
+            content = m.get("content")
+            return content if isinstance(content, str) else json.dumps(content, default=str)
+    return ""
+
+
+def fake_llm_text(messages: list[dict]) -> str:
+    """The unscripted plain reply: the same messages always give the same text."""
+    digest = hashlib.sha256(json.dumps(messages, sort_keys=True, default=str).encode()).hexdigest()[:8]
+    first = " ".join(_last_user_text(messages).split()[:12])
+    return f"[fake-llm {digest}] {first}"
+
+
+def fake_chunks(text: str) -> list[str]:
+    """text in at least 2 pieces (one per word, with its trailing space)
+    that join to exactly text."""
+    pieces = re.findall(r"\s*\S+\s*", text)
+    if len(pieces) >= 2 and "".join(pieces) == text:
+        return pieces
+    mid = max(1, len(text) // 2)
+    return [text[:mid], text[mid:]]
+
+
+class FakeLLM:
+    """Deterministic LLM. `script([...])` queues replies taken one per call
+    (plain, stream or structured attempt). An exception instance or class
+    is raised; a str is returned as is, a dict/list as JSON, a pydantic
+    model as model_dump_json(), anything else as str(). One process-wide
+    queue: it assumes the test makes its calls one at a time."""
+
+    def __init__(self) -> None:
+        self._script: deque[Any] = deque()
+
+    def script(self, items: Iterable[Any]) -> "FakeLLM":
+        self._script.extend(items)
+        return self
+
+    def reset(self) -> None:
+        self._script.clear()
+
+    @property
+    def pending(self) -> int:
+        """Scripted replies not used yet."""
+        return len(self._script)
+
+    def reply(self, messages: list[dict], json_schema: dict | None = None) -> str:
+        if self._script:
+            item = self._script.popleft()
+            if isinstance(item, BaseException) or (isinstance(item, type) and issubclass(item, BaseException)):
+                raise item
+            if isinstance(item, str):
+                return item
+            if isinstance(item, BaseModel):
+                return item.model_dump_json()
+            if isinstance(item, (dict, list)):
+                return json.dumps(item)
+            return str(item)
+        if json_schema is not None:
+            return json.dumps(fake_json(json_schema))
+        return fake_llm_text(messages)
+
+    def chunks(self, messages: list[dict]) -> list[str]:
+        """reply(messages) split into at least 2 stream chunks."""
+        return fake_chunks(self.reply(messages))

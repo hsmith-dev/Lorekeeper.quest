@@ -22,18 +22,41 @@ two repair turns quoting the errors, then raises StructuredOutputError. Each
 attempt takes its own gate slot (same class), so a live_recap can run between
 repairs; each attempt logs one
 `structured_attempt` JSON line, and structured_stats counts outcomes per task.
+
+The fake provider (E0-LLM.5): provider="fake", and every config while
+fake_llm_active (ENVIRONMENT=test, no MockTransport on _transport, not an
+`ollama`-marked test), answers from the deterministic fake_llm
+(app/clients/fakes.FakeLLM) in place of the provider sender. What runs
+around the sender runs as in production: the gate, the model choice, and
+complete_structured's schema prompt, budget, validation, repairs, stats and
+logs (backend "fake"). The senders' own checks do not run: a BYOK config
+without its key is answered, not rejected. detect_backend answers
+BACKEND_OLLAMA without a probe while the fake is active. fake_llm's script
+is one process-wide queue, so a scripted test must make its calls serially.
+
+capture() records each call as it is handed to the sender (fake or real):
+the OpenAI-format messages (for complete_structured, each attempt's prompt
+with the schema and repair turns; ai_service's KoboldCpp-native attempt as
+one user turn holding its prompt), task, gate class, model, provider. The
+anthropic and gemini senders reshape those messages on the wire, and a call
+a sender then rejects (e.g. a missing key) is recorded although nothing was
+sent. Never a key or header. Off by default; with no capture active it
+costs one contextvar read.
 """
 
+import contextvars
+import copy
 import json
 import logging
 import re
 import time
-from collections.abc import AsyncIterator
-from contextlib import aclosing, asynccontextmanager
+from collections.abc import AsyncIterator, Iterator
+from contextlib import aclosing, asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
 import httpx
 from fastapi import HTTPException
 from pydantic import BaseModel, ValidationError
+from app.clients.fakes import FakeLLM
 from app.core import llm_gate
 from app.core.config import get_settings
 from app.core.errors import LLMConfigError, LLMUnavailable, PromptBudgetError, StructuredOutputError
@@ -43,6 +66,20 @@ from app.services.prompt_budget import TASK_POLICIES, estimate_messages, estimat
 
 # Tests swap in an httpx.MockTransport here; None = real network.
 _transport: httpx.AsyncBaseTransport | None = None
+
+# Set by tests/fixtures/fake_llm.py for `ollama`-marked tests: under
+# ENVIRONMENT=test they talk to a real model instead of the fake.
+_real_llm_in_test = False
+
+PROVIDER_FAKE = "fake"
+# The process-wide fake; tests script it through the `fake_llm` fixture. Its
+# script is one queue for the process: scripted calls must run serially.
+fake_llm = FakeLLM()
+
+# Default models of the BYOK branches (also what capture() reports).
+ANTHROPIC_DEFAULT_MODEL = "claude-haiku-4-5-20251001"
+# See _gemini for why the "-latest" alias.
+GEMINI_DEFAULT_MODEL = "gemini-flash-latest"
 
 # Options that change how Ollama loads the model. Any one of them differing
 # between calls forces a reload, so they are never sent per call.
@@ -74,7 +111,10 @@ async def detect_backend(api_url: str | None) -> str:
     process. A transport error, a timeout or a 5xx answer (e.g. a proxy's 502
     while Ollama is still starting) returns BACKEND_OPENAI_COMPAT without
     caching it, so an Ollama that was still starting is detected on a later
-    call. Never touches the gate and never raises."""
+    call. Never touches the gate and never raises. While the fake LLM is
+    active (see fake_llm_active) it answers BACKEND_OLLAMA without probing."""
+    if _fake_in_env():
+        return BACKEND_OLLAMA
     base = (api_url or get_settings().kobold_url).rstrip("/")
     cached = _backend_cache.get(base)
     if cached is not None:
@@ -102,7 +142,7 @@ async def detect_backend(api_url: str | None) -> str:
 
 @dataclass
 class LLMConfig:
-    provider: str = "kobold"   # "kobold" | "openai" | "anthropic" | "gemini" | "custom"
+    provider: str = "kobold"   # "kobold" | "openai" | "anthropic" | "gemini" | "custom" | "fake"
     api_url: str | None = None  # base URL for kobold / custom / openai-compat
     api_key: str | None = None
     model: str | None = None
@@ -160,6 +200,100 @@ def model_for(task: str | None, cfg: LLMConfig) -> str | None:
     return cfg.model
 
 
+def _fake_in_env() -> bool:
+    return get_settings().environment == "test" and _transport is None and not _real_llm_in_test
+
+
+def fake_llm_active(cfg: LLMConfig) -> bool:
+    """True if calls with cfg are answered by fake_llm instead of the
+    network: provider "fake" in any environment, or any config under
+    ENVIRONMENT=test unless a test installed _transport (it drives the real
+    senders against a MockTransport) or is `ollama`-marked (_real_llm_in_test)."""
+    return cfg.provider == PROVIDER_FAKE or _fake_in_env()
+
+
+# ---------------------------------------------------------------------------
+# Context capture (E0-LLM.5, for EV-4's captured-context probes)
+
+
+@dataclass
+class CapturedCall:
+    """One request as sent. A plain dataclass (not slots): the EV-4 harness
+    JSON-dumps it through __dict__."""
+
+    messages: list[dict]
+    task: str | None
+    gate_class: str | None  # the resolved class for platform-LLM calls, else None
+    model: str | None       # what the request names
+    provider: str
+    fake: bool
+    schema: str | None = None  # the complete_structured schema's class name
+
+
+@dataclass
+class LLMCapture:
+    calls: list[CapturedCall] = field(default_factory=list)
+
+
+_captures: contextvars.ContextVar[tuple[LLMCapture, ...]] = contextvars.ContextVar(
+    "llm_captures", default=()
+)
+
+
+@contextmanager
+def capture() -> Iterator[LLMCapture]:
+    """Record every LLM call made in this context (and tasks started from it)
+    while the block runs, as handed to the sender: OpenAI-format messages,
+    before anthropic/gemini reshape them, and before a sender's own checks
+    (a call rejected for a missing key is still recorded). Captures nest:
+    each active one gets every call."""
+    cap = LLMCapture()
+    token = _captures.set((*_captures.get(), cap))
+    try:
+        yield cap
+    finally:
+        _captures.reset(token)
+
+
+def _call_model(cfg: LLMConfig, task: str | None) -> str | None:
+    """The model the request for cfg names (the same choice as each sender)."""
+    if cfg.provider == "anthropic":
+        return cfg.model or ANTHROPIC_DEFAULT_MODEL
+    if cfg.provider == "gemini":
+        return cfg.model or GEMINI_DEFAULT_MODEL
+    if cfg.provider == PROVIDER_FAKE:
+        return cfg.model
+    return _openai_compat_target(cfg, task)[1]
+
+
+def _record(
+    messages: list[dict],
+    cfg: LLMConfig,
+    *,
+    task: str | None,
+    gate_class: GateClass | str | None,
+    fake: bool,
+    schema: type[BaseModel] | None = None,
+) -> None:
+    caps = _captures.get()
+    if not caps:
+        return
+    cls = None
+    if uses_platform_llm(cfg):
+        cls = GateClass(gate_class) if gate_class is not None else llm_gate.current_class.get()
+    call = CapturedCall(
+        messages=copy.deepcopy(messages),
+        task=task,
+        gate_class=cls.value if cls is not None else None,
+        model=_call_model(cfg, task),
+        provider=cfg.provider,
+        fake=fake,
+        schema=schema.__name__ if schema is not None else None,
+    )
+    for cap in caps:
+        cap.calls.append(call)
+
+
 def strip_local_options(options: dict | None) -> dict:
     """Copy of options without num_ctx/num_gpu/keep_alive (LOCAL_ONLY_OPTIONS)."""
     return {k: v for k, v in (options or {}).items() if k not in LOCAL_ONLY_OPTIONS}
@@ -211,6 +345,10 @@ async def complete_messages(
     opts = strip_local_options(options)
 
     async with gated(cfg, gate_class):
+        fake = fake_llm_active(cfg)
+        _record(messages, cfg, task=task, gate_class=gate_class, fake=fake)
+        if fake:
+            return fake_llm.reply(messages)
         if cfg.provider == "anthropic":
             return await _anthropic(messages, cfg, mt, temp, timeout)
         if cfg.provider == "gemini":
@@ -234,6 +372,7 @@ MODE_OPENAI_SCHEMA = "openai_compat"             # strict response_format json_s
 MODE_OPENAI_PROMPTED = "openai_compat_prompted"  # schema in the prompt only
 MODE_ANTHROPIC = "anthropic"
 MODE_GEMINI = "gemini"
+MODE_FAKE = "fake"                               # fake_llm (fake_llm_active)
 
 # Per-task outcome counters of complete_structured, for the process:
 # {task: {"first_try_valid": n, "valid_after_repair": n, "failed": n}}.
@@ -451,6 +590,8 @@ async def _send_openai_schema(st: _Structured, messages: list[dict]) -> str:
 async def _send_structured(st: _Structured, messages: list[dict]) -> str:
     """One attempt's reply text. A strict response_format refused with a 4xx
     is retried once as prompted JSON, and st.mode stays prompted after."""
+    if st.mode == MODE_FAKE:
+        return fake_llm.reply(messages, st.json_schema)
     if st.mode == MODE_OLLAMA:
         return await _send_ollama(st, messages)
     if st.mode == MODE_OPENAI_SCHEMA:
@@ -539,7 +680,9 @@ async def complete_structured(
                 f"Structured prompt for {task!r} needs ~{needed} tokens but the window is {window}."
             )
 
-    st = _Structured(cfg, task, json_schema, await _structured_mode(cfg), mt, timeout)
+    # The fake replaces only the send: no backend probe, same everything else.
+    mode = MODE_FAKE if fake_llm_active(cfg) else await _structured_mode(cfg)
+    st = _Structured(cfg, task, json_schema, mode, mt, timeout)
     # One class for every attempt of this call, even if current_class changes
     # between them (e.g. a Job wrapper resetting it).
     cls = GateClass(gate_class) if gate_class is not None else llm_gate.current_class.get()
@@ -549,6 +692,7 @@ async def complete_structured(
         # A slot per attempt (story E0-LLM.4, E0-LLM.2): released before
         # validation, so a waiting live_recap is served between repairs.
         async with gated(cfg, cls):
+            _record(prompt, cfg, task=task, gate_class=cls, fake=st.mode == MODE_FAKE, schema=schema)
             started = time.monotonic()
             raw = await _send_structured(st, prompt)
             ms = round((time.monotonic() - started) * 1000)
@@ -630,6 +774,17 @@ async def stream_messages(
     stream ends or the generator is closed (client disconnect). SSE routes
     should reserve_slot() first so a busy gate is a 503, not a broken stream."""
     cfg = config or get_default_config()
+    if fake_llm_active(cfg):
+        # Same gate handling as the real stream below; the reply is taken
+        # (and a scripted error raised) before the first chunk.
+        slot = await reserve_slot(cfg, gate_class)
+        try:
+            _record(messages, cfg, task=task, gate_class=gate_class, fake=True)
+            for chunk in fake_llm.chunks(messages):
+                yield chunk
+        finally:
+            await slot.release()
+        return
     if cfg.provider not in ("kobold", "openai", "custom"):
         yield await complete_messages(
             messages, cfg, max_tokens, temperature, timeout,
@@ -642,6 +797,7 @@ async def stream_messages(
     # no-op Slot when the caller already holds one.
     slot = await reserve_slot(cfg, gate_class)
     try:
+        _record(messages, cfg, task=task, gate_class=gate_class, fake=False)
         # aclosing: on an early close the upstream HTTP stream is shut before
         # the slot is released, not whenever the inner generator is collected.
         async with aclosing(_stream_openai_compat(
@@ -759,7 +915,7 @@ async def _anthropic(
     if not cfg.api_key:
         raise HTTPException(status_code=400, detail="Anthropic API key is required.")
 
-    model = cfg.model or "claude-haiku-4-5-20251001"
+    model = cfg.model or ANTHROPIC_DEFAULT_MODEL
 
     system_parts: list[str] = []
     conv_messages: list[dict] = []
@@ -817,7 +973,7 @@ async def _gemini(
     # current quickstart (AI Studio's "Get API key" panel) points at the
     # "-latest" alias instead of a pinned version, so use that as the
     # default; keep this in sync with SettingsPage.tsx's PROVIDER_MODELS.
-    model = cfg.model or "gemini-flash-latest"
+    model = cfg.model or GEMINI_DEFAULT_MODEL
 
     system_text: str | None = None
     contents: list[dict] = []

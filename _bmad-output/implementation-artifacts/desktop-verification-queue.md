@@ -80,3 +80,7 @@ Stories were merged on green GitHub CI while the desktop was offline (owner deci
 - [x] ~~Upgrade/downgrade/upgrade on snapshot + adversarial data~~ — done by an independent data-safety review on a local Postgres16+pgvector: no row loss, chat archive only sets `archived_at`, forced mid-revision failure rolls back fully
 - [ ] `pytest tests/migrations tests/test_enum_check_sync.py tests/test_share.py tests/ev4` on a lane DB
 - [ ] On a COPY of a real production DB: `alembic upgrade head`, then `SELECT role, count(*) FROM campaign_members GROUP BY role` → only `player`
+
+## E0-LLM.5 — Deterministic fake LLM + EV-4 capture hook (PR #41)
+- [ ] `python -m pytest -m ollama -s tests/integration/test_llm_structured_ollama.py` in `lorekeeper-backend-test` with `OLLAMA_TEST_URL=http://100.119.62.5:11434` reaches the real Ollama (fake + socket guard both off for that marker)
+- [ ] Known: a user can save provider `"fake"` in production and get canned replies (affects only that user; eval scripts rely on it)

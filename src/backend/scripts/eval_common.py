@@ -14,7 +14,8 @@ offline:
                  docs/EVAL_TEMPLATE.md
   build_parser   the shared CLI flags
   make_llm       the LLM handle: Ollama (OpenAI-compatible, ungated) at a
-                 configurable URL, or a deterministic fake
+                 configurable URL, or a deterministic fake (llm_provider's
+                 provider="fake", the same fake the test suite uses)
   open_session   an AsyncSession on --database-url
 
 Running this module directly is a smoke run: seed, one LLM question per
@@ -303,8 +304,9 @@ def write_report(
 # ── LLM handle ──────────────────────────────────────────────────────────────
 
 class FakeLLM:
-    """Deterministic, offline. No app/clients/fakes.py LLM fake exists yet
-    (E0-LLM.5); when it does, this can delegate to it."""
+    """Deterministic, offline: llm_provider.complete_messages with
+    provider="fake" (app/clients/fakes.FakeLLM), so an eval run with
+    --fake-llm gets the same replies as the test suite's fake, ungated."""
 
     name = "fake"
 
@@ -312,11 +314,10 @@ class FakeLLM:
         self.calls: list[list[dict]] = []
 
     async def complete(self, messages: list[dict], **_: object) -> str:
+        from app.services.llm_provider import PROVIDER_FAKE, LLMConfig, complete_messages
+
         self.calls.append(messages)
-        last = next((m["content"] for m in reversed(messages) if m.get("role") == "user"), "")
-        digest = hashlib.sha256(last.encode()).hexdigest()[:8]
-        first = " ".join(last.split()[:12])
-        return f"[fake-llm {digest}] {first}"
+        return await complete_messages(messages, LLMConfig(provider=PROVIDER_FAKE))
 
 
 class OllamaLLM:

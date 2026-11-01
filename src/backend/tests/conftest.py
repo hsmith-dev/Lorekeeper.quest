@@ -21,6 +21,7 @@ from app.main import app  # noqa: E402
 from app.core.config import get_settings  # noqa: E402
 from app.core.limiter import limiter  # noqa: E402
 from app.db.session import get_db  # noqa: E402
+from tests.fixtures.fake_llm import fake_llm, no_kobold_socket  # noqa: E402,F401  (E0-LLM.5)
 
 DEFAULT_TEST_DB_URL = "postgresql+asyncpg://lorekeeper:changeme@localhost:5432/lorekeeper_test"
 

@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 10-31-2026 23:30
-last_updated: 11-01-2026 07:48
+last_updated: 11-01-2026 08:21
 project: Lorekeeper.quest
 project_key: NOKEY
 tracking_system: file-system
@@ -129,7 +129,7 @@ development_status:
   6-2-one-priority-gate-for-the-local-llm-and-one-fixed-local-mode: done
   6-3-backend-detection-and-prompt-budgets: done
   6-4-complete_structured-with-schema-enforcement-and-at-most-two: done
-  6-5-deterministic-fake-llm-provider-and-the-ev-4-context-capture: backlog
+  6-5-deterministic-fake-llm-provider-and-the-ev-4-context-capture: done
   6-6-act-on-spike-6-calibrate-prompt-budgets-decide-the-extractio: backlog
   epic-6-retrospective: optional
 

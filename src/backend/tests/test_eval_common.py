@@ -153,6 +153,14 @@ async def test_fake_llm_is_deterministic():
     assert len(a.calls) == 3
 
 
+async def test_fake_llm_is_the_provider_fake(fake_llm):
+    msgs = [{"role": "system", "content": "s"}, {"role": "user", "content": "What happened at the mill?"}]
+    assert FakeLLM().name == "fake"
+    assert await FakeLLM().complete(msgs) == fake_llm.reply(msgs)
+    fake_llm.script(["scripted"])
+    assert await FakeLLM().complete(msgs) == "scripted"
+
+
 def test_llm_url_and_model_precedence():
     s = get_settings()
     llm = make_llm(_args(), environ={})
