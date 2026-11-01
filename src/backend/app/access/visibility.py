@@ -56,10 +56,8 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 import sqlalchemy as sa
 from fastapi import Request, status
 from fastapi.responses import JSONResponse
-from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import Session, SessionTransaction, selectinload
-from sqlalchemy.util.concurrency import await_only, in_greenlet
+from sqlalchemy.orm import Session, selectinload
 
 from app.access import cache
 from app.access.audience import ALWAYS_GM_FIELDS
@@ -67,6 +65,7 @@ from app.access.context import CampaignContext
 from app.access.policy import GM, not_found
 from app.access.projection import project_all
 from app.access.registry import AlwaysGM, Stored, registration, scope_column, scoped_select
+from app.core.after_commit import defer, register_channel
 from app.db.models.character_sheet import CharacterSheet
 from app.db.models.journal import JournalEntry
 from app.db.models.npc import NpcEntry
@@ -84,7 +83,7 @@ logger = logging.getLogger(__name__)
 
 VISIBILITY_FLOOR = "visibility_floor"
 FIELD_PREFIX = "field_visibility."
-PENDING_KEY = "lorekeeper.access.visibility_changed"
+CHANNEL = "visibility_changed"  # the app/core/after_commit.py channel
 
 
 # ── Errors ─────────────────────────────────────────────────────────────────
@@ -341,20 +340,12 @@ class _Pending:
     campaign_id: uuid.UUID
     ref: RecordRef
     ctx: CampaignContext
-    transaction: SessionTransaction | None
 
 
 def _record_pending(session: Session, ctx: CampaignContext, ref: RecordRef) -> None:
-    txn = session.get_nested_transaction() or session.get_transaction()
-    session.info.setdefault(PENDING_KEY, []).append(_Pending(ctx.campaign_id, ref, ctx, txn))
-
-
-def _within(txn: SessionTransaction | None, ancestor: SessionTransaction) -> bool:
-    while txn is not None:
-        if txn is ancestor:
-            return True
-        txn = txn.parent
-    return False
+    # Tagged with the innermost transaction (app/core/after_commit.py): a
+    # rolled-back savepoint drops the changes made in it.
+    defer(session, CHANNEL, _Pending(ctx.campaign_id, ref, ctx))
 
 
 def _by_campaign(pending: Sequence[_Pending]) -> list[tuple[uuid.UUID, list[RecordRef], CampaignContext]]:
@@ -390,39 +381,12 @@ async def dispatch(pending: Sequence[_Pending]) -> None:
             logger.exception("visibility cache invalidation failed")
 
 
-@event.listens_for(Session, "after_soft_rollback")
-def _drop_rolled_back(session: Session, previous_transaction: SessionTransaction) -> None:
-    if previous_transaction.parent is None:
-        session.info.pop(PENDING_KEY, None)
-        return
-    pending = session.info.get(PENDING_KEY)
-    if pending:
-        session.info[PENDING_KEY] = [p for p in pending if not _within(p.transaction, previous_transaction)]
+async def _on_commit(session: Session, pending: list[_Pending]) -> None:
+    # Looked up at call time: tests replace `dispatch`'s collaborators.
+    await dispatch(pending)
 
 
-@event.listens_for(Session, "after_transaction_end")
-def _clear_on_end(session: Session, transaction: SessionTransaction) -> None:
-    # after_commit has already taken what it dispatches; a root transaction
-    # that ends any other way (close() without commit) must leave nothing.
-    if transaction.parent is None:
-        session.info.pop(PENDING_KEY, None)
-
-
-@event.listens_for(Session, "after_commit")
-def _after_commit(session: Session) -> None:
-    if session.in_nested_transaction():
-        return  # a savepoint release: not durable yet
-    pending = session.info.pop(PENDING_KEY, None)
-    if not pending:
-        return
-    if not in_greenlet():
-        logger.warning("visibility changes committed outside an AsyncSession: listeners and cache invalidation "
-                       "were skipped")
-        return
-    try:
-        await_only(dispatch(pending))
-    except Exception:
-        logger.exception("visibility dispatch after commit failed")
+register_channel(CHANNEL, _on_commit)
 
 
 # ── Built-in kinds ─────────────────────────────────────────────────────────

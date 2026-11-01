@@ -2,9 +2,9 @@
 # table). Run from src/backend:  lint-imports
 # CI: .github/workflows/gates.yml (static job, "AD-1 import contracts").
 #
-# app.access joined these contracts in E0-Access.2 and app.jobs in E0-Jobs.1.
-# Packages the spine adds later (hooks) join them in the PR that creates
-# them: a contract cannot name a package that does not exist yet.
+# app.access joined these contracts in E0-Access.2, app.jobs in E0-Jobs.1 and
+# app.hooks in E0-Journal.1. A package the spine adds later joins them in the
+# PR that creates it: a contract cannot name a package that does not exist yet.
 #
 # Exceptions go in a contract's ignore_imports, each under a "# ratchet:" line
 # saying why it is there and which story removes it. The list only shrinks:
@@ -15,17 +15,21 @@
 root_package = app
 include_external_packages = True
 
-# Transport > jobs > services > access > schemas > persistence > cross-cutting
-# > pure domain. app.jobs (AD-2) imports services, access, schemas, db, core
-# and domain; routes import it. app.access (AD-13) imports schemas, db, core
-# and domain only.
+# Transport > hook handlers > jobs > services > access > schemas > persistence
+# > cross-cutting > pure domain. app.hooks (AD-17, the handlers in
+# app/hooks/<feature>.py) imports jobs (enqueue), services, access, schemas,
+# core and domain; the dispatcher itself is app.core.hooks, which loads
+# app.hooks at run time (importlib), never by import. app.jobs (AD-2) imports
+# services, access, schemas, db, core and domain; routes import it. app.access
+# (AD-13) imports schemas, db, core and domain only.
 # A higher layer may import a lower one, never the reverse (direct or
 # indirect). app.clients sits beside services/db and has its own contract.
 [importlinter:contract:layers]
-name = AD-1 layers: api > jobs > services > access > schemas > db > core > domain
+name = AD-1 layers: api > hooks > jobs > services > access > schemas > db > core > domain
 type = layers
 layers =
     app.api
+    app.hooks
     app.jobs
     app.services
     app.access
@@ -42,6 +46,7 @@ source_modules =
     app.domain
 forbidden_modules =
     app.api
+    app.hooks
     app.jobs
     app.services
     app.access
@@ -59,6 +64,7 @@ source_modules =
     app.clients
 forbidden_modules =
     app.api
+    app.hooks
     app.jobs
     app.services
     app.access
@@ -89,6 +95,7 @@ name = AD-1 no model packages imported in the web/worker process
 type = forbidden
 source_modules =
     app.api
+    app.hooks
     app.jobs
     app.clients
     app.services

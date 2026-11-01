@@ -37,6 +37,9 @@ run (app/jobs/outbox.py). For one `queued` row it:
    `next_run_at` has passed. Every outcome is written only while this
    attempt still owns the row (`running`, same `worker_id`, locked), so an
    attempt the reaper already took back cannot write a second outcome.
+   Every `done` or `failed` written (here or by the reaper) emits the
+   `job_finished` hook (app/core/hooks.py) with `refs={job_id, kind,
+   status}`; a requeue emits nothing.
 
 The stored message is always readable fixed text or an LLMError's `detail`,
 never an exception's own text. Logs carry job_id, kind and campaign_id (also
@@ -94,7 +97,7 @@ from sqlalchemy.pool import NullPool
 from app.access.context import CampaignContext, ctx_for
 from app.access.policy import ANON, GM, PLAYER, NotFound
 from app.clients.errors import ModelServiceUnavailable
-from app.core import llm_gate
+from app.core import hooks, llm_gate
 from app.core.config import get_settings
 from app.core.errors import LLMConfigError, LLMError, StructuredOutputError
 from app.core.logging import job_log_context
@@ -213,8 +216,16 @@ async def _finish(db: AsyncSession, job_id: uuid.UUID, status: JobStatus, worker
     job.error_message = message
     if status == JobStatus.DONE:
         job.progress = 1.0
+    _emit_finished(db, job)
     await db.commit()
     return status
+
+
+def _emit_finished(db: AsyncSession, job: Job) -> None:
+    """`job_finished` (E0-Journal.1), dispatched once the terminal status
+    commits. A requeue for a retry is not finished and emits nothing."""
+    hooks.emit(db, hooks.HookEvent.JOB_FINISHED, campaign_id=job.campaign_id,
+               refs={"job_id": job.id, "kind": job.kind, "status": JobStatus(job.status)}, actor_ctx=None)
 
 
 async def _record_failure(db: AsyncSession, job_id: uuid.UUID, code: JobErrorCode, message: str,
@@ -691,6 +702,7 @@ async def _recover_running(db: AsyncSession, live: dict[str, str | None], now: d
             job.status = JobStatus.FAILED
             job.next_run_at = None
             job.finished_at = now
+            _emit_finished(db, job)
             result.failed.append(job.id)
             logger.warning("job interrupted on its last attempt; failed", extra=extra)
     # An ORM commit: a `failed` row releases its dependents (app/jobs/outbox.py).
@@ -843,6 +855,7 @@ class Reaper:
                 logger.exception("files.gc scheduling failed")
             return result
         finally:
+            await hooks.drain()  # job_finished handlers, before this loop and engine go
             await engine.dispose()
 
 
@@ -868,6 +881,7 @@ async def _perform(job_id: str) -> JobStatus | None:
     try:
         return await run_job(job_id, async_sessionmaker(engine, expire_on_commit=False), _worker_id())
     finally:
+        await hooks.drain()  # job_finished handlers, before this loop and engine go
         set_valkey(previous)
         await valkey.aclose()
         await engine.dispose()
@@ -886,6 +900,7 @@ class LorekeeperWorker(Worker):
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         load_kind_modules()
+        hooks.load_handlers()
         super().__init__(*args, **kwargs)
         global _WORKER_ID
         _WORKER_ID = self.name
