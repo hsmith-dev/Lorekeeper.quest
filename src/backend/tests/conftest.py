@@ -2,18 +2,25 @@ import asyncio
 import os
 import re
 from collections.abc import Mapping
+from pathlib import Path
 
-import pytest
-import pytest_asyncio
-import sqlalchemy as sa
-from httpx import AsyncClient, ASGITransport
-from sqlalchemy.engine import make_url
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
+# Must be set before app.main (and so app.core.config) is imported.
+os.environ["ENVIRONMENT"] = "test"
+os.environ["JOBS_EAGER"] = "1"
 
-from app.main import app
-from app.core.limiter import limiter
-from app.db.base import Base
-from app.db.session import get_db
+import pytest  # noqa: E402
+import pytest_asyncio  # noqa: E402
+import sqlalchemy as sa  # noqa: E402
+from alembic import command  # noqa: E402
+from alembic.config import Config  # noqa: E402
+from httpx import AsyncClient, ASGITransport  # noqa: E402
+from sqlalchemy.engine import make_url  # noqa: E402
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker  # noqa: E402
+
+from app.main import app  # noqa: E402
+from app.core.config import get_settings  # noqa: E402
+from app.core.limiter import limiter  # noqa: E402
+from app.db.session import get_db  # noqa: E402
 
 DEFAULT_TEST_DB_URL = "postgresql+asyncpg://lorekeeper:changeme@localhost:5432/lorekeeper_test"
 
@@ -58,28 +65,75 @@ def _guard_test_database(url: str) -> None:
         )
 
 
+ALEMBIC_INI = Path(__file__).resolve().parents[1] / "alembic.ini"
+
+
+def alembic_config(url: str) -> Config:
+    """An Alembic Config that migrates `url`, whatever DATABASE_URL or .env say.
+
+    The ini is found by absolute path, so this works from any cwd. ConfigParser
+    treats `%` as interpolation, so the URL (a password may contain one) is
+    escaped. migrations/env.py honours both attributes.
+    """
+    cfg = Config(str(ALEMBIC_INI))
+    cfg.set_main_option("sqlalchemy.url", url.replace("%", "%%"))
+    cfg.attributes["sqlalchemy_url_locked"] = True
+    cfg.attributes["configure_logger"] = False  # keep pytest's loggers
+    return cfg
+
+
+async def _reset_public_schema(url: str, *, with_vector: bool) -> None:
+    engine = create_async_engine(url)
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(sa.text("DROP SCHEMA IF EXISTS public CASCADE"))
+            await conn.execute(sa.text("CREATE SCHEMA public"))
+            if with_vector:
+                # DROP SCHEMA took the extension with it.
+                await conn.execute(sa.text("CREATE EXTENSION IF NOT EXISTS vector"))
+    finally:
+        await engine.dispose()
+
+
+async def _reset_app_config(url: str) -> None:
+    # The migration seeds open_access_mode=true. The suite was written against
+    # the gated row get_app_config() used to create from settings when the
+    # schema came from the models instead of the migrations.
+    engine = create_async_engine(url)
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(
+                sa.text("UPDATE app_config SET open_access_mode = :v"),
+                {"v": get_settings().open_access_mode},
+            )
+    finally:
+        await engine.dispose()
+
+
+def build_test_schema(url: str) -> None:
+    """Wipe `url`'s public schema and migrate it to head.
+
+    Sync, so call it outside a running event loop. The caller must already
+    have run _guard_test_database(url).
+    """
+    # Reset first: an older lane DB may hold model-built tables with no
+    # alembic_version, and a bare upgrade would fail on "already exists".
+    asyncio.run(_reset_public_schema(url, with_vector=True))
+    command.upgrade(alembic_config(url), "head")
+    asyncio.run(_reset_app_config(url))
+
+
+def drop_test_schema(url: str) -> None:
+    asyncio.run(_reset_public_schema(url, with_vector=False))
+
+
 @pytest.fixture(scope="session", autouse=True)
 def setup_test_db():
-    """Drop and recreate all tables once per session using an isolated event loop."""
+    """Build the schema from the Alembic migrations once per session."""
     _guard_test_database(TEST_DB_URL)
-
-    async def _create():
-        engine = create_async_engine(TEST_DB_URL)
-        async with engine.begin() as conn:
-            await conn.execute(sa.text("CREATE EXTENSION IF NOT EXISTS vector"))
-            await conn.run_sync(Base.metadata.drop_all)
-            await conn.run_sync(Base.metadata.create_all)
-        await engine.dispose()
-
-    async def _drop():
-        engine = create_async_engine(TEST_DB_URL)
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.drop_all)
-        await engine.dispose()
-
-    asyncio.run(_create())
+    build_test_schema(TEST_DB_URL)
     yield
-    asyncio.run(_drop())
+    drop_test_schema(TEST_DB_URL)
 
 
 @pytest_asyncio.fixture
