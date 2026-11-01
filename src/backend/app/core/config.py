@@ -55,6 +55,11 @@ class Settings(BaseSettings):
     # Deprecated alias for VALKEY_URL, read only by _resolve_valkey_url.
     redis_url: str | None = None
 
+    # JOBS_EAGER=1 (tests): a committed Job runs in-process inside commit(),
+    # through the same wrapper the worker uses, instead of being pushed to RQ
+    # (app/jobs/outbox.py). Never set it in a deployment.
+    jobs_eager: bool = False
+
     # JWT
     secret_key: str
     access_token_expire_minutes: int = 1440

@@ -73,6 +73,11 @@ class Job(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     next_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    # Not mapped: the status the dependency (depends_on_job_id) finished with,
+    # set by the worker wrapper (app/jobs/worker.py) before the handler runs.
+    # None for a Job without a dependency.
+    dependency_status = None
+
 
 class DataBackfill(Base):
     """One per-row backfill (AD-18), run as a cursor Job (E0-Jobs.5). Global:

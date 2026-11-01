@@ -619,6 +619,7 @@ entries:
   - {name: "colorlog", kind: python, version: "6.12.0", license: "MIT", source_url: "https://pypi.org/project/colorlog/", editions: [agpl, commercial], images: [ml], notes: "Via rapidocr (E0-QA.9)."}
   - {name: "confection", kind: python, version: "0.1.5", license: "MIT", source_url: "https://pypi.org/project/confection/", editions: [agpl, commercial], images: [backend], notes: ""}
   - {name: "confection", kind: python, version: "1.3.4", license: "MIT", source_url: "https://pypi.org/project/confection/", editions: [agpl, commercial], images: [ml], notes: "ml sidecar (src/services/ml) lock; spaCy 3.8 stack, see E0-Platform.3."}
+  - {name: "croniter", kind: python, version: "6.2.4", license: "MIT", source_url: "https://pypi.org/project/croniter/", editions: [agpl, commercial], images: [backend], notes: "Via rq (E0-Jobs.2)."}
   - {name: "cryptography", kind: python, version: "50.0.2", license: "Apache-2.0 OR BSD-3-Clause", source_url: "https://pypi.org/project/cryptography/", editions: [agpl, commercial], images: [backend], notes: ""}
   - {name: "cssselect2", kind: python, version: "0.10.1", license: "BSD-3-Clause", source_url: "https://pypi.org/project/cssselect2/", editions: [agpl, commercial], images: [backend], notes: "WeasyPrint dependency (campaign PDF export, E0-QA.9)."}
   - {name: "cymem", kind: python, version: "2.0.16", license: "MIT", source_url: "https://pypi.org/project/cymem/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
@@ -684,6 +685,7 @@ entries:
   - {name: "Pygments", kind: python, version: "2.21.0", license: "BSD-2-Clause", source_url: "https://pypi.org/project/Pygments/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
   - {name: "pypdf", kind: python, version: "6.14.2", license: "BSD-3-Clause", source_url: "https://pypi.org/project/pypdf/", editions: [agpl, commercial], images: [backend], notes: ""}
   - {name: "pyphen", kind: python, version: "0.18.1", license: "GPL-2.0-or-later OR LGPL-2.1-or-later OR MPL-1.1", scanned_license: "GNU General Public License v2 or later (GPLv2+); GNU Lesser General Public License v2 or later (LGPLv2+); Mozilla Public License 1.1 (MPL 1.1)", source_url: "https://pypi.org/project/pyphen/", editions: [agpl, commercial], images: [backend], notes: "WeasyPrint dependency (hyphenation, E0-QA.9). Tri-licensed; used under MPL-1.1, unmodified. Its bundled hyphenation dictionaries carry their own licences; the export CSS does not enable hyphens: auto."}
+  - {name: "python-dateutil", kind: python, version: "4.0.0", license: "BSD-3-Clause", source_url: "https://pypi.org/project/python-dateutil/", editions: [agpl, commercial], images: [backend], notes: "Via croniter, via rq (E0-Jobs.2)."}
   - {name: "python-dotenv", kind: python, version: "1.2.4", license: "BSD-3-Clause", source_url: "https://pypi.org/project/python-dotenv/", editions: [agpl, commercial], images: [backend], notes: ""}
   - {name: "python-jose", kind: python, version: "3.3.0", license: "MIT", source_url: "https://pypi.org/project/python-jose/", editions: [agpl, commercial], images: [backend], notes: ""}
   - {name: "python-multipart", kind: python, version: "0.0.12", license: "Apache-2.0", source_url: "https://pypi.org/project/python-multipart/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
@@ -693,6 +695,7 @@ entries:
   - {name: "regex", kind: python, version: "2026.9.29", license: "Apache-2.0 AND CNRI-Python", source_url: "https://pypi.org/project/regex/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
   - {name: "requests", kind: python, version: "2.34.2", license: "Apache-2.0", source_url: "https://pypi.org/project/requests/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
   - {name: "rich", kind: python, version: "15.0.0", license: "MIT", source_url: "https://pypi.org/project/rich/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
+  - {name: "rq", kind: python, version: "2.12.0", license: "BSD-2-Clause", source_url: "https://pypi.org/project/rq/", editions: [agpl, commercial], images: [backend], notes: "Job transport on Valkey (E0-Jobs.2, AD-2)."}
   - {name: "rsa", kind: python, version: "4.9.1", license: "Apache-2.0", source_url: "https://pypi.org/project/rsa/", editions: [agpl, commercial], images: [backend], notes: ""}
   - {name: "safetensors", kind: python, version: "0.8.0", license: "Apache-2.0", source_url: "https://pypi.org/project/safetensors/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
   - {name: "scikit-learn", kind: python, version: "1.9.1", license: "BSD-3-Clause", source_url: "https://pypi.org/project/scikit-learn/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
