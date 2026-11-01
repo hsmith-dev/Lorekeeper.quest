@@ -11,7 +11,9 @@ from alembic import context
 
 config = context.config
 
-if config.config_file_name is not None:
+# Programmatic callers (the test suite) pass configure_logger=False so that
+# alembic.ini's logging config does not replace their own loggers.
+if config.config_file_name is not None and config.attributes.get("configure_logger", True):
     fileConfig(config.config_file_name)
 
 # Load .env from project root so DATABASE_URL is available even when alembic
@@ -32,12 +34,15 @@ if _env_file is not None and _env_file.exists():
             _k, _, _v = _line.partition("=")
             os.environ.setdefault(_k.strip(), _v.strip())
 
+# A caller that set sqlalchemy.url itself (the test suite, via
+# config.attributes["sqlalchemy_url_locked"]) keeps that URL; the CLI takes
+# DATABASE_URL from the environment / .env.
 database_url = os.environ.get("DATABASE_URL")
-if database_url:
+if database_url and not config.attributes.get("sqlalchemy_url_locked"):
     config.set_main_option("sqlalchemy.url", database_url)
 
 from app.db.base import Base
-from app.db.models import User, Campaign, JournalEntry, Tag, JournalTag  # noqa: F401
+import app.db.models  # noqa: E402,F401  registers every model on Base.metadata
 target_metadata = Base.metadata
 
 

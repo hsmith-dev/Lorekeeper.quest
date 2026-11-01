@@ -14,3 +14,7 @@ Stories were merged on green GitHub CI while the desktop was offline (owner deci
 - [ ] `docker buildx build --platform linux/arm64 -f src/backend/Dockerfile.prod src/backend` succeeds
 - [ ] Image size vs a `main` build before this change (record in PR #20)
 - [ ] Backend suite + `/api/health`, journal save, retrieval, `test_nlp.py` against the new image
+
+## E0-QA.5 — Tests build the schema from Alembic migrations (PR #21)
+- [ ] Run the suite on a lane DB that still has tables from the old `create_all` era (`-e TEST_DATABASE_URL=… -e DATABASE_URL=<same>`); expect green and `alembic_version` = `a3e7c1f9d258` afterwards
+- [ ] Known drift to decide on (reported, not fixed): duplicate unique constraint+index on `password_reset_tokens.token_hash` and `promo_codes.code`; 12 migration-only server defaults; `app_config` seeds open-access ON while the app default is OFF

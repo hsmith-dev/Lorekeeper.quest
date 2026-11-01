@@ -20,6 +20,7 @@ from app.db.models.password_reset_token import PasswordResetToken
 from app.db.models.admin_message import AdminMessage
 from app.db.models.shorthand import ShorthandTerm
 from app.db.models.character_sheet import CharacterSheetTemplate, CharacterSheet
+from app.db.models.app_config import AppConfig
 
 __all__ = [
     "User", "Campaign", "Genre", "JournalEntry", "Tag", "JournalTag", "TagType", "TagCategory",
@@ -28,6 +29,5 @@ __all__ = [
     "UserSettings", "SourceDocument", "SourceChunk", "CampaignShareToken", "CampaignMember",
     "ModelEvaluation", "PromoCode", "PromoCodeRedemption", "Subscription", "SessionPlan",
     "Feedback", "FeedbackCategory", "PasswordResetToken", "AdminMessage", "ShorthandTerm",
-    "CharacterSheetTemplate", "CharacterSheet",
+    "CharacterSheetTemplate", "CharacterSheet", "AppConfig",
 ]
-from app.db.models.app_config import AppConfig
