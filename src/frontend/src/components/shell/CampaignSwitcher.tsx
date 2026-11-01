@@ -179,7 +179,7 @@ export function CampaignSwitcher({ className }: { className?: string }) {
         onClick={() => (open ? closeMenu(false) : openMenu())}
         onKeyDown={onTriggerKeyDown}
         className={cn(
-          "flex min-h-11 max-w-full items-center gap-1.5 rounded-md border border-border px-2 text-sm text-foreground transition-colors hover:bg-muted/60 sm:px-3",
+          "flex min-h-11 min-w-11 max-w-full items-center gap-1.5 rounded-md border border-border px-2 text-sm text-foreground transition-colors hover:bg-muted/60 sm:px-3",
           FOCUS_RING
         )}
       >

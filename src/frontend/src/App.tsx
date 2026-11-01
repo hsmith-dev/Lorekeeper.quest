@@ -11,6 +11,7 @@ import { Toaster } from "./components/ui/toast";
 import { Footer } from "./components/Footer";
 import { PreviewBanner } from "./components/shell/PreviewBanner";
 import { RouteAnnouncer } from "./components/shell/RouteAnnouncer";
+import { ShortcutHelp } from "./components/shell/ShortcutHelp";
 import { LegacyRedirect, RouteLoading, RoutePage } from "./components/shell/RouteGate";
 import { CurrentCampaignProvider } from "./hooks/useCurrentCampaign";
 import { PAGE_ROUTES, activeRedirects } from "./lib/routes";
@@ -68,6 +69,7 @@ export default function App() {
           </div>
           <ChatWidget />
           <Toaster />
+          <ShortcutHelp />
           <TourOverlay />
           <TutorialWelcomePrompt />
         </TourProvider>

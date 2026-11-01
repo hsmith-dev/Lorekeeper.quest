@@ -13,7 +13,7 @@ import { cn } from "@/lib/utils"
 const DEBOUNCE_MS = 150
 
 const comboboxOptionVariants = cva(
-  "flex cursor-pointer select-none items-center gap-2 rounded-sm px-3 py-2 text-sm [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0",
+  "flex min-h-11 w-full cursor-pointer select-none items-center gap-2 rounded-sm px-3 py-2 text-sm md:min-h-0 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0",
   {
     variants: {
       active: {

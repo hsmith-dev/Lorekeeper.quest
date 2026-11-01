@@ -102,6 +102,24 @@
   }
 }
 
+/* Touch targets (E0-UX.9): `tap-target` on a positioned element gives it a
+   centred hit area of at least 44x44 px (WCAG 2.5.5) below md and on coarse
+   pointers, without changing how it looks. The pseudo-element is part of the
+   element, so a tap on it is a tap on the control. */
+@layer utilities {
+  @media (max-width: 767.98px), (pointer: coarse) {
+    .tap-target::before {
+      content: "";
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      width: max(100%, 44px);
+      height: max(100%, 44px);
+      transform: translate(-50%, -50%);
+    }
+  }
+}
+
 /* Route focus targets (E0-UX.8): RouteAnnouncer moves focus to the page h1
    (or <main>) after a route change. They are not controls, so no ring. */
 h1[tabindex="-1"]:focus,

@@ -41,7 +41,7 @@ export function PreviewBanner() {
       <button
         type="button"
         onClick={exit}
-        className="relative inline-flex h-7 shrink-0 items-center rounded-md border border-background px-3 text-xs font-medium text-background transition-colors before:absolute before:-inset-x-1 before:-inset-y-2 hover:bg-background hover:text-info focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background md:before:hidden"
+        className="relative tap-target inline-flex h-7 shrink-0 items-center rounded-md border border-background px-3 text-xs font-medium text-background transition-colors hover:bg-background hover:text-info focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
       >
         Exit preview
       </button>

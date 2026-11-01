@@ -270,7 +270,7 @@ function EditableVisibilityBadge({
         aria-label={`Visibility: ${look.label}`}
         onClick={() => (open ? closeMenu(false) : openMenu())}
         onKeyDown={onTriggerKeyDown}
-        className={cn(PILL, look.className, FOCUS_RING, "cursor-pointer hover:brightness-110")}
+        className={cn(PILL, look.className, FOCUS_RING, "relative tap-target cursor-pointer hover:brightness-110")}
       >
         <Icon aria-hidden="true" />
         {look.label}
@@ -302,7 +302,7 @@ function EditableVisibilityBadge({
                 onClick={() => choose(option)}
                 onMouseMove={() => index !== activeIndex && setActiveIndex(index)}
                 className={cn(
-                  "flex min-h-9 w-full items-center gap-2 rounded-sm px-2 text-left text-sm",
+                  "flex min-h-11 w-full items-center gap-2 rounded-sm px-2 text-left text-sm md:min-h-9",
                   "focus:bg-muted focus:outline-none focus-visible:ring-2 focus-visible:ring-ring",
                   "[&_svg]:size-4 [&_svg]:shrink-0"
                 )}
@@ -325,7 +325,7 @@ function EditableVisibilityBadge({
             type="button"
             onClick={confirmParty}
             className={cn(
-              "inline-flex h-7 items-center rounded-md bg-primary px-2.5 font-medium text-primary-foreground hover:bg-primary/90",
+              "relative tap-target inline-flex h-7 items-center rounded-md bg-primary px-2.5 font-medium text-primary-foreground hover:bg-primary/90",
               FOCUS_RING
             )}
           >
@@ -336,7 +336,7 @@ function EditableVisibilityBadge({
             type="button"
             onClick={cancelConfirm}
             className={cn(
-              "inline-flex h-7 items-center rounded-md border border-input bg-background px-2.5 font-medium hover:bg-accent hover:text-accent-foreground",
+              "relative tap-target inline-flex h-7 items-center rounded-md border border-input bg-background px-2.5 font-medium hover:bg-accent hover:text-accent-foreground",
               FOCUS_RING
             )}
           >

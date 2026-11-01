@@ -5,12 +5,21 @@
 // its own opener lived inside the panel that just vanished.
 // No runtime imports (loadable by Node type stripping).
 
+/** A level pushed into the active SlideOver (see SlideOverPushOptions). */
+export interface SlideOverPushRequest {
+  title: string;
+  render: () => unknown;
+  backLabel?: string;
+}
+
 export interface Registration<T = unknown> {
   name: string;
   returnTarget: T | null;
   supersede: () => void;
   /** True when `target` is inside this SlideOver's panel. */
   contains?: (target: unknown) => boolean;
+  /** Push a level into this SlideOver (e.g. the shortcut help), so nothing closes. */
+  push?: (options: SlideOverPushRequest) => void;
 }
 
 let active: Registration | null = null;
