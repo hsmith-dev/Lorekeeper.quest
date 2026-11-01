@@ -1,5 +1,10 @@
 FROM python:3.11-slim
 WORKDIR /app
+# WeasyPrint's system libraries and fonts for the campaign PDF export (E0-QA.9);
+# fonts-dejavu-extra has the oblique faces (WeasyPrint does not synthesise italics)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libpango-1.0-0 libpangoft2-1.0-0 libharfbuzz0b fontconfig fonts-dejavu-core fonts-dejavu-extra \
+    && rm -rf /var/lib/apt/lists/*
 COPY requirements.txt .
 # CPU-only torch/torchvision first (E0-Platform.2): a plain PyPI resolve on
 # x86-64 pulls CUDA torch and ~15 NVIDIA-proprietary nvidia-*/cuda-* wheels.

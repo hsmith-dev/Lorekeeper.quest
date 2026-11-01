@@ -73,10 +73,43 @@ docker run --rm --entrypoint python \
 
 Every OS package needs a register entry whose licence matches the scan. The
 one exception is a dynamically linked LGPL system library on
-`system_lib_allowlist` (libvips, Pango, HarfBuzz, GLib), which may resolve to
-the allowlist instead of an entry. An unknown package fails. When the scan
-string is not SPDX, the entry pins it in `scanned_license` and records the
-reviewed SPDX licence in `license`, which is what the edition rules then judge.
+`system_lib_allowlist` (libvips, Pango, HarfBuzz, GLib, and Pango's FriBidi,
+libthai, libdatrie and Graphite2), which may resolve to the allowlist instead
+of an entry. An unknown package fails. When the scan string is not SPDX, the
+entry pins it in `scanned_license` and records the reviewed SPDX licence in
+`license`, which is what the edition rules then judge.
+
+### WeasyPrint's system libraries and fonts (E0-QA.9)
+
+The campaign PDF export renders HTML with WeasyPrint (BSD-3-Clause), which
+loads Pango, HarfBuzz and fontconfig at runtime. Both backend Dockerfiles and
+the CI jobs that import the app install `libpango-1.0-0 libpangoft2-1.0-0
+libharfbuzz0b fontconfig fonts-dejavu-core fonts-dejavu-extra` with
+`--no-install-recommends`. `fonts-dejavu-extra` is there for the oblique
+faces, because WeasyPrint does not synthesise italics. The install pulls in
+these packages, each with a register entry (reviewed 2026-11-01):
+
+- **LGPL system libraries, used dynamically and unmodified**: Pango (LGPL),
+  GLib (LGPL-2.1+), FriBidi, libthai with its `libthai-data` dictionary, and
+  libdatrie (LGPL-2.1+), plus Graphite2 (LGPL-2.1+ OR MPL-1.1 OR GPL-2+, used
+  under LGPL-2.1+). All are on `system_lib_allowlist`. Their copyright files
+  also list GPL terms, which cover `debian/` packaging, build scripts or tests
+  that are not in the binary package; the register pins the scan string and
+  records the reviewed LGPL licence. Do not vendor, patch or statically link
+  them.
+- **Permissive**: HarfBuzz (MIT), FreeType (FTL OR GPL-2.0+, used under the
+  FTL), libpng (libpng), libbrotli and libexpat (MIT), and fontconfig
+  (`fontconfig`, `fontconfig-config`, `libfontconfig1`), whose free-text
+  copyright file is Keith Packard's MIT-style notice (HPND-sell-variant).
+- **Fonts**: `fonts-dejavu-core`, `fonts-dejavu-extra` and `fonts-dejavu-mono`
+  are under the Bitstream Vera licence (DejaVu's changes are public domain).
+  WeasyPrint embeds a subset of every font it uses in each exported PDF, which
+  the licence allows. The fonts may not be sold on their own, and modified
+  versions must be renamed.
+
+The policy allows `Bitstream-Vera`, `HPND-sell-variant` and `MPL-1.1` (the
+last for Pyphen, WeasyPrint's hyphenation library, which is GPL-2.0+ OR
+LGPL-2.1+ OR MPL-1.1 and is used under MPL-1.1).
 
 ## The OS-base-layer rule (mere aggregation)
 
@@ -172,10 +205,17 @@ proprietary terms that the commercial and AGPL editions cannot pass on.
 ## Owner-approved exceptions
 
 `[[exception]]` entries in the policy record packages the owner accepts despite
-the rules: fpdf2 (LGPL-3.0) and caniuse-lite (CC-BY-4.0). Both are marked
-`OWNER TO CONFIRM`. E0-QA.9 records the decisions.
+the rules: only caniuse-lite (CC-BY-4.0) remains — build-time browser data,
+never shipped, kept with attribution. E0-QA.9 removed the other two by
+replacing them: fpdf2 → WeasyPrint, easyocr (and its python-bidi) → RapidOCR.
 
-The former fourth exception, the `redis:7-alpine` image (Redis 7.4.x, RSALv2 /
+Decided (owner, 2026-11-01, E0-QA.9): the campaign PDF export no longer uses
+its LGPL-3.0 PDF library. That library was replaced by WeasyPrint
+(BSD-3-Clause), the engine E8's Chronicle export reuses, rather than given an
+exception. Its exception and register entry are gone. The new system libraries
+are listed under "WeasyPrint's system libraries and fonts" above.
+
+The former redis exception, the `redis:7-alpine` image (Redis 7.4.x, RSALv2 /
 SSPLv1), is gone: on 2026-11-01 the owner replaced Redis with Valkey
 (`valkey/valkey:8.1.11-alpine`, BSD-3-Clause, Linux Foundation), which needs no
 exception in either edition. The app still talks to it with the redis-py client

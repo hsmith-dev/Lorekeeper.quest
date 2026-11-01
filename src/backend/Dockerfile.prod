@@ -9,8 +9,12 @@ WORKDIR /app
 # confirmed by an actual `docker buildx build --platform linux/arm64` run
 # failing with "fatal error: stdlib.h: No such file or directory" before this
 # fix.
+# Pango, HarfBuzz, fontconfig and DejaVu are WeasyPrint's system libraries and
+# font for the campaign PDF export (E0-QA.9). fonts-dejavu-extra has the
+# oblique faces: WeasyPrint does not synthesise italics.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential libpq-dev \
+        libpango-1.0-0 libpangoft2-1.0-0 libharfbuzz0b fontconfig fonts-dejavu-core fonts-dejavu-extra \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .

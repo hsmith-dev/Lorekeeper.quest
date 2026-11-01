@@ -151,12 +151,14 @@ def test_denied_package_fails_even_if_registered(tmp_path):
 
 @pytest.mark.parametrize("edition", cl.EDITIONS)
 def test_owner_exceptions_keep_working(tmp_path, edition):
+    # fpdf2's exception was removed when WeasyPrint replaced it (E0-QA.9): an
+    # LGPL pip package with no exception fails again in both editions.
     reg = make_register(tmp_path, [entry("fpdf2", license="LGPL-3.0-only")])
     deps = [("fpdf2", "2.8.7", "LGPL-3.0-only")]
     failures, excepted, matched, _ = scan(reg, deps, edition)
-    assert failures == [] and len(excepted) == 1
+    assert [f[0] for f in failures] == ["fpdf2"] and excepted == []
     failures, excepted = entries_check(reg, edition)
-    assert failures == [] and len(excepted) == 1
+    assert [f[0] for f in failures] == ["python:fpdf2"] and excepted == []
 
 
 @pytest.mark.parametrize("edition", cl.EDITIONS)
