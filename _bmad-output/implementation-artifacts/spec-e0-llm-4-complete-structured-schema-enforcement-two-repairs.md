@@ -41,7 +41,7 @@ deferred:
 - The schema (`schema_prompt(schema)`: the flat JSON schema plus "reply with only one JSON object") is appended to the final user turn of a copy of the caller's messages, or added as a new user turn if the last message is not a user turn. The caller's list is never mutated.
 - Shared validation on every path: strip one surrounding markdown code fence, or else take the text from the first `{` to the last `}`, then `schema.model_validate_json`. Malformed JSON, missing fields, extra keys and pydantic validators (the place for "semantically empty" rules) all count as invalid.
 - Repair: at most 2. Each repair prompt = the schema-bearing messages + the last raw output as an assistant turn + a user turn listing the validation errors (`loc: msg` lines, truncated to 1,000 characters) and asking for corrected JSON only. Not cumulative: only the latest bad output is echoed, which keeps the prompt bounded on a 4096 context. After attempt 3 fails: `StructuredOutputError(attempts=3, errors=[{loc,msg,type}...])`.
-- Gate: ONE slot (`gated(cfg, gate_class)`, default `llm_gate.current_class`) is held across the first call, the 4xx fallback and every repair turn, released on success or error. `detect_backend` runs before the slot is taken. BYOK never touches the gate. (This is the orchestrator's instruction and overrides the story's "each attempt acquires separately"; see Design Notes.)
+- Gate: each attempt (the first call and each repair) acquires and releases its own slot through `gated(cfg, cls)`, as the story says ("each attempt acquires `llm_slot` separately with the caller's gate class"). `cls` is resolved once per call (`gate_class`, else `llm_gate.current_class`), so every attempt uses the same class. The 4xx prompted retry belongs to its attempt's slot. Validation and repair-prompt building run with no slot held. If the caller already holds a slot, the gate's reentrancy reuses it. `detect_backend` runs before any slot is taken. BYOK never touches the gate.
 - Budget (platform LLM only): if the first attempt's messages exceed `prompt_budget.window_tokens(task)` (`structured` when `task` isn't in `TASK_POLICIES`), raise `PromptBudgetError` before any request. A repair prompt that would exceed it shortens the echoed output, or drops it, rather than letting Ollama front-truncate.
 - Each attempt logs one JSON line `{"event":"structured_attempt","task","attempt","valid","backend","ms"}` (never message text). `llm_provider.structured_stats[task]` counts `first_try_valid`, `valid_after_repair`, `failed`.
 - Backend failures (transport error, timeout, 5xx, a 4xx on the prompted path, an empty Ollama body) raise `LLMUnavailable`. A missing BYOK key (the senders' 400) raises `LLMConfigError`. Neither counts as an attempt, and neither triggers a repair.
@@ -64,7 +64,7 @@ deferred:
 | BYOK openai | provider openai | response_format strict; gate untouched | none |
 | Anthropic/Gemini | provider anthropic/gemini | prompted, schema in final user turn | none |
 | Backend down | 5xx / transport error | — | `LLMUnavailable` |
-| Gate | platform cfg | one acquire for all attempts, chosen class, released after success and after failure | `LLMBusy` if no slot, no request sent |
+| Gate | platform cfg, N attempts | N acquire/release pairs in one class; a `live_recap` queued during attempt 1 is served before the repair | `LLMBusy` on any attempt (including a repair) with no further request, no stat, no leftover waiter |
 | Too big | platform prompt > window | no request | `PromptBudgetError` |
 | Non-flat schema | Optional field / nested non-forbid model | no request | `ValueError` |
 
@@ -96,6 +96,23 @@ deferred:
 - Given the licence workflow, when it runs, then it passes unchanged (no new dependency).
 
 ## Spec Change Log
+
+### 2026-11-01 — Coordinator correction: per-attempt gate slot
+- **Trigger:** the coordinator retracted the brief's "hold ONE slot across the first call and its repair turns" and directed the story's per-attempt acquire.
+- **Amended:**
+  - The intent-contract Gate bullet and Gate matrix row.
+  - Design Notes.
+  - The code: each attempt has its own `gated(cfg, cls)`, with the class resolved once per call.
+  - Tests:
+    - N acquire/release pairs.
+    - A `live_recap` served between attempts (fakeredis).
+    - `LLMBusy` on a repair attempt with no partial state.
+- **Known-bad state avoided:** a structured call holding the only local-LLM slot through up to 3 generations while a Rolling Recap waits.
+- **KEEP:**
+  - The 4xx prompted retry stays inside its attempt's slot.
+  - `detect_backend` runs before any slot.
+  - The caller-held slot is reused by reentrancy.
+  - Everything else in the review-patched behaviour is unchanged.
 
 ## Review Triage Log
 
@@ -129,17 +146,19 @@ deferred:
   - `[low]` `[reject]` (edge) A validator raising TypeError crashes instead of repairing — a schema-author bug that fails loudly. Pydantic's own contract is ValueError/AssertionError.
   - `[medium]` `[patch]` (edge) A repair prompt that doesn't fit raised PromptBudgetError after requests had gone out, with no stat — it now counts `failed` and raises StructuredOutputError(attempts=attempts made). Test added (grouped with the first row).
   - `[medium]` `[patch]` (edge) A max_tokens above the reserve overflows the context — same fix as the blind row.
-  - `[low]` `[reject]` (edge) One slot can be held for up to ~4× timeout — `timeout` is per request by design (an attempt on the CPU box can take tens of seconds), and holder renewal keeps the slot valid. Holding one slot is the orchestrator's choice. Job deadlines belong to E0-Jobs (current_deadline).
+  - `[low]` `[reject]` (edge) One slot can be held for up to ~4× timeout — `timeout` is per request by design (an attempt on the CPU box can take tens of seconds), and holder renewal keeps the slot valid. Since the coordinator's correction, a slot is held per attempt, so this concern no longer applies. Job deadlines belong to E0-Jobs (current_deadline).
   - `[low]` `[reject]` (edge) A `{` in prose before the object breaks extraction — only on the prompted path, and it costs one repair. A raw_decode scan adds branching for a pattern not seen with temperature-0 JSON prompts.
   - `[low]` `[patch]` (edge, claim) The integration test could report a model it doesn't send — it now prints `model_for(task, cfg)` and skips with a reason when that differs from OLLAMA_TEST_MODEL.
   - `[low]` `[reject]` (intent) An empty or whitespace reply is LLMUnavailable, not a repairable attempt — the spec settles this (empty Ollama body → LLMUnavailable). "Semantically empty" means schema-valid content, which is covered by validators and the no-defaults rule.
   - `[low]` `[defer]` (intent) No BENCHMARKS.md FR-3 row and no measured rates — this needs the desktop Ollama; listed under Needs desktop verification.
   - `[low]` `[reject]` (intent) The lint is vacuous until feature schemas exist — it imports whatever lands in app/schemas/llm/, so E1's first schema module is checked automatically, and the checker itself is tested on positive and negative fixtures.
-  - `[false]` `[reject]` (intent) A per-attempt gate (story) vs one slot (diff) — the invocation intent explicitly says to hold ONE slot. This is recorded in Design Notes as a deliberate override of the story's text.
+  - `[false]` `[reject]` (intent) A per-attempt gate (story) vs one slot (diff) — at review time the intent said ONE slot. Superseded by the coordinator's correction (see Spec Change Log): the code now acquires per attempt, as the story says.
 
 ## Design Notes
 
-- **One slot vs per-attempt.** The story (and E0-LLM.2's note) says each attempt acquires separately, so a `live_recap` can slip between repairs. The orchestrator for this build directed one slot for the first call and its repairs. A repair turn shares its whole prefix with the previous request, so on `OLLAMA_NUM_PARALLEL=1` keeping the slot keeps Ollama's prompt cache warm; another call in between would evict it and make the repair pay full prompt evaluation again. Worst-case hold is 3 generations. E0-LLM.6's gate-contention measurement can revisit this.
+- **A gate slot per attempt.** This follows story E0-LLM.4 ("each attempt acquires `llm_slot` separately with the caller's gate class") and E0-LLM.2's technical note ("Each call through `complete_structured` acquires separately, so a `live_recap` call can slip in between repair turns").
+  - Live-session latency is a PRD priority, and it outranks the warm prompt cache a held slot would keep for the repair.
+  - A repair that loses the slot to a higher-priority call pays full prompt evaluation again. That cost is accepted.
 - **No defaults in flat schemas.** If fields could have defaults, `{}` would validate as an empty result: a silent "nothing extracted". Requiring every property (empty string or empty list meaning "none") makes `{}` invalid, so it gets repaired. This is also what OpenAI strict mode needs.
 - Semantic rules ("at least one entity", non-blank names) belong in the schema's pydantic validators. They raise `ValidationError`, so they get the same repair turns.
 
@@ -164,7 +183,7 @@ Status: done
 - The schema is restated in the final user turn on every path.
 - All paths share one validation step, `model_validate_json`, after a code fence or chatter around the object is stripped.
 - At most 2 repairs. Each echoes the latest bad output and the errors (cut to 1,000 characters). After that it raises `StructuredOutputError` (`ai_output_unusable`, `attempts=3`).
-- One gate slot covers the whole call. This follows the orchestrator's override of the story's per-attempt acquire (see Design Notes). BYOK calls bypass the gate.
+- Each attempt acquires and releases its own gate slot, in one class per call, so a `live_recap` can run between repairs. This follows the story; see the Spec Change Log for the coordinator's correction. BYOK calls bypass the gate.
 - Budget checks:
   - A platform prompt over `ctx - max(max_tokens, reserve)` raises `PromptBudgetError` before any request is sent.
   - A repair prompt that wouldn't fit is cut down first. If it still can't fit, the call ends with `StructuredOutputError`.
@@ -211,7 +230,7 @@ Status: done
   - A `{` in prose before the object.
   - An empty reply as `LLMUnavailable` (as the spec says).
   - The lint being vacuous with no feature schemas yet.
-  - Per-attempt gate vs one slot (false; the intent says one slot).
+  - Per-attempt gate vs one slot (false at review time; later superseded by the coordinator's correction to per-attempt).
 
 **Follow-up review:** true. Two medium entries were patched.
 - The unverified risk is the repair-prompt trimming and the window maths against the real tokenizer.
@@ -236,6 +255,6 @@ Status: done
 - **Ollama silently ignoring schema features.** Check the logs for `structured_attempt` lines with `valid:false`, and look at which error `loc` values recur.
 
 **Residual risks:**
-- One slot across repairs departs from the story text and from E0-LLM.2's note. E0-LLM.6's contention measurement should confirm it.
+- A repair that loses its slot to a higher-priority call re-evaluates the whole prompt (cold KV cache). E0-LLM.6's gate-contention measurement shows the cost.
 - Token estimates are uncalibrated.
 - Sprint-status sync was skipped, per the orchestrator brief.

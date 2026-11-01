@@ -18,8 +18,9 @@ validated instance of a flat pydantic schema (app/schemas/llm). It enforces
 the schema per backend (Ollama `format`; strict `response_format` for
 KoboldCpp/openai/custom, prompted again on a 4xx; prompted JSON for
 anthropic/gemini), checks every reply with model_validate_json, runs at most
-two repair turns quoting the errors, then raises StructuredOutputError. One
-gate slot covers the first call and its repairs; each attempt logs one
+two repair turns quoting the errors, then raises StructuredOutputError. Each
+attempt takes its own gate slot (same class), so a live_recap can run between
+repairs; each attempt logs one
 `structured_attempt` JSON line, and structured_stats counts outcomes per task.
 """
 
@@ -501,9 +502,13 @@ async def complete_structured(
     Every reply goes through schema.model_validate_json (after stripping a
     code fence, or chatter around the object). An invalid reply gets at most
     two repair turns quoting the errors, then StructuredOutputError
-    (ai_output_unusable, attempts=3). For the platform LLM one gate slot
-    (gate_class, default llm_gate.current_class) is held for the first call
-    and every repair; BYOK never touches the gate.
+    (ai_output_unusable, attempts=3). For the platform LLM each attempt (the
+    first call and each repair) acquires and releases its own gate slot, all
+    in the same class (gate_class, default llm_gate.current_class, resolved
+    once per call), so a higher-priority call such as a live_recap can run
+    between repairs. Validation and building the repair prompt happen with
+    no slot held. If the caller already holds a slot, every attempt reuses
+    it (the gate is reentrant). BYOK never touches the gate.
 
     task: names the call in logs, stats and the json_schema, picks the model
     (model_for) and the prompt budget (its TASK_POLICIES entry, else
@@ -511,7 +516,8 @@ async def complete_structured(
     larger one shrinks the prompt window to match.
 
     Raises PromptBudgetError (platform prompt over the window; no request),
-    LLMBusy (no gate slot), LLMUnavailable (backend down, timeout, 5xx,
+    LLMBusy (no gate slot for any attempt, including a repair; nothing is
+    kept from the earlier attempts), LLMUnavailable (backend down, timeout, 5xx,
     empty reply, or a key-less openai call's 401), LLMConfigError (missing
     anthropic/gemini key). None of those is an attempt or triggers a repair.
     A repair prompt that can't fit the window ends the call early with
@@ -534,39 +540,45 @@ async def complete_structured(
             )
 
     st = _Structured(cfg, task, json_schema, await _structured_mode(cfg), mt, timeout)
+    # One class for every attempt of this call, even if current_class changes
+    # between them (e.g. a Job wrapper resetting it).
+    cls = GateClass(gate_class) if gate_class is not None else llm_gate.current_class.get()
     errors: list[dict] = []
-    async with gated(cfg, gate_class):
-        prompt = base
-        for attempt in range(1, STRUCTURED_MAX_ATTEMPTS + 1):
+    prompt = base
+    for attempt in range(1, STRUCTURED_MAX_ATTEMPTS + 1):
+        # A slot per attempt (story E0-LLM.4, E0-LLM.2): released before
+        # validation, so a waiting live_recap is served between repairs.
+        async with gated(cfg, cls):
             started = time.monotonic()
             raw = await _send_structured(st, prompt)
-            result, errors = _validate(raw, schema)
-            line = {
-                "event": "structured_attempt",
-                "task": task,
-                "attempt": attempt,
-                "valid": result is not None,
-                "backend": st.mode,
-                "ms": round((time.monotonic() - started) * 1000),
-            }
-            if result is None:
-                # Where and how it failed only: no msg, no input text.
-                line["errors"] = [{"loc": e["loc"], "type": e["type"]} for e in errors[:LOG_ERRORS_MAX]]
-            logger.info(json.dumps(line))
-            if result is not None:
-                _bump_stat(task, "first_try_valid" if attempt == 1 else "valid_after_repair")
-                return result
-            if attempt < STRUCTURED_MAX_ATTEMPTS:
-                try:
-                    prompt = _repair_messages(base, raw, errors, window)
-                except PromptBudgetError as exc:
-                    # Requests were already sent: the output is unusable, not the prompt.
-                    _bump_stat(task, "failed")
-                    raise StructuredOutputError(
-                        "The AI's output was unusable, and a repair prompt would not fit. Please try again.",
-                        attempts=attempt,
-                        errors=errors,
-                    ) from exc
+            ms = round((time.monotonic() - started) * 1000)
+        result, errors = _validate(raw, schema)
+        line = {
+            "event": "structured_attempt",
+            "task": task,
+            "attempt": attempt,
+            "valid": result is not None,
+            "backend": st.mode,
+            "ms": ms,
+        }
+        if result is None:
+            # Where and how it failed only: no msg, no input text.
+            line["errors"] = [{"loc": e["loc"], "type": e["type"]} for e in errors[:LOG_ERRORS_MAX]]
+        logger.info(json.dumps(line))
+        if result is not None:
+            _bump_stat(task, "first_try_valid" if attempt == 1 else "valid_after_repair")
+            return result
+        if attempt < STRUCTURED_MAX_ATTEMPTS:
+            try:
+                prompt = _repair_messages(base, raw, errors, window)
+            except PromptBudgetError as exc:
+                # Requests were already sent: the output is unusable, not the prompt.
+                _bump_stat(task, "failed")
+                raise StructuredOutputError(
+                    "The AI's output was unusable, and a repair prompt would not fit. Please try again.",
+                    attempts=attempt,
+                    errors=errors,
+                ) from exc
     _bump_stat(task, "failed")
     raise StructuredOutputError(
         "The AI's output was unusable, even after asking it to fix it. Please try again.",

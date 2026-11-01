@@ -5,6 +5,7 @@ gate is a fakeredis-backed LLMGate swapped in for llm_gate.get_gate, so no
 test opens a socket to KOBOLD_URL or needs a Redis server.
 """
 
+import asyncio
 import json
 import logging
 import re
@@ -78,6 +79,7 @@ class Server:
         self.chats: list[SimpleNamespace] = []
         self.fail = None
         self.reject_format = False
+        self.on_chat = None  # async hook run inside each chat request (slot held)
 
     @property
     def payloads(self) -> list[dict]:
@@ -93,6 +95,8 @@ class Server:
         self.chats.append(SimpleNamespace(
             host=request.url.host, path=request.url.path, payload=payload, headers=request.headers,
         ))
+        if self.on_chat is not None:
+            await self.on_chat(len(self.chats))
         if self.fail is not None:
             return self.fail(request)
         if self.reject_format and "response_format" in payload:
@@ -127,13 +131,21 @@ class RecordingGate(LLMGate):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.acquired: list[GateClass] = []
+        self.released = 0
 
     async def acquire(self, cls, *, wait_s=None):
         self.acquired.append(GateClass(cls))
         return await super().acquire(cls, wait_s=wait_s)
 
+    async def _release(self, token):
+        self.released += 1
+        await super()._release(token)
+
     async def holder_count(self) -> int:
         return await self.redis.zcard(self.holders_key)
+
+    async def waiter_count(self) -> int:
+        return await self.redis.zcard(self.waiters_key)
 
 
 @pytest_asyncio.fixture
@@ -237,7 +249,7 @@ async def test_repair_on_turn_two_echoes_only_latest(serve, gate):
     assert third[-2] == {"role": "assistant", "content": BAD2}
     assert BAD not in json.dumps(third)
     assert stats()["valid_after_repair"] == 1
-    assert gate.acquired == [GateClass.gm_interactive]  # one slot for all three
+    assert gate.acquired == [GateClass.gm_interactive] * 3  # a slot per attempt
 
 
 async def test_exhausted_raises_structured_output_error(serve, gate):
@@ -253,7 +265,8 @@ async def test_exhausted_raises_structured_output_error(serve, gate):
     json.dumps(err.errors)  # JSON-safe
     assert len(server.chats) == 3
     assert stats() == {"first_try_valid": 0, "valid_after_repair": 0, "failed": 1}
-    assert gate.acquired == [GateClass.gm_interactive]
+    assert gate.acquired == [GateClass.gm_interactive] * 3
+    assert gate.released == 3
     assert await gate.holder_count() == 0
 
 
@@ -465,7 +478,8 @@ async def test_koboldcpp_4xx_falls_back_to_prompted_and_stays(serve, gate):
     assert server.payloads[1]["temperature"] == 0
     assert server.payloads[2]["messages"][-2] == {"role": "assistant", "content": BAD}
     assert stats() == {"first_try_valid": 0, "valid_after_repair": 1, "failed": 0}
-    assert gate.acquired == [GateClass.gm_interactive]
+    # The prompted retry is part of attempt 1's slot; the repair takes its own.
+    assert gate.acquired == [GateClass.gm_interactive] * 2
 
 
 async def test_byok_openai_strict_and_gate_untouched(serve, no_gate):
@@ -630,10 +644,20 @@ async def test_unavailable_mid_repair_propagates(serve, gate):
 # --- the gate --------------------------------------------------------------------
 
 
-async def test_gate_one_acquire_chosen_class_released_on_success(serve, gate):
-    serve([BAD, BAD2, VALID])
+async def test_gate_slot_per_attempt_released_between(serve, gate):
+    """N attempts = N acquire/release pairs, same class; the slot is held
+    during each request and free between attempts."""
+    server = serve([BAD, BAD2, VALID])
+    holders_during: list[int] = []
+
+    async def during(n):
+        holders_during.append(await gate.holder_count())
+
+    server.on_chat = during
     await complete_structured(MESSAGES, Extraction, platform_cfg(), gate_class=GateClass.live_recap)
-    assert gate.acquired == [GateClass.live_recap]
+    assert gate.acquired == [GateClass.live_recap] * 3
+    assert gate.released == 3
+    assert holders_during == [1, 1, 1]
     assert await gate.holder_count() == 0
 
 
@@ -641,18 +665,91 @@ async def test_gate_released_after_failure(serve, gate):
     serve([BAD, BAD, BAD])
     with pytest.raises(StructuredOutputError):
         await complete_structured(MESSAGES, Extraction, platform_cfg(), gate_class="job_backfill")
-    assert gate.acquired == [GateClass.job_backfill]
+    assert gate.acquired == [GateClass.job_backfill] * 3
+    assert gate.released == 3
     assert await gate.holder_count() == 0
 
 
 async def test_gate_current_class_default(serve, gate):
-    serve([VALID])
+    serve([BAD, VALID])
     token = llm_gate.current_class.set(GateClass.job_onsave)
     try:
         await complete_structured(MESSAGES, Extraction, platform_cfg())
     finally:
         llm_gate.current_class.reset(token)
-    assert gate.acquired == [GateClass.job_onsave]
+    assert gate.acquired == [GateClass.job_onsave] * 2  # same class for the repair
+
+
+async def test_live_recap_served_between_attempts(serve, gate):
+    """A live_recap that queues during attempt 1 of a job_backfill call runs
+    before the repair attempt (capacity 1, real Lua on fakeredis)."""
+    server = serve([BAD, VALID])
+    order: list[str] = []
+    recap_tasks: list[asyncio.Task] = []
+
+    async def recap():
+        slot = await gate.acquire(GateClass.live_recap)  # direct: not this context's slot
+        order.append("recap")
+        await asyncio.sleep(0.05)
+        await slot.release()
+
+    async def during(n):
+        order.append(f"structured-{n}")
+        if n == 1:
+            recap_tasks.append(asyncio.create_task(recap()))
+            for _ in range(200):  # wait until the recap is queued behind us
+                if await gate.waiter_count() >= 1:
+                    break
+                await asyncio.sleep(0.005)
+            assert await gate.waiter_count() == 1
+
+    server.on_chat = during
+    result = await complete_structured(MESSAGES, Extraction, platform_cfg(), gate_class=GateClass.job_backfill)
+    await asyncio.gather(*recap_tasks)
+    assert isinstance(result, Extraction)
+    assert order == ["structured-1", "recap", "structured-2"]
+    assert gate.acquired == [GateClass.job_backfill, GateClass.live_recap, GateClass.job_backfill]
+    assert await gate.holder_count() == 0
+    assert await gate.waiter_count() == 0
+
+
+async def test_busy_on_repair_attempt_leaves_no_partial_state(serve, gate):
+    """Attempt 1 is invalid; while it runs another caller takes the slot and
+    keeps it, so the repair attempt gets LLMBusy: no second request, no stat,
+    no leftover waiter, and the other holder is untouched."""
+    server = serve([BAD, VALID])
+    other_holds = asyncio.Event()
+    finish = asyncio.Event()
+    tasks: list[asyncio.Task] = []
+
+    async def other():
+        slot = await gate.acquire(GateClass.live_recap)
+        other_holds.set()
+        await finish.wait()
+        await slot.release()
+
+    async def during(n):
+        if n == 1:
+            tasks.append(asyncio.create_task(other()))
+            for _ in range(200):
+                if await gate.waiter_count() >= 1:
+                    break
+                await asyncio.sleep(0.005)
+
+    server.on_chat = during
+    gate.wait_s = 0.2
+    try:
+        with pytest.raises(LLMBusy):
+            await complete_structured(MESSAGES, Extraction, platform_cfg(), gate_class=GateClass.job_backfill)
+        assert other_holds.is_set()
+        assert len(server.chats) == 1
+        assert llm_provider.structured_stats == {}
+        assert await gate.holder_count() == 1  # only the other caller
+        assert await gate.waiter_count() == 0  # our repair's waiter entry is gone
+    finally:
+        finish.set()
+        await asyncio.gather(*tasks)
+    assert await gate.holder_count() == 0
 
 
 async def test_busy_gate_sends_no_request(serve, gate):
