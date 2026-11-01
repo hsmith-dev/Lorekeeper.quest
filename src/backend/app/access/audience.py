@@ -116,18 +116,21 @@ def _meet(a: Audience, b: Audience) -> Audience:
 def most_restrictive(*audiences: Audience | Iterable[Audience]) -> Audience:
     """The meet of the given Audiences (varargs, or one iterable). At least
     one is required: "no sources" is a caller decision (derived rows → GM)."""
-    flat: list[Audience] = []
+    flat: list[Any] = []
     for a in audiences:
         if isinstance(a, Audience):
             flat.append(a)
+        elif isinstance(a, (str, bytes)) or not isinstance(a, Iterable):
+            raise TypeError(f"most_restrictive: expected Audiences, got {a!r}")
         else:
             flat.extend(a)
+    for a in flat:
+        if not isinstance(a, Audience):
+            raise TypeError(f"most_restrictive: expected Audiences, got {a!r}")
     if not flat:
         raise ValueError("most_restrictive: needs at least one Audience")
     out = flat[0]
     for a in flat[1:]:
-        if not isinstance(a, Audience):
-            raise TypeError(f"most_restrictive: expected Audiences, got {a!r}")
         out = _meet(out, a)
     return out
 

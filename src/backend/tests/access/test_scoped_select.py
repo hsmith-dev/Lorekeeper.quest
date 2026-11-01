@@ -252,6 +252,46 @@ async def test_scoped_select_multi_per_role(db, scene):
         scoped_select_multi(SessionPlan, {ev4.a.campaign_id: "player"})
 
 
+async def test_scoped_select_multi_derived_matches_scoped_select_per_campaign(db, scene):
+    """Player in A and C, GM of B: for a derived model (SourceChunk), each
+    Campaign's rows from scoped_select_multi equal scoped_select for that
+    Campaign's ctx, GM Campaigns included (parent EXISTS applied there too)."""
+    from tests.ev4.fixtures import create_user, seed_canary_campaign
+
+    ev4 = scene.ev4
+    cross = scene.actors["cross_gm_player"]
+    c_owner = await create_user(db, "c_owner")
+    c = await seed_canary_campaign(db, c_owner)
+    await ev4.make_member(role="player", campaign_id=c.campaign_id, user=await db.get(type(c_owner), cross.user_id))
+    a, b = ev4.a.campaign_id, ev4.b.campaign_id
+
+    async def doc_with_chunk(campaign_id, owner_id, visibility, chunk_campaign=None):
+        doc = SourceDocument(user_id=owner_id, campaign_id=campaign_id, title="t", filename="f.pdf",
+                             visibility=visibility)
+        db.add(doc)
+        await db.flush()
+        db.add(SourceChunk(source_document_id=doc.id, user_id=owner_id, campaign_id=chunk_campaign or campaign_id,
+                           chunk_index=0, content="c"))
+
+    # A visible-parent chunk in each Player Campaign, a hidden one in A.
+    await doc_with_chunk(a, ev4.a.owner_id, "party")
+    await doc_with_chunk(a, ev4.a.owner_id, "gm")
+    await doc_with_chunk(c.campaign_id, c_owner.id, "party")
+    # A chunk filed under B whose document is in A: hidden even to B's GM by scoped_select.
+    await doc_with_chunk(a, ev4.a.owner_id, "party", chunk_campaign=b)
+    await db.commit()
+
+    roles = await role_map(db, cross.user_id)
+    assert roles == {a: "player", b: "gm", c.campaign_id: "player"}
+    rows = (await db.execute(scoped_select_multi(SourceChunk, roles))).scalars().all()
+    for cid in roles:
+        per_campaign = {r.id for r in rows if r.campaign_id == cid}
+        ctx = await ctx_for(db, cross.user_id, cid)
+        single = {r.id for r in (await db.execute(scoped_select(SourceChunk, ctx))).scalars().all()}
+        assert per_campaign == single, (cid, roles[cid])
+        assert single, f"no visible chunk in {roles[cid]} Campaign {cid}"
+
+
 async def test_audience_ctx_on_real_ctxs(db, scene):
     a = scene.ev4.a.campaign_id
     c = scene.ctxs

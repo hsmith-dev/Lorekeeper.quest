@@ -15,10 +15,11 @@ a system ctx by hand outside app/access/ (`ACTOR_SYSTEM`, `actor="system"`,
 or a `system_reason=` other than None). Tests are not
 scanned.
 
-E0-Access.3 part, reduced ctxs: a `read_only=` keyword (anything but a
-literal False) outside app/access/ fails. A read-only ctx is a reduced ctx
+E0-Access.3 part, reduced ctxs: any `read_only=` keyword outside
+app/access/ fails, whatever its value. A read-only ctx is a reduced ctx
 (`audience_ctx`, the only constructor), so building one by hand elsewhere
-would bypass its narrowing rules.
+would bypass its narrowing rules, and `read_only=False` would turn a
+reduced ctx (e.g. as_user(other)) back into a writable one.
 
 E0-Access.5 adds the scoped-query ratchet here (`select(<registered
 model>)`, `db.get(<registered model>)`, raw SQL on registered tables and
@@ -124,10 +125,10 @@ class _SystemVisitor(ast.NodeVisitor):
             if (node.arg == "actor" and value == "system") or (node.arg == "system_reason" and value is not None):
                 self.found.append(Violation(self.rel, getattr(node, "lineno", 0) or 0,
                                             f"sets `{node.arg}=` (builds a system ctx without as_system)"))
-            if node.arg == READ_ONLY_KEYWORD and value is not False:
+            if node.arg == READ_ONLY_KEYWORD:
                 self.found.append(Violation(self.rel, getattr(node, "lineno", 0) or 0,
-                                            f"sets `{READ_ONLY_KEYWORD}=` (builds a reduced ctx without "
-                                            "audience_ctx)", READ_ONLY_HINT))
+                                            f"sets `{READ_ONLY_KEYWORD}=` (builds or widens a reduced ctx "
+                                            "without audience_ctx)", READ_ONLY_HINT))
         self.generic_visit(node)
 
     def visit_alias(self, node: ast.alias) -> None:

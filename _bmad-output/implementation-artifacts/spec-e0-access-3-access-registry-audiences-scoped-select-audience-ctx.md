@@ -2,14 +2,56 @@
 title: 'E0-Access.3: Access registry, Audiences, scoped_select and audience_ctx'
 type: 'feature'
 created: '2026-11-01'
-status: 'in-progress'
+status: 'done'
 baseline_revision: '61abdbaea6e82be7c59c94e35d739c6d27c10d0d'
 review_loop_iteration: 0
-followup_review_recommended: false
+followup_review_recommended: true
 context:
   - '{project-root}/_bmad-output/planning-artifacts/epics.md'
 warnings: ['oversized']
-deferred: []
+deferred:
+  - summary: >-
+      Preview responses carry no `Vary: X-Lorekeeper-Preview` (or no-store), so a browser, service-worker or proxy cache could serve a GM body to a preview request of the same URL or the other way round.
+    evidence: |-
+      Nothing in app/ sets Vary; the same GET now varies on a request header. PreviewContext resets react-query, but the PWA service worker or an HTTP cache is not covered. Needs a response-header decision once real read routes adopt require_campaign (E0-Access.4/.5).
+    location: >-
+      src/backend/app/access/context.py:_narrow_for_preview
+    severity: medium
+  - summary: >-
+      Routes still on the deprecated get_campaign_with_access / accessible_campaign_ids ignore the preview header, so a previewing GM sees GM data and can write there.
+    evidence: |-
+      Only require_campaign / require_campaign_for narrow; E0-Access.5 moves every caller onto them. The GM is the real user, so nothing leaks to a Player, but preview is incomplete until then.
+    location: >-
+      src/backend/app/api/deps.py
+    severity: medium
+  - summary: >-
+      read_only on a reduced ctx is not enforced on writes beyond the preview 404.
+    evidence: |-
+      can_write (E0-Access.6) is the write gate; until then a service handed an audience_ctx ctx is not refused. No production code builds one yet.
+    location: >-
+      src/backend/app/access/context.py:CampaignContext
+    severity: medium
+  - summary: >-
+      scoped_select_multi has no preview flag; cross-Campaign lists in a previewing request are not narrowed.
+    evidence: |-
+      Preview is per Campaign (RC-7 names require_campaign); a cross-Campaign list has no single ctx. Decide with E7.7 whether previews include cross-Campaign lists.
+    location: >-
+      src/backend/app/access/context.py:scoped_select_multi
+    severity: low
+  - summary: >-
+      The import-time completeness check recognises Campaign-scoped tables only by a campaign_id column or the hard-coded tags/journal_tags list; a future FK-only child table could land unregistered.
+    evidence: |-
+      _REACHED_TABLES is hard-coded. derived_sources (E0-Jobs) should be registered or added to the list when it lands.
+    location: >-
+      src/backend/app/access/registry.py:_check_complete
+    severity: low
+  - summary: >-
+      The CI-11 property test exercises scoped_select only, not scoped_select_multi.
+    evidence: |-
+      scoped_select_multi is covered by EV-4 scenario tests (now including a multi-Player-Campaign derived case); a property extension would make it airtight.
+    location: >-
+      src/backend/tests/access/test_registry_property.py
+    severity: low
 ---
 
 <intent-contract>
@@ -82,6 +124,52 @@ deferred: []
 
 ## Review Triage Log
 
+### 2026-11-01 — Review pass
+- verdicts: 42 findings — high 0, medium 6, low 21, false 15, maybe-false 0 (intent-alignment divergences counted as 8 findings)
+- findings:
+  - `[medium]` `[patch]` (blind) `dataclasses.replace(reduced, read_only=False)` passes CI-8 — the rule now flags every `read_only=` outside app/access/ (False included); planted test added; gates.yml comment fixed.
+  - `[low]` `[reject]` (blind) `**{"read_only": True}`, positional or `object.__setattr__` bypass CI-8 — needs deliberate obfuscation; same stance as E0-Access.2's as_system rule.
+  - `[medium]` `[defer]` (blind) read_only not enforced on writes — can_write is E0-Access.6; deferred.
+  - `[medium]` `[defer]` (blind) No `Vary: X-Lorekeeper-Preview` — deferred until real read routes adopt require_campaign.
+  - `[low]` `[reject]` (blind) `scoped_select_multi(user_id=)` can override `roles.user_id` — the explicit argument wins by design; no caller passes both.
+  - `[low]` `[patch]` (blind) scoped_select_multi GM branch skipped the derived parent EXISTS — derived models now get per-Campaign branches for GM Campaigns too; covered by the new multi-Campaign test.
+  - `[low]` `[defer]` (blind) Property test does not cover scoped_select_multi — deferred (EV-4 scenario tests cover it).
+  - `[low]` `[defer]` (blind) Completeness check misses FK-only child tables — deferred.
+  - `[low]` `[reject]` (blind) `as_user(u)` does not check membership — audience_ctx is sync by contract; an Owner(non-member) ctx sees only party rows.
+  - `[low]` `[reject]` (blind) Property test not derandomized and runs in two jobs — Hypothesis prints the falsifying example; total CI cost is small.
+  - `[low]` `[reject]` (blind) Oracle thin for Tag and ctx pool — JournalTag's Python side is checked independently in its own run; six planted SQL bugs were all caught.
+  - `[low]` `[patch]` (blind) most_restrictive does not type-check the first element — every element checked; str and AnyOf rejected; test added.
+  - `[false]` `[reject]` (blind) audience_ctx raises HTTP 404 for non-request callers — same contract as ctx_for (E0-Access.2 AC: "raises not_found()").
+  - `[false]` `[reject]` (blind) Spec stale — the review runs before finalization; updated now.
+  - `[low]` `[reject]` (blind) No test of the (min_role, preview) dependency cache key — the `/me` preview test fails if the keys collide.
+  - `[low]` `[reject]` (edge) Tag audience_of ignores the Campaign — documented contract: callers pass the ctx Campaign's reaching rows; scoped_select is the enforcement point.
+  - `[low]` `[reject]` (edge) Oracle pre-filters Tag reach by Campaign — same contract as above.
+  - `[low]` `[reject]` (edge) Orphan parent gives GM in Python but hidden in SQL — FKs cascade, so orphans cannot exist.
+  - `[low]` `[patch]` (edge) DERIVED_REGISTRY dict missing keys or str derive_from — one normalizer raises TypeError/ValueError; tests added.
+  - `[low]` `[patch]` (edge) register_derived with a str derive_from — same fix.
+  - `[low]` `[reject]` (edge) A source with no ref_kind skips the derive_from check — the check is an aid; the source still contributes its Audience.
+  - `[low]` `[reject]` (edge) Mapping source with neither key gives a confusing error — it still fails loudly.
+  - `[low]` `[reject]` (edge) parents as a set or generator — documented as list/tuple; fails loudly.
+  - `[low]` `[reject]` (edge) Transient row with visibility unset — audience_of reads stored rows.
+  - `[low]` `[patch]` (edge) most_restrictive first element — same fix as the blind row.
+  - `[false]` `[reject]` (edge) covers() with AnyOf — visible_to is the AnyOf entry point; covers takes lattice points.
+  - `[low]` `[reject]` (edge) CI-8 bypass via `**`/setattr — same as the blind row.
+  - `[low]` `[reject]` (edge) read_only= false positives on unrelated calls — none exist in app/; the message names the fix.
+  - `[medium]` `[defer]` (edge) Preview ignored on deprecated-helper routes — E0-Access.5; deferred.
+  - `[low]` `[defer]` (edge) scoped_select_multi ignores preview — deferred to the E7.7 decision.
+  - `[false]` `[reject]` (edge) scoped_get on a composite PK raises TypeError — a programming error failing loudly; JournalTag is never fetched by id.
+  - `[false]` `[reject]` (edge) require_campaign_for in preview returns a ctx for a gm row — the route's scoped_get with the narrowed ctx then 404s, as for a real Player.
+  - `[false]` `[reject]` (edge, claim) audience_of and visible_clause disagree across Campaigns — scoped_select applies the Campaign scope; audience_of's contract takes in-Campaign parents.
+  - `[medium]` `[patch]` (verification-gap) Per-Campaign derived branch of scoped_select_multi untested with two Player Campaigns — test added (Player in A and C, GM of B, a cross-filed chunk).
+  - `[false]` `[reject]` (intent) Leak tests at function level; no route uses scoped_select yet — the story builds the library; E0-Access.4/.5 move routes.
+  - `[false]` `[reject]` (intent) GM-only fields (shorthand, notes) not stripped — field projection is E0-Access.4 `project`; the registry declares gm_fields for it.
+  - `[false]` `[reject]` (intent) anon actor built via audience_ctx, not share_ctx — share_ctx is E0-Access.4.
+  - `[false]` `[reject]` (intent) Preview only reaches /me in production — RC-7 is require_campaign; routes adopt it in E0-Access.5.
+  - `[false]` `[reject]` (intent) A fourth `membership` class — the story itself lists campaigns, members and tokens as "membership-scoped".
+  - `[false]` `[reject]` (intent) scoped_select raises at call time, completeness at import — both are implemented; the import check covers "an unregistered model raises at import time".
+  - `[false]` `[reject]` (intent) audience_ctx needs `by=` and lets a Player narrow to anon/member — the AC needs the caller; narrowing is safe and matches "by a user for themself".
+  - `[false]` `[reject]` (intent) Player audience Owner(self) vs "Members plus Owner(self)" — the same readable set in the lattice.
+
 ## Design Notes
 
 `membership` is a fourth registration form for the three tables the story calls "membership-scoped" (plus `character_sheet_templates`, a layout every sheet viewer needs): a constant Audience per table, management rules stay in routes. `tags` is reached through entries, so its Audience is an *any-of* (`AnyOf`) over its visible `journal_tags` in the ctx's Campaign rather than a single lattice point (a join would let Player c see a tag reached only by Players a and b's private entries). `audience_of` on derived rows takes `parents=` (objects or Audiences) when the relationship is not loaded. Preview narrowing treats every non-GET/HEAD/OPTIONS method as a write.
@@ -105,3 +193,27 @@ row = await scoped_get(db, SessionPlan, ctx, plan_id)   # not_found() if hidden 
 **Commands:**
 - `gh pr checks <n> --repo hsmith-dev/Lorekeeper.quest --watch` -- expected: backend-tests, gates, frontend-ci, licence checks green.
 - `python -m pytest -q scripts/test_check_scoped_queries.py && python scripts/check_scoped_queries.py` -- expected: pass locally.
+
+## Auto Run Result
+
+Status: done
+
+**Summary:** Full Audience lattice (`covers`, `most_restrictive`, `AnyOf`, `visible_to`, `stored_audience`, `field_audience`, `mention_audience`) in `app/access/audience.py`. New `app/access/registry.py` registers every current table (stored / derived / always_gm / membership; `feedback` UNSCOPED) with `visible_clause`, `audience_of`, `scoped_select`, `scoped_get`, `DERIVED_REGISTRY`/`register_derived` and an import-time completeness check. `audience_ctx` is the only reduced-ctx constructor (narrow-only, `read_only=True`). `X-Lorekeeper-Preview: member` narrows a GM in `require_campaign`/`require_campaign_for` (writes 404; `/me` opts out with `preview=False`). `RoleMap` plus per-Role `scoped_select_multi`. CI-8 flags `read_only=` outside app/access/; the CI-11 hypothesis property test (200 examples per model) is wired into gates.yml.
+
+**Files changed:**
+- `src/backend/app/access/{audience,registry,context,__init__}.py` -- lattice, registry, reduced ctxs, preview, exports.
+- `src/backend/app/api/routes/members.py` -- `/me` reports the real Role in preview.
+- `scripts/check_scoped_queries.py`, `scripts/test_check_scoped_queries.py`, `.github/workflows/gates.yml` -- CI-8 `read_only=` rule, CI-11 step.
+- `src/backend/tests/access/{test_audience,test_registry_property,test_scoped_select,test_context}.py` -- new and adjusted tests.
+- `src/backend/tests/ev4/{fixtures,test_fixtures}.py`, `seeds/ev4_canary.json` -- the seeded canary sheet is `visibility: gm`.
+- `src/backend/requirements-dev.txt`, `licenses/register.yaml` -- hypothesis 6.112.1 (MPL-2.0), attrs 24.2.0 (MIT).
+
+**Review:** 42 findings. Patched: CI-8 `read_only=False` (medium), multi-Campaign derived test (medium), scoped_select_multi derived GM branch (low), most_restrictive validation (low), DERIVED_REGISTRY entry validation (low). 6 deferred (frontmatter). Every rejection and its reason is in the triage log.
+
+**Follow-up review recommended:** true -- two medium entries patched on a first pass. Named risk: the widened CI-8 `read_only=` rule may flag a legitimate future `read_only=` keyword outside app/access/ (E0-Access.4's share_ctx lives inside app/access/, so it is unaffected).
+
+**Verification:** PR #44 CI was green on the first push (backend tests, gates static + database including CI-11, frontend, licence checks). Locally (scratch pgvector) the full backend suite passed 826 (3 errors in tests/test_nlp.py: spaCy model not installed locally). After the patches, tests/access (123) and scripts/test_check_scoped_queries.py (28) pass and `check_scoped_queries.py` is clean; CI re-runs on the patch push.
+
+**Needs desktop verification:** nothing specific (no Ollama, GPU or compose surface). Optional: the builder-brief backend command limited to `tests/access tests/ev4 tests/test_members_me.py`.
+
+**Residual risks:** preview narrows only routes on `require_campaign` (just `/me`, which opts out) until E0-Access.5; no `Vary` header yet; reduced-ctx write refusal waits for `can_write` (E0-Access.6).

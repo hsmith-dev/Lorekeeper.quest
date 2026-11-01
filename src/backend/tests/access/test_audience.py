@@ -376,3 +376,41 @@ def test_audience_of_rows():
     chunk.document = doc
     assert audience_of(chunk) == GM_AUDIENCE
     assert audience_of(chunk, parents=[PUBLIC]) == PUBLIC
+
+
+@pytest.mark.parametrize("args", [
+    (AnyOf([PUBLIC]),),               # first position, not only later ones
+    (AnyOf([PUBLIC]), PUBLIC),
+    (PUBLIC, AnyOf([PUBLIC])),
+    ("public",),                      # a bare str is not iterated char by char
+    ([PUBLIC, "gm"],),
+    ([AnyOf([GM_AUDIENCE])],),
+    (None,),
+    (3,),
+])
+def test_most_restrictive_rejects_non_audiences(args):
+    with pytest.raises(TypeError):
+        most_restrictive(*args)
+
+
+@pytest.mark.parametrize("entry, error", [
+    ({"derived_type": "bad_str", "derive_from": "live_segment"}, TypeError),
+    ({"derived_type": "no_from"}, ValueError),
+    ({"derive_from": ["live_segment"]}, ValueError),
+    ({"derived_type": "empty_list", "derive_from": []}, ValueError),
+    ({"derived_type": "bad_kind", "derive_from": [3]}, TypeError),
+    ({"derived_type": "", "derive_from": ["x"]}, TypeError),
+    ("not-an-entry", TypeError),
+])
+def test_malformed_derived_registry_entries_fail_clearly(derived_registry, entry, error):
+    derived_registry.append(entry)
+    with pytest.raises(error):
+        audience_of(SimpleNamespace(derived_type="anything", derived_sources=[]))
+
+
+def test_register_derived_rejects_a_bare_str(derived_registry):
+    with pytest.raises(TypeError):
+        register_derived("recap", "live_segment")
+    with pytest.raises(TypeError):
+        register_derived("recap", [None])
+    assert derived_registry == []

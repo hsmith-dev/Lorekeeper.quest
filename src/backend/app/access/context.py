@@ -382,16 +382,24 @@ def scoped_select_multi(model: type, roles: Mapping[uuid.UUID, str], user_id: uu
     def player_ctx(cid: uuid.UUID) -> CampaignContext:
         return CampaignContext(campaign_id=cid, user_id=uid, role=PLAYER, is_owner=False, audience=owner(uid))
 
+    def gm_ctx(cid: uuid.UUID) -> CampaignContext:
+        return CampaignContext(campaign_id=cid, user_id=uid, role=GM, is_owner=False,
+                               audience=ctx_audience(GM, uid))
+
     branches = []
+    if isinstance(reg, registry.Derived):
+        # A derived predicate is scoped to one Campaign (its parent EXISTS),
+        # for GMs too: one branch per Campaign, exactly as scoped_select.
+        for cid in gm_ids:
+            branches.append(sa.and_(model.campaign_id == cid, registry.visible_clause(model, gm_ctx(cid))))
+        for cid in player_ids:
+            branches.append(sa.and_(model.campaign_id == cid, registry.visible_clause(model, player_ctx(cid))))
+        return stmt.where(sa.or_(*branches))
+    # Stored / always_gm / membership predicates do not depend on the Campaign
+    # (and are true() for a GM).
     if gm_ids:
         branches.append(model.campaign_id.in_(gm_ids))
     if player_ids:
-        if isinstance(reg, registry.Derived):
-            # A derived predicate is scoped to one Campaign: one branch each.
-            for cid in player_ids:
-                branches.append(sa.and_(model.campaign_id == cid, registry.visible_clause(model, player_ctx(cid))))
-        else:
-            # Stored / always_gm / membership predicates do not depend on the Campaign.
-            branches.append(sa.and_(model.campaign_id.in_(player_ids),
-                                    registry.visible_clause(model, player_ctx(player_ids[0]))))
+        branches.append(sa.and_(model.campaign_id.in_(player_ids),
+                                registry.visible_clause(model, player_ctx(player_ids[0]))))
     return stmt.where(sa.or_(*branches))

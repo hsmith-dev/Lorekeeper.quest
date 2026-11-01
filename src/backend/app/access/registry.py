@@ -319,10 +319,37 @@ class DerivedType:
 DERIVED_REGISTRY: list[DerivedType | dict] = []
 
 
+def _normalize_derived(derived_type: Any, derive_from: Any) -> DerivedType:
+    """One validated DerivedType: a non-empty str name and a non-empty list of
+    str ref_kinds (a bare str is rejected, not split into characters)."""
+    if not isinstance(derived_type, str) or not derived_type:
+        raise TypeError(f"derived type: derived_type must be a non-empty str, got {derived_type!r}")
+    if isinstance(derive_from, (str, bytes)) or not isinstance(derive_from, Iterable):
+        raise TypeError(f"derived type {derived_type!r}: derive_from must be a list of ref_kinds, "
+                        f"got {derive_from!r}")
+    kinds = tuple(derive_from)
+    if not kinds:
+        raise ValueError(f"derived type {derived_type!r}: derive_from needs at least one ref_kind")
+    for k in kinds:
+        if not isinstance(k, str) or not k:
+            raise TypeError(f"derived type {derived_type!r}: ref_kind must be a non-empty str, got {k!r}")
+    return DerivedType(derived_type, kinds)
+
+
+def _derived_entry(raw: Any) -> DerivedType:
+    """A DERIVED_REGISTRY entry (DerivedType or dict) as a validated DerivedType."""
+    if isinstance(raw, DerivedType):
+        return _normalize_derived(raw.derived_type, raw.derive_from)
+    if isinstance(raw, Mapping):
+        missing = {"derived_type", "derive_from"} - set(raw)
+        if missing:
+            raise ValueError(f"DERIVED_REGISTRY entry {dict(raw)!r} is missing {sorted(missing)}")
+        return _normalize_derived(raw["derived_type"], raw["derive_from"])
+    raise TypeError(f"DERIVED_REGISTRY entries are DerivedType or dict, got {raw!r}")
+
+
 def register_derived(derived_type: str, derive_from: Iterable[str]) -> DerivedType:
-    entry = DerivedType(str(derived_type), tuple(derive_from))
-    if not entry.derive_from:
-        raise ValueError("register_derived: derive_from needs at least one ref_kind")
+    entry = _normalize_derived(derived_type, derive_from)
     if _derived_type(entry.derived_type, missing_ok=True) is not None:
         raise ValueError(f"register_derived: {entry.derived_type!r} is already registered")
     DERIVED_REGISTRY.append(entry)
@@ -331,8 +358,7 @@ def register_derived(derived_type: str, derive_from: Iterable[str]) -> DerivedTy
 
 def _derived_type(name: str, *, missing_ok: bool = False) -> DerivedType | None:
     for raw in DERIVED_REGISTRY:
-        entry = raw if isinstance(raw, DerivedType) else DerivedType(raw["derived_type"],
-                                                                      tuple(raw["derive_from"]))
+        entry = _derived_entry(raw)
         if entry.derived_type == name:
             return entry
     if missing_ok:

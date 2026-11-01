@@ -137,6 +137,8 @@ def test_unparseable_file_fails(tmp_path):
     ("api/routes/r.py", "import dataclasses\ndef r(ctx):\n    return dataclasses.replace(ctx, read_only=True)\n", 3),
     ("services/q.py", "def r(ctx, flag):\n    return dataclasses.replace(ctx, read_only=flag)\n", 2),
     ("services/q.py", "def r(ctx):\n    return dataclasses.replace(ctx, read_only=None)\n", 2),
+    # Widening a reduced ctx back to writable (e.g. as_user(other) from a GM).
+    ("services/q.py", "def r(ctx):\n    return dataclasses.replace(ctx, read_only=False)\n", 2),
 ])
 def test_read_only_outside_access_fails(tmp_path, rel, body, line):
     found = violations(tmp_path, {rel: body})
@@ -144,9 +146,8 @@ def test_read_only_outside_access_fails(tmp_path, rel, body, line):
     assert "audience_ctx" in str(found[0]) and "read_only=" in str(found[0])
 
 
-def test_read_only_false_and_inside_access_pass(tmp_path):
+def test_read_only_inside_access_and_strings_pass(tmp_path):
     assert violations(tmp_path, {
-        "services/q.py": "def r(ctx):\n    return dataclasses.replace(ctx, read_only=False)\n",
         "access/reduced.py": "def r(ctx):\n    return dataclasses.replace(ctx, read_only=True)\n",
         "services/s.py": "KIND = 'read_only'\nx = {'read_only': True}\n",
     }) == []
