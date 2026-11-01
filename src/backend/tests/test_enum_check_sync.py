@@ -2,28 +2,59 @@
 
 AD-9: apart from the `visibility` and `campaign_role` PG enums, every closed
 set is a text column with a CHECK generated from a StrEnum in
-app/domain/enums.py. Register each (StrEnum, table, column) pair in
-ENUM_CHECKS in the PR that adds the column; this test then reads the CHECK's
-values from pg_constraint on the migrated test database and fails if they
-differ from the enum's members (a member added to the enum without a
-migration, or the reverse).
+app/domain/enums.py (check_sql / check_expr). Register each (StrEnum, table,
+column) pair in ENUM_CHECKS in the PR that adds the column; this test then
+reads the CHECK's values from pg_constraint on the migrated test database and
+fails if they differ from the enum's members (a member added to the enum
+without a migration, or the reverse).
 
-The registry is empty until E0-WorldCore creates app/domain/enums.py, so the
-comparison passes vacuously; the reader is exercised now by a self-test on a
-temporary table.
+Every StrEnum defined in app/domain/enums.py must be accounted for: either
+registered in ENUM_CHECKS, or listed in ENUM_CHECKS_PENDING with the story
+that adds its CHECK column. When that story lands, its author moves the enum
+from ENUM_CHECKS_PENDING to ENUM_CHECKS and nothing else changes. The reader
+is also exercised by a self-test on a temporary table, and
+tests/domain/test_enums.py round-trips every enum's check_sql through it.
 """
 from __future__ import annotations
 
+import inspect
 import re
 from enum import StrEnum
 
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
 
-# (StrEnum class, table, column). Example, once app/domain/enums.py exists:
-#   from app.domain.enums import EntityType
+from app.domain import enums as domain_enums
+from app.domain.enums import (
+    CharacterKind,
+    EntityChangeOp,
+    EntityType,
+    MentionOrigin,
+    MentionSourceField,
+    TagSourceField,
+)
+
+# (StrEnum class, table, column), added in the PR that creates the column, e.g.
 #   (EntityType, "entities", "type"),
 ENUM_CHECKS: list[tuple[type[StrEnum], str, str]] = []
+
+# StrEnums in app/domain/enums.py whose CHECK column does not exist yet, with
+# the story that adds it. Move an entry to ENUM_CHECKS in that story's PR.
+ENUM_CHECKS_PENDING: dict[type[StrEnum], str] = {
+    EntityType: "E0-WorldCore.2",          # entities.type
+    CharacterKind: "E0-WorldCore.2",       # entities.kind
+    EntityChangeOp: "E0-WorldCore.2",      # entity_changes.op
+    MentionOrigin: "E0-WorldCore.2",       # entity_mentions.origin
+    MentionSourceField: "E0-WorldCore.2",  # entity_mentions.source_field
+    TagSourceField: "E0-Access.1",         # journal_tags.source_field
+}
+
+
+def domain_strenums() -> list[type[StrEnum]]:
+    """The StrEnum classes defined (not just imported) in app.domain.enums."""
+    return [obj for _, obj in inspect.getmembers(domain_enums, inspect.isclass)
+            if issubclass(obj, StrEnum) and obj is not StrEnum
+            and obj.__module__ == domain_enums.__name__]
 
 _CHECKS_ON_COLUMN = sa.text(
     """
@@ -81,6 +112,25 @@ def test_registry_entries_are_strenums():
         assert issubclass(enum_cls, StrEnum), f"{enum_cls!r} for {table}.{column} is not a StrEnum"
     pairs = [(t, c) for _, t, c in ENUM_CHECKS]
     assert len(pairs) == len(set(pairs)), "a (table, column) is registered twice in ENUM_CHECKS"
+
+
+def test_every_domain_enum_is_registered():
+    registered = [enum_cls for enum_cls, _, _ in ENUM_CHECKS]
+    defined = domain_strenums()
+    assert defined, "found no StrEnum in app.domain.enums"
+    unaccounted = [e.__name__ for e in defined
+                   if e not in registered and e not in ENUM_CHECKS_PENDING]
+    assert not unaccounted, (
+        f"StrEnums in app/domain/enums.py with no CI-10 entry: {unaccounted}. Register each in "
+        "ENUM_CHECKS with the column its CHECK lives on, or in ENUM_CHECKS_PENDING with the story "
+        "that adds that column (AD-9)")
+    both = [e.__name__ for e in registered if e in ENUM_CHECKS_PENDING]
+    assert not both, f"in both ENUM_CHECKS and ENUM_CHECKS_PENDING (remove the pending entry): {both}"
+    stray = [e.__name__ for e in ENUM_CHECKS_PENDING if e not in defined]
+    assert not stray, f"ENUM_CHECKS_PENDING lists enums not defined in app/domain/enums.py: {stray}"
+    for enum_cls, story in ENUM_CHECKS_PENDING.items():
+        assert re.fullmatch(r"E\d+(-[A-Za-z]+)?\.\d+", story), (
+            f"ENUM_CHECKS_PENDING[{enum_cls.__name__}] = {story!r}: name the story that adds the column")
 
 
 async def test_enum_checks_match(db: AsyncSession):
