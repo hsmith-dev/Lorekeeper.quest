@@ -88,3 +88,7 @@ Stories were merged on green GitHub CI while the desktop was offline (owner deci
 ## E0-QA.9 (OCR half) — RapidOCR replaces EasyOCR; python-bidi gone (PR #46)
 - [x] ~~OCR quality vs easyocr~~ — measured on the desktop in the built ml images (54 synthetic images, 8 handwriting fonts): handwriting CER 0.108 → 0.011, photo 0.032 → 0.000, printed 0.015 → 0.000; latency 2.3 s → 3.3 s; OCR RSS +374 → +230 MB
 - [ ] Real phone photos of handwritten session notes: compare `/v1/ocr` output against what the GM actually wrote; if latency matters, try the PP-OCRv6 tiny models (handwriting CER 0.029, ~1.6 s)
+
+## E0-QA.9 (PDF half) — WeasyPrint replaces fpdf2 (PR #47)
+- [x] ~~Parity on a real export~~ — desktop, seeded demo campaign: 13 pages both, same sections/order; non-Latin names ("Ōkami", "Þórr", "Ведьма") now print instead of "?"; backend image +54 MB; in-image licence scan 0 violations both editions
+- [ ] Known gaps: DejaVu lacks CJK/emoji/Thai glyphs (bundled fonts are E8.2); Pyphen hyphenation dictionary licences unreviewed
