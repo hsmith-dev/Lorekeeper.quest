@@ -7,6 +7,11 @@ module restores a seeded dump taken at SNAPSHOT_REVISION
 upgrades it to head, and checks that no rows were lost and that each
 revision's data changes landed (POST_UPGRADE_CHECKS).
 
+While SNAPSHOT_REVISION is still the head, `upgrade head` runs no revisions
+and the row-count and post-upgrade checks pass trivially. They start to bite
+when the first later revision (F1-core) lands. The a3e7c1f9d258 round trip
+below does exercise a real data migration on the seeded rows today.
+
 pytest collects tests/migrations/ before tests/test_*.py, so the module
 fixture rebuilds the clean session schema in teardown.
 """
@@ -111,6 +116,16 @@ def post_upgrade_check(revision: str) -> Callable[[Check], Check]:
     return register
 
 
+async def _shorthand_word_matches(conn: AsyncConnection) -> int:
+    return await conn.scalar(sa.text(
+        "SELECT count(*) FROM journal_entries "
+        "WHERE narrative_tsv @@ plainto_tsquery('english', 'brackenford')"
+    ))
+
+
+# a3e7c1f9d258 put shorthand into narrative_tsv. This keeps later revisions
+# (e.g. F1-core's party_tsv work) from silently dropping it again. The
+# migration's own backfill is tested by test_a3e7c1f9d258_backfills_shorthand.
 @post_upgrade_check("a3e7c1f9d258")
 async def shorthand_only_word_matches_narrative_tsv(conn: AsyncConnection) -> None:
     # "brackenford" is in entry 1's shorthand, not its narrative.
@@ -118,10 +133,7 @@ async def shorthand_only_word_matches_narrative_tsv(conn: AsyncConnection) -> No
         "SELECT count(*) FROM journal_entries WHERE narrative ILIKE '%brackenford%'"
     ))
     assert narrative_has_it == 0, "seed changed: the probe word must be shorthand-only"
-    matches = await conn.scalar(sa.text(
-        "SELECT count(*) FROM journal_entries "
-        "WHERE narrative_tsv @@ plainto_tsquery('english', 'brackenford')"
-    ))
+    matches = await _shorthand_word_matches(conn)
     assert matches == 1, f"a3e7c1f9d258: shorthand-only word matched {matches} entries, expected 1"
 
 
@@ -173,7 +185,7 @@ async def _run_check(url: str, check: Check) -> None:
         await engine.dispose()
 
 
-async def _fk_rules(url: str) -> dict[str, str]:
+async def _fk_rules(url: str) -> dict[str, set[str]]:
     engine = create_async_engine(url)
     try:
         async with engine.connect() as conn:
@@ -185,7 +197,10 @@ async def _fk_rules(url: str) -> dict[str, str]:
                 " AND kcu.constraint_name = rc.constraint_name "
                 "WHERE rc.constraint_schema = 'public'"
             ))).all()
-            return {f"{t}.{c}": rule for t, c, rule in rows}
+            rules: dict[str, set[str]] = {}
+            for t, c, rule in rows:
+                rules.setdefault(f"{t}.{c}", set()).add(rule)
+            return rules
     finally:
         await engine.dispose()
 
@@ -251,7 +266,12 @@ def test_post_upgrade_checks_name_real_revisions():
 
 def test_fk_on_delete_actions(upgraded_snapshot):
     actual = asyncio.run(_fk_rules(TEST_DB_URL))
-    unexpected = sorted(f"{k} -> {v}" for k, v in actual.items() if EXPECTED_FK_ON_DELETE.get(k) != v)
+    # A set, so two FKs on one column with different rules can't hide each other.
+    unexpected = sorted(
+        f"{k} -> {'/'.join(sorted(v))}"
+        for k, v in actual.items()
+        if v != {EXPECTED_FK_ON_DELETE.get(k)}
+    )
     missing = sorted(k for k in EXPECTED_FK_ON_DELETE if k not in actual)
     assert not unexpected and not missing, (
         f"FKs whose ON DELETE rule is not in EXPECTED_FK_ON_DELETE: {unexpected}; "
@@ -259,3 +279,25 @@ def test_fk_on_delete_actions(upgraded_snapshot):
         "State each FK's ON DELETE rule in EXPECTED_FK_ON_DELETE "
         "(tests/migrations/test_upgrade_snapshot.py)."
     )
+
+
+async def _with_conn(url: str, fn):
+    engine = create_async_engine(url)
+    try:
+        async with engine.connect() as conn:
+            return await fn(conn)
+    finally:
+        await engine.dispose()
+
+
+def test_a3e7c1f9d258_backfills_shorthand(upgraded_snapshot):
+    # Runs a3e7c1f9d258's downgrade and upgrade on the seeded rows: before it,
+    # narrative_tsv held only the narrative, so the shorthand-only word is
+    # missing; its backfill adds it. Ends back at head with the same rows.
+    cfg = alembic_config(TEST_DB_URL)
+    command.downgrade(cfg, "8c1d5f3a92e7")
+    try:
+        assert asyncio.run(_with_conn(TEST_DB_URL, _shorthand_word_matches)) == 0
+    finally:
+        command.upgrade(cfg, "head")
+    assert asyncio.run(_with_conn(TEST_DB_URL, _shorthand_word_matches)) == 1

@@ -12,12 +12,47 @@ def test_clean_dump_strips_meta_commands_and_version_comments():
     raw = (
         "\\restrict abc123\n"
         "-- Dumped from database version 16.10\n"
-        "-- Dumped by pg_dump version 16.10\n"
-        "\n\n\n"
+        "-- Dumped by pg_dump version 17.6\n"
+        "SET transaction_timeout = 0;\n"
         "CREATE TABLE t (id int);\n"
         "\\unrestrict abc123\n"
     )
     assert make_snapshot.clean_dump(raw) == "CREATE TABLE t (id int);\n"
+
+
+def test_clean_dump_keeps_literal_contents():
+    # Multi-line string literals (blank lines, a leading backslash) survive.
+    raw = "INSERT INTO t VALUES ('a\n\n\n\\b');\n"
+    assert make_snapshot.clean_dump(raw) == raw
+
+
+def test_password_goes_to_env_not_argv():
+    uri, env = make_snapshot._libpq_target("postgresql+asyncpg://u:s3cret@h:5432/x_test")
+    assert "s3cret" not in uri
+    assert uri.startswith("postgresql://u@h:5432/x_test")
+    assert env == {"PGPASSWORD": "s3cret"}
+
+
+def test_refuses_unparseable_url_without_echoing_it(capsys):
+    assert make_snapshot.main(["--database-url", "not a url s3cret"]) == 2
+    assert "s3cret" not in capsys.readouterr().err
+
+
+def test_refuses_missing_pg_dump_before_touching_the_db(capsys):
+    # Port 1 is unreachable, so reaching the wipe would raise instead of returning 2.
+    code = make_snapshot.main([
+        "--database-url", "postgresql+asyncpg://u@127.0.0.1:1/x_test",
+        "--pg-dump", "definitely-not-pg_dump",
+    ])
+    assert code == 2
+    assert "not found" in capsys.readouterr().err
+
+
+def test_snapshot_revision_agrees_with_the_test_module():
+    from tests.migrations import test_upgrade_snapshot
+
+    assert make_snapshot.SNAPSHOT_REVISION == test_upgrade_snapshot.SNAPSHOT_REVISION
+    assert make_snapshot.DEFAULT_OUTPUT == test_upgrade_snapshot.SNAPSHOT_SQL
 
 
 def test_refuses_non_test_database(tmp_path, capsys):

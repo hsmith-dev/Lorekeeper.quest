@@ -5,7 +5,8 @@ revision SNAPSHOT_REVISION (never `head`, so the snapshot stays the baseline
 after later revisions land), inserts a small seed with fixed ids and
 timestamps, and writes a plain-SQL `pg_dump` of the result. The seed is raw
 SQL, independent of the ORM models, so re-running the script gives a
-byte-identical file.
+byte-identical file, given the same pg_dump major version (16, matching the
+pgvector/pgvector:pg16 server CI restores into).
 
 Run from src/backend, against a pgvector Postgres 16:
 
@@ -19,6 +20,7 @@ import argparse
 import asyncio
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -28,7 +30,7 @@ sys.path.insert(0, str(BACKEND_DIR))
 
 import sqlalchemy as sa  # noqa: E402
 from alembic import command  # noqa: E402
-from sqlalchemy.engine import make_url  # noqa: E402
+from sqlalchemy.engine import URL, make_url  # noqa: E402
 from sqlalchemy.ext.asyncio import create_async_engine  # noqa: E402
 
 from tests.conftest import (  # noqa: E402
@@ -49,7 +51,9 @@ MEMBER_B = "00000000-0000-4000-8000-000000000003"
 CAMPAIGN = "00000000-0000-4000-8000-000000000101"
 
 # Shorthand-only vocabulary: "brackenford" and "millwright" appear in entry 1's
-# shorthand but not its narrative (tests/migrations checks a3e7c1f9d258 indexed it).
+# shorthand but not its narrative. tests/migrations downgrades the snapshot past
+# a3e7c1f9d258 and upgrades it again to check that revision's backfill, and a
+# post-upgrade check keeps later revisions from dropping shorthand from the index.
 _ENTRIES = [
     (
         "00000000-0000-4000-8000-000000000201",
@@ -161,15 +165,20 @@ def seed_statements() -> list[str]:
     return stmts
 
 
-# psql meta-commands (pg_dump >= 16.10/17.6 wraps the dump in \restrict <random
-# key> ... \unrestrict) and the version comments vary between runs and
-# machines, and asyncpg cannot execute meta-commands.
-_STRIP_LINE = re.compile(r"^(\\|-- Dumped (from database|by pg_dump) version )")
+# pg_dump >= 16.10/17.6 wraps the dump in `\restrict <random key>` ...
+# `\unrestrict <key>` psql meta-commands, which change every run and which
+# asyncpg cannot execute. The version comments vary between machines. pg_dump 17+
+# also emits `SET transaction_timeout`, which a PG16 server rejects. Only whole
+# lines matching these are dropped, so data inside string literals is untouched.
+_STRIP_LINE = re.compile(
+    r"^(\\(un)?restrict \S+|-- Dumped (from database|by pg_dump) version .*"
+    r"|SET transaction_timeout = 0;)$"
+)
 
 
 def clean_dump(text: str) -> str:
     lines = [line for line in text.splitlines() if not _STRIP_LINE.match(line)]
-    return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip() + "\n"
+    return "\n".join(lines).strip() + "\n"
 
 
 async def _seed(url: str) -> None:
@@ -182,8 +191,19 @@ async def _seed(url: str) -> None:
         await engine.dispose()
 
 
-def _libpq_url(url: str) -> str:
-    return make_url(url).set(drivername="postgresql").render_as_string(hide_password=False)
+def _libpq_target(url: str) -> tuple[str, dict[str, str]]:
+    """A password-free libpq URI for pg_dump's argv, plus env carrying the password."""
+    parsed = make_url(url)
+    env = {"PGPASSWORD": parsed.password} if parsed.password else {}
+    # URL.set(password=None) keeps the password, so build a fresh URL without it.
+    uri = URL.create(
+        "postgresql",
+        username=parsed.username,
+        host=parsed.host,
+        port=parsed.port,
+        database=parsed.database,
+    ).render_as_string(hide_password=False)
+    return uri, env
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -206,10 +226,16 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
+    # Check before wiping anything.
+    if shutil.which(args.pg_dump) is None:
+        print(f"Refusing to run: {args.pg_dump!r} not found on PATH.", file=sys.stderr)
+        return 2
+
     asyncio.run(_reset_public_schema(args.database_url, with_vector=True))
     command.upgrade(alembic_config(args.database_url), SNAPSHOT_REVISION)
     asyncio.run(_seed(args.database_url))
 
+    uri, pg_env = _libpq_target(args.database_url)
     result = subprocess.run(
         [
             args.pg_dump,
@@ -217,12 +243,12 @@ def main(argv: list[str] | None = None) -> int:
             "--no-privileges",
             "--column-inserts",
             "--dbname",
-            _libpq_url(args.database_url),
+            uri,
         ],
         capture_output=True,
         text=True,
         # timestamptz values are dumped in the session time zone.
-        env={**os.environ, "PGTZ": "UTC"},
+        env={**os.environ, **pg_env, "PGTZ": "UTC"},
     )
     if result.returncode != 0:
         print(result.stderr, file=sys.stderr)
