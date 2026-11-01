@@ -10,12 +10,15 @@ import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.enums import (
+    CampaignRole,
     CharacterKind,
     EntityChangeOp,
     EntityType,
+    EntryKind,
     MentionOrigin,
     MentionSourceField,
     TagSourceField,
+    Visibility,
     check_expr,
     check_sql,
 )
@@ -35,6 +38,10 @@ EXPECTED: dict[type[StrEnum], list[str]] = {
     MentionOrigin: ["migration", "extraction", "manual"],
     MentionSourceField: ["narrative", "shorthand", "gm_notes"],
     TagSourceField: ["shorthand", "narrative", "manual"],
+    EntryKind: ["gm", "player"],
+    # PG enum mirrors (AD-12): the order is the pg_enum sort order.
+    Visibility: ["party", "gm", "private"],
+    CampaignRole: ["co_gm", "player"],
 }
 
 

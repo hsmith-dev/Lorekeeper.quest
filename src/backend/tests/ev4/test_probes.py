@@ -1,7 +1,7 @@
 """The EV-4 probe runner: every registered probe (tests/ev4/probes/) once
-per actor. A role-dependent actor that is not available yet skips only its
-own case. While no probe exists the parameter set is empty and pytest
-reports one skipped case.
+per actor. The Member actors (player, player_2, co_gm, cross_gm_player) are
+live since F1-core (E0-Access.1) and never skip. While no probe exists the
+parameter set is empty and pytest reports one skipped case.
 
 A probe must call at least one family helper (tests/ev4/families.py): a
 probe that checks nothing would count as coverage without testing anything.

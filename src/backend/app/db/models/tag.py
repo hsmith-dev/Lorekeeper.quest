@@ -1,9 +1,10 @@
 import uuid
 import enum
-from sqlalchemy import String, ForeignKey, UniqueConstraint, Enum as SAEnum
+from sqlalchemy import CheckConstraint, String, ForeignKey, UniqueConstraint, Enum as SAEnum
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.dialects.postgresql import UUID
 from app.db.base import Base
+from app.domain.enums import TagSourceField, check_expr
 
 
 class TagType(str, enum.Enum):
@@ -34,6 +35,11 @@ class Tag(Base):
 
 class JournalTag(Base):
     __tablename__ = "journal_tags"
+    __table_args__ = (
+        CheckConstraint(check_expr(TagSourceField, "source_field"), name="ck_journal_tags_source_field"),
+    )
 
     journal_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("journal_entries.id", ondelete="CASCADE"), primary_key=True)
     tag_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tags.id", ondelete="CASCADE"), primary_key=True)
+    # How the tag was added; NULL for tags that predate F1-core.
+    source_field: Mapped[TagSourceField | None] = mapped_column(String(16), nullable=True)

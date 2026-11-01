@@ -7,15 +7,17 @@ module restores a seeded dump taken at SNAPSHOT_REVISION
 upgrades it to head, and checks that no rows were lost and that each
 revision's data changes landed (POST_UPGRADE_CHECKS).
 
-While SNAPSHOT_REVISION is still the head, `upgrade head` runs no revisions
-and the row-count and post-upgrade checks pass trivially. They start to bite
-when the first later revision (F1-core) lands. The a3e7c1f9d258 round trip
-below does exercise a real data migration on the seeded rows today.
+F1-core (c95acb56c595) is the first revision after SNAPSHOT_REVISION: its
+checks below cover the members -> Player migration, the chat archive, the
+collaborate-token Role, party_tsv and the entry_hash uniqueness swap, and
+test_c95acb56c595_data_steps_are_idempotent re-applies its data steps. The
+a3e7c1f9d258 round trip downgrades through F1-core and upgrades again.
 
 pytest collects tests/migrations/ before tests/test_*.py, so the module
 fixture rebuilds the clean session schema in teardown.
 """
 import asyncio
+import importlib.util
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
@@ -35,6 +37,26 @@ from tests.conftest import (
 
 SNAPSHOT_REVISION = "a3e7c1f9d258"
 SNAPSHOT_SQL = Path(__file__).resolve().parents[1] / "fixtures" / f"snapshot_{SNAPSHOT_REVISION}.sql"
+BACKEND_DIR = Path(__file__).resolve().parents[2]
+
+
+def _load(name: str, path: Path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+# The seed (ids, narratives) and the F1-core revision's DATA_STEPS.
+make_snapshot = _load("make_snapshot", BACKEND_DIR / "scripts" / "make_snapshot.py")
+F1_CORE = "c95acb56c595"
+f1_core = _load(
+    "f1_core_revision",
+    BACKEND_DIR / "migrations" / "versions" / "c95acb56c595_f1_core_roles_visibility_party_search.py",
+)
+
+# Seed ids from scripts/make_snapshot.py.
+SEED_ID = "00000000-0000-4000-8000-000000000{}".format
 
 # What scripts/make_snapshot.py seeds; every other table is empty. Checked on
 # the restore so the row-count comparison after the upgrade is not vacuous.
@@ -135,6 +157,129 @@ async def shorthand_only_word_matches_narrative_tsv(conn: AsyncConnection) -> No
     assert narrative_has_it == 0, "seed changed: the probe word must be shorthand-only"
     matches = await _shorthand_word_matches(conn)
     assert matches == 1, f"a3e7c1f9d258: shorthand-only word matched {matches} entries, expected 1"
+
+
+# F1-core (E0-Access.1): Roles, Visibility, Party-only search.
+
+@post_upgrade_check(F1_CORE)
+async def members_become_players(conn: AsyncConnection) -> None:
+    rows = (await conn.execute(sa.text(
+        "SELECT id::text, role::text, access_epoch FROM campaign_members ORDER BY id"
+    ))).all()
+    assert [tuple(r) for r in rows] == [(SEED_ID("301"), "player", 0), (SEED_ID("302"), "player", 0)]
+    owner_rows = await conn.scalar(sa.text(
+        "SELECT count(*) FROM campaign_members m JOIN campaigns c ON c.id = m.campaign_id "
+        "WHERE m.user_id = c.user_id"
+    ))
+    assert owner_rows == 0, "the Owner must never have a campaign_members row"
+
+
+@post_upgrade_check(F1_CORE)
+async def member_chats_in_their_campaign_are_archived(conn: AsyncConnection) -> None:
+    archived = dict((await conn.execute(sa.text(
+        "SELECT id::text, archived_at IS NOT NULL FROM chat_sessions"
+    ))).all())
+    assert archived == {
+        SEED_ID("901"): False,  # Owner's chat in the Campaign
+        SEED_ID("902"): True,   # Member A's chat in the Campaign
+        SEED_ID("903"): False,  # Member B's chat with no Campaign
+    }
+    assert await conn.scalar(sa.text(
+        "SELECT count(*) FROM chat_sessions WHERE npc_entity_id IS NOT NULL")) == 0
+
+
+@post_upgrade_check(F1_CORE)
+async def collaborate_token_grants_player(conn: AsyncConnection) -> None:
+    rows = dict((await conn.execute(sa.text(
+        "SELECT id::text, role::text FROM campaign_share_tokens"
+    ))).all())
+    assert rows == {SEED_ID("401"): None, SEED_ID("402"): "player"}
+    assert await conn.scalar(sa.text(
+        "SELECT count(*) FROM campaign_share_tokens WHERE expires_at IS NOT NULL OR access_epoch <> 0"
+    )) == 0
+
+
+@post_upgrade_check(F1_CORE)
+async def entries_are_gm_written_party_visible_with_party_tsv(conn: AsyncConnection) -> None:
+    rows = (await conn.execute(sa.text(
+        "SELECT id::text, narrative, kind, visibility::text, "
+        "       party_tsv = to_tsvector('english', narrative), party_embedding IS NULL "
+        "FROM journal_entries ORDER BY id"
+    ))).all()
+    expected = [(eid, narrative, "gm", "party", True, True)
+                for eid, _, narrative, _, _ in sorted(make_snapshot._ENTRIES)]
+    assert [tuple(r) for r in rows] == expected
+    assert await conn.scalar(sa.text(
+        "SELECT count(*) FROM journal_entries WHERE narrative IS NOT NULL AND party_tsv IS NULL")) == 0
+    # Shorthand stays out of Party-only search: "brackenford" is shorthand-only.
+    assert await conn.scalar(sa.text(
+        "SELECT count(*) FROM journal_entries "
+        "WHERE party_tsv @@ plainto_tsquery('english', 'brackenford')")) == 0
+
+
+@post_upgrade_check(F1_CORE)
+async def other_f1_core_columns_take_their_defaults(conn: AsyncConnection) -> None:
+    assert (await conn.execute(sa.text(
+        "SELECT visibility::text FROM shorthand_terms"))).scalars().all() == ["gm"]
+    assert (await conn.execute(sa.text(
+        "SELECT source_field FROM journal_tags"))).scalars().all() == [None]
+
+
+@post_upgrade_check(F1_CORE)
+async def visibility_server_defaults_follow_ad12(conn: AsyncConnection) -> None:
+    # Most of these tables have no seed rows, and the model diff test ignores
+    # server defaults, so read the defaults themselves.
+    defaults = dict((await conn.execute(sa.text(
+        "SELECT table_name, column_default FROM information_schema.columns "
+        "WHERE table_schema = current_schema() AND column_name = 'visibility'"
+    ))).all())
+    assert defaults == {
+        "journal_entries": "'party'::visibility",
+        "character_sheets": "'party'::visibility",
+        "tag_categories": "'party'::visibility",
+        "session_plans": "'gm'::visibility",
+        "source_documents": "'gm'::visibility",
+        "shorthand_terms": "'gm'::visibility",
+    }
+
+
+@post_upgrade_check(F1_CORE)
+async def entry_hash_unique_per_campaign_and_author(conn: AsyncConnection) -> None:
+    uniques = dict((await conn.execute(sa.text(
+        "SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint "
+        "WHERE conrelid = 'journal_entries'::regclass AND contype = 'u'"
+    ))).all())
+    assert uniques == {
+        "uq_journal_entries_campaign_user_entry_hash": "UNIQUE (campaign_id, user_id, entry_hash)",
+    }
+
+
+# Every F1-core column, by table: (key columns, F1-core columns). The
+# idempotency test compares these values before and after re-applying the
+# data steps.
+F1_CORE_COLUMNS = {
+    "journal_entries": ("id", ("kind", "visibility", "party_tsv", "party_embedding")),
+    "campaign_members": ("id", ("role", "access_epoch")),
+    "campaign_share_tokens": ("id", ("role", "expires_at", "access_epoch")),
+    "chat_sessions": ("id", ("archived_at", "npc_entity_id")),
+    "journal_tags": ("journal_id, tag_id", ("source_field",)),
+    "character_sheets": ("id", ("pc_entity_id", "visibility")),
+    "session_plans": ("id", ("visibility",)),
+    "source_documents": ("id", ("visibility",)),
+    "shorthand_terms": ("id", ("visibility",)),
+    "tag_categories": ("id", ("visibility",)),
+}
+
+
+async def _f1_core_values(conn: AsyncConnection) -> dict[str, list[tuple]]:
+    values = {}
+    for table, (key, columns) in F1_CORE_COLUMNS.items():
+        keys = [k.strip() for k in key.split(",")]
+        cols = ", ".join(f"{c}::text" for c in [*keys, *columns])
+        rows = (await conn.execute(sa.text(
+            f"SELECT {cols} FROM {table} ORDER BY {key}"))).all()
+        values[table] = [tuple(r) for r in rows]
+    return values
 
 
 # ---------------------------------------------------------------------------
@@ -288,6 +433,84 @@ async def _with_conn(url: str, fn):
             return await fn(conn)
     finally:
         await engine.dispose()
+
+
+async def _reapply_f1_core_data_steps(conn: AsyncConnection) -> None:
+    await conn.run_sync(f1_core.apply_data_steps)
+    await conn.commit()
+
+
+def test_c95acb56c595_data_steps_are_idempotent(upgraded_snapshot):
+    # "upgrade head a second time": stamp back to the baseline, re-apply the
+    # revision's data steps on the already-migrated rows, stamp head again.
+    # A Co-GM promoted after the upgrade (token 402, member 301) must survive
+    # the re-run: catches a dropped `role IS NULL` guard or a role UPDATE.
+    cfg = alembic_config(TEST_DB_URL)
+    asyncio.run(_with_conn(TEST_DB_URL, lambda c: _set_promoted_roles(c, "co_gm")))
+    try:
+        before = asyncio.run(_with_conn(TEST_DB_URL, _f1_core_values))
+        assert before["chat_sessions"], "seed changed: no chat_sessions to compare"
+        command.stamp(cfg, SNAPSHOT_REVISION, purge=True)
+        try:
+            asyncio.run(_with_conn(TEST_DB_URL, _reapply_f1_core_data_steps))
+        finally:
+            command.stamp(cfg, "head", purge=True)
+        after = asyncio.run(_with_conn(TEST_DB_URL, _f1_core_values))
+        assert after == before
+        assert (SEED_ID("402"), "co_gm", None, "0") in after["campaign_share_tokens"]
+        assert (SEED_ID("301"), "co_gm", "0") in after["campaign_members"]
+    finally:
+        asyncio.run(_with_conn(TEST_DB_URL, lambda c: _set_promoted_roles(c, "player")))
+
+
+async def _set_promoted_roles(conn: AsyncConnection, role: str) -> None:
+    await conn.execute(sa.text(
+        "UPDATE campaign_share_tokens SET role = CAST(:r AS campaign_role) WHERE id = :id"
+    ), {"r": role, "id": SEED_ID("402")})
+    await conn.execute(sa.text(
+        "UPDATE campaign_members SET role = CAST(:r AS campaign_role) WHERE id = :id"
+    ), {"r": role, "id": SEED_ID("301")})
+    await conn.commit()
+
+
+async def _baseline_schema(conn: AsyncConnection) -> dict:
+    f1_columns = {f"{t}.{c}" for t, (_, cols) in F1_CORE_COLUMNS.items() for c in cols}
+    existing = set((await conn.execute(sa.text(
+        "SELECT table_name || '.' || column_name FROM information_schema.columns "
+        "WHERE table_schema = 'public'"
+    ))).scalars())
+    return {
+        "types": sorted((await conn.execute(sa.text(
+            "SELECT typname FROM pg_type WHERE typname IN ('visibility', 'campaign_role') "
+            "AND typnamespace = to_regnamespace(current_schema())"
+        ))).scalars()),
+        "columns": sorted(f1_columns & existing),
+        "indexes": sorted((await conn.execute(sa.text(
+            "SELECT indexname FROM pg_indexes WHERE indexname = 'ix_journal_party_fts'"
+        ))).scalars()),
+        "uniques": sorted((await conn.execute(sa.text(
+            "SELECT conname FROM pg_constraint "
+            "WHERE conrelid = 'journal_entries'::regclass AND contype = 'u'"
+        ))).scalars()),
+    }
+
+
+def test_c95acb56c595_downgrade_restores_baseline(upgraded_snapshot):
+    # Dev only (NFR-8): the downgrade puts back the exact a3e7c1f9d258 schema.
+    cfg = alembic_config(TEST_DB_URL)
+    command.downgrade(cfg, SNAPSHOT_REVISION)
+    try:
+        schema = asyncio.run(_with_conn(TEST_DB_URL, _baseline_schema))
+    finally:
+        command.upgrade(cfg, "head")
+    assert schema == {
+        "types": [],
+        "columns": [],
+        "indexes": [],
+        "uniques": ["journal_entries_entry_hash_key"],
+    }
+    assert asyncio.run(_with_conn(TEST_DB_URL, _f1_core_values))["campaign_members"] == [
+        (SEED_ID("301"), "player", "0"), (SEED_ID("302"), "player", "0")]
 
 
 def test_a3e7c1f9d258_backfills_shorthand(upgraded_snapshot):

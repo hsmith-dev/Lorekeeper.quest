@@ -11,14 +11,13 @@ Actors (``await ev4.actor(name)``):
   gm_owner         owns Campaign A
   anon_share       no auth; a read-only share token for A
   anonymous        no auth, no token
-  player           Player in A                       (needs roles)
-  player_2         a second Player in A              (needs roles)
-  co_gm            role gm (co-GM) in A              (needs roles)
-  cross_gm_player  owns Campaign B (same seed, own tokens), Player in A (needs roles)
+  player           Player in A
+  player_2         a second Player in A
+  co_gm            stored role co_gm (grant "gm") in A
+  cross_gm_player  owns Campaign B (same seed, own tokens), Player in A
 
-The role-dependent actors resolve lazily through ``make_member``, which
-skips the test with "roles not yet available" until E0-Access adds
-``campaign_members.role``; only cases that need them skip.
+The Member actors resolve lazily through ``make_member``, which writes
+``campaign_members.role`` (F1-core, E0-Access.1).
 """
 from __future__ import annotations
 
@@ -32,12 +31,12 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-import pytest
 import pytest_asyncio
 import sqlalchemy as sa
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.domain.enums import CampaignRole
 from tests.ev4 import repo_root
 
 GM, PLAYER, ANON = "gm", "player", "anon"
@@ -306,52 +305,27 @@ async def seed_canary_campaign(db: AsyncSession, owner, seed: dict | None = None
 
 # ── Roles ──────────────────────────────────────────────────────────────────
 
-# Spine AD-12: campaign_members.role in {co_gm, player}; the actor model
-# calls the co-GM grant "gm". The first label the DB enum actually has wins.
-_ROLE_LABELS = {"player": ("player",), "gm": ("co_gm", "gm"), "co_gm": ("co_gm", "gm")}
+# Spine AD-12: campaign_members.role is the PG enum campaign_role
+# {co_gm, player}; the actor model calls the co-GM grant "gm".
+_ROLE_VALUES = {"player": CampaignRole.PLAYER, "gm": CampaignRole.CO_GM, "co_gm": CampaignRole.CO_GM}
 
 
-async def _role_column(db: AsyncSession) -> tuple[str, str] | None:
-    row = (await db.execute(sa.text(
-        "SELECT data_type, udt_name FROM information_schema.columns "
-        "WHERE table_schema = current_schema() AND table_name = 'campaign_members' AND column_name = 'role'"
-    ))).first()
-    return None if row is None else (row[0], row[1])
-
-
-async def roles_available(db: AsyncSession) -> bool:
-    return await _role_column(db) is not None
-
-
-async def _role_value(db: AsyncSession, role: str) -> str:
-    if role not in _ROLE_LABELS:
-        raise ValueError(f"make_member: unknown role {role!r} (use one of {sorted(_ROLE_LABELS)})")
-    column = await _role_column(db)
-    candidates = _ROLE_LABELS[role]
-    if column and column[0] == "USER-DEFINED":
-        labels = set((await db.execute(sa.text(
-            "SELECT e.enumlabel FROM pg_enum e JOIN pg_type t ON t.oid = e.enumtypid WHERE t.typname = :t"
-        ), {"t": column[1]})).scalars())
-        for label in candidates:
-            if label in labels:
-                return label
-        raise ValueError(f"make_member: enum {column[1]} has none of {candidates} (labels: {sorted(labels)})")
-    return candidates[0]
+def _role_value(role: str) -> str:
+    if role not in _ROLE_VALUES:
+        raise ValueError(f"make_member: unknown role {role!r} (use one of {sorted(_ROLE_VALUES)})")
+    return _ROLE_VALUES[role].value
 
 
 async def make_member(db: AsyncSession, *, role: str = "player", campaign_id: uuid.UUID, user=None,
                       label: str | None = None):
     """Add ``user`` (a new committed User when None) to ``campaign_id`` as a
     CampaignMember with ``role`` ("player", or "gm"/"co_gm" for a co-GM).
-    Skips the test with "roles not yet available" until
-    ``campaign_members.role`` exists. Returns the user."""
-    if not await roles_available(db):
-        pytest.skip("roles not yet available")
-    value = await _role_value(db, role)
+    Returns the user."""
+    value = _role_value(role)
     user = user or await create_user(db, label or role)
     await db.execute(sa.text(
         "INSERT INTO campaign_members (id, campaign_id, user_id, role, created_at, updated_at) "
-        "VALUES (:id, :c, :u, :r, now(), now())"
+        "VALUES (:id, :c, :u, CAST(:r AS campaign_role), now(), now())"
     ), {"id": uuid.uuid4(), "c": campaign_id, "u": user.id, "r": value})
     await db.commit()
     return user
@@ -427,14 +401,10 @@ class EV4:
     def canaries(self) -> list[Canary]:
         return list(self.a.canaries) + (list(self.b.canaries) if self.b else [])
 
-    async def require_roles(self) -> None:
-        if not await roles_available(self.db):
-            pytest.skip("roles not yet available")
-
     async def make_member(self, role: str = "player", campaign_id: uuid.UUID | None = None, user=None,
                           label: str | None = None):
-        """Add a CampaignMember with ``role`` (Campaign A by default); skips
-        while roles do not exist. See the module-level make_member."""
+        """Add a CampaignMember with ``role`` (Campaign A by default). See the
+        module-level make_member."""
         return await make_member(self.db, role=role, campaign_id=campaign_id or self.a.campaign_id,
                                  user=user, label=label)
 
@@ -449,7 +419,6 @@ class EV4:
             user = await self.make_member("gm", label=name)
             actor = Actor(name, self.client, bearer(user), user.id, None, {a: GM})
         elif name == "cross_gm_player":
-            await self.require_roles()
             user = await create_user(self.db, name)
             await self.make_member("player", user=user)
             self.b = await seed_canary_campaign(self.db, user)

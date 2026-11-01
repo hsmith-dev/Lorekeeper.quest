@@ -3,7 +3,8 @@ from sqlalchemy import String, Text, Integer, ForeignKey
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.dialects.postgresql import UUID
 from pgvector.sqlalchemy import Vector
-from app.db.base import Base, TimestampMixin
+from app.db.base import Base, TimestampMixin, VISIBILITY_ENUM
+from app.domain.enums import Visibility
 from app.domain.embedding import EMBEDDING_DIM
 
 
@@ -15,6 +16,8 @@ class SourceDocument(Base, TimestampMixin):
     campaign_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("campaigns.id", ondelete="CASCADE"))
     title: Mapped[str] = mapped_column(String(200), nullable=False)
     filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    visibility: Mapped[Visibility] = mapped_column(
+        VISIBILITY_ENUM, nullable=False, default=Visibility.GM, server_default=Visibility.GM.value)
 
     user: Mapped["User"] = relationship()
     campaign: Mapped["Campaign"] = relationship()

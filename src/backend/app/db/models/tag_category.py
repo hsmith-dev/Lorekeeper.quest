@@ -2,7 +2,8 @@ import uuid
 from sqlalchemy import String, ForeignKey, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.dialects.postgresql import UUID
-from app.db.base import Base, TimestampMixin
+from app.db.base import Base, TimestampMixin, VISIBILITY_ENUM
+from app.domain.enums import Visibility
 
 
 class TagCategory(Base, TimestampMixin):
@@ -18,5 +19,7 @@ class TagCategory(Base, TimestampMixin):
     campaign_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("campaigns.id", ondelete="CASCADE"))
     created_by_user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"))
     name: Mapped[str] = mapped_column(String(50), nullable=False)
+    visibility: Mapped[Visibility] = mapped_column(
+        VISIBILITY_ENUM, nullable=False, default=Visibility.PARTY, server_default=Visibility.PARTY.value)
 
     campaign: Mapped["Campaign"] = relationship()
