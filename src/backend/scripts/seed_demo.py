@@ -47,7 +47,7 @@ _BACKEND_DIR = Path(__file__).resolve().parents[1]
 if str(_BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(_BACKEND_DIR))
 
-from sqlalchemy import select, text  # noqa: E402
+from sqlalchemy import func, select, text  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
 
 import app.db.models  # noqa: E402,F401  (registers every mapper)
@@ -66,9 +66,12 @@ def _default_seed_path() -> Path:
     # src/backend/scripts/seed_demo.py -> repo root. In the container the
     # tree is shallower, so fall back to /app/seeds (pass --seed there).
     try:
-        return Path(__file__).resolve().parents[3] / "seeds" / "demo_campaign.json"
+        root = Path(__file__).resolve().parents[3]
     except IndexError:
-        return _BACKEND_DIR / "seeds" / "demo_campaign.json"
+        root = None
+    if root is not None and (root / "seeds").is_dir():
+        return root / "seeds" / "demo_campaign.json"
+    return _BACKEND_DIR / "seeds" / "demo_campaign.json"
 
 
 DEFAULT_SEED_PATH = _default_seed_path()
@@ -308,7 +311,7 @@ async def seed_campaign(
     validate_seed(seed)
     email = (owner_email or seed["owner"]["email"]).strip().lower()
 
-    user = await session.scalar(select(User).where(User.email == email))
+    user = await session.scalar(select(User).where(func.lower(User.email) == email))
     user_created = user is None
     if user is None:
         user = User(email=email, display_name=seed["owner"]["display_name"],

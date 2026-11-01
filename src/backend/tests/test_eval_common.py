@@ -11,7 +11,7 @@ import pytest
 from app.core.config import get_settings
 from app.core import llm_gate
 from app.services import embedding_service, llm_provider
-from scripts import eval_common, eval_retrieval
+from scripts import eval_common, eval_retrieval, seed_demo
 from scripts.eval_common import (
     FakeEmbeddingModel, FakeLLM, Failure, OllamaLLM, ReportError, ResultTable,
     format_table, make_llm, sweep, write_report,
@@ -222,7 +222,19 @@ async def test_eval_retrieval_end_to_end(tmp_path, monkeypatch, capsys):
     assert len(rows) == 6
     marked = [r for r in rows if "← production operating point" in r]
     assert len(marked) == 1 and "0.65" in marked[0] and "hybrid" in marked[0]
-    assert "12 entries" in doc and "embeddings: `fake`" in doc and "LLM: `fake`" in doc
+    assert "12 entries" in doc and "embeddings: `fake`" in doc and "LLM: unused" in doc
+
+    # The failures are exactly the chosen point's misses, and the doc lists them.
+    chosen = table.row("hybrid@0.65")
+    hits = int(chosen["hit@3"].split("/")[0])
+    holds = int(chosen["gate-holds"].split("/")[0])
+    assert len(table.failures) == (16 - hits) + (5 - holds)
+    failures_region = re.search(r"<!-- eval:failures -->(.*?)<!-- /eval:failures -->", doc, re.S).group(1)
+    if table.failures:
+        for f in table.failures:
+            assert f.case in failures_region, f.case
+    else:
+        assert "_No failures._" in failures_region
     # Scores are well-formed: n/16 hits, m/5 holds.
     for r in rows:
         cols = [c.strip() for c in r.split("|")]
@@ -241,6 +253,32 @@ async def test_eval_retrieval_without_embeddings_is_lexical_only(monkeypatch, ca
         assert table.row(f"vector-only@{t}")["hit@3"] == "0/16"
     # Lexical retrieval alone still finds the rare proper nouns.
     assert int(table.row("hybrid@0.65")["hit@3"].split("/")[0]) > 0
+
+
+@pytest.mark.parametrize("argv, message", [
+    (["--chosen", "hybrid@0.99"], "not a swept point"),
+    (["--thresholds", "0.55,abc"], "comma-separated numbers"),
+])
+def test_eval_retrieval_bad_args_exit_1(argv, message, capsys):
+    rc = eval_retrieval.main(["--database-url", "postgresql+asyncpg://nobody:x@127.0.0.1:1/nothing_test",
+                              "--embeddings", "skip", *argv])
+    assert rc == 1
+    assert message in capsys.readouterr().err
+
+
+async def test_sweep_rejects_duplicate_labels():
+    async def evaluate(point):
+        return {"n": "1"}, []
+
+    with pytest.raises(ValueError, match="duplicate point labels"):
+        await sweep([("a", 1), ("a", 2)], evaluate, columns=["n"])
+
+
+async def test_load_campaign_orders_entries_by_session(db):
+    seed = seed_demo.read_seed(seed_demo.DEFAULT_SEED_PATH)
+    data = await eval_common.load_campaign(
+        seed, db, owner_email=f"order_{uuid.uuid4().hex[:10]}@example.com")
+    assert [e.session_date.isoformat() for e in data.entries] == [e["session_date"] for e in seed["entries"]]
 
 
 async def test_smoke_run(tmp_path, monkeypatch, capsys):

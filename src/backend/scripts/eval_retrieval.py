@@ -26,6 +26,9 @@ eval_common.build_parser).
 Run inside the backend container (seed first, see scripts/seed_demo.py):
   docker compose -f docker-compose.prod.yml exec backend \\
       python scripts/eval_retrieval.py --campaign-id <uuid> --out /tmp/RETRIEVAL_EVAL.md
+(copy docs/RETRIEVAL_EVAL.md to /tmp in the container first with
+`docker compose cp`, and copy it back out afterwards: the image has neither
+docs/RETRIEVAL_EVAL.md nor docs/EVAL_TEMPLATE.md).
 
 Results and the chosen production threshold are recorded in
 docs/RETRIEVAL_EVAL.md.
@@ -157,7 +160,7 @@ async def evaluate(db, campaign_id: uuid.UUID, thresholds: list[float], *,
 
     table = await eval_common.sweep(
         points, run_point, columns=COLUMNS,
-        chosen=chosen if chosen in [p for p, _ in points] else None,
+        chosen=chosen,
         chosen_marker="← production operating point",
     )
     # Only the chosen point's misses go in the report; the rest is noise.
@@ -175,13 +178,25 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def parse_thresholds(raw: str) -> list[float]:
+    try:
+        thresholds = [float(t) for t in raw.split(",") if t.strip()]
+    except ValueError:
+        raise SeedError(f"--thresholds must be comma-separated numbers, got {raw!r}") from None
+    if not thresholds:
+        raise SeedError("--thresholds is empty")
+    return thresholds
+
+
 async def run(args: argparse.Namespace, *, embedding_model=None) -> eval_common.ResultTable:
-    thresholds = [float(t) for t in args.thresholds.split(",") if t.strip()]
+    thresholds = parse_thresholds(args.thresholds)
+    labels = [point_label(t, m) for t in thresholds for m in MODES]
+    if args.chosen not in labels:
+        raise SeedError(f"--chosen {args.chosen!r} is not a swept point; choose one of {labels}")
     model = eval_common.install_embedding_model(args.embeddings, embedding_model)
     if model is None:
         print("warning: no embedding model; vector retrieval scores 0 and hybrid is lexical-only",
               file=sys.stderr)
-    llm = eval_common.make_llm(args)  # no retrieval step calls it; named in the report
     async with eval_common.open_session(args.database_url) as db:
         data = await eval_common.load_campaign(
             args.seed, db, args.campaign_id, owner_email=args.owner_email,
@@ -197,7 +212,7 @@ async def run(args: argparse.Namespace, *, embedding_model=None) -> eval_common.
             "none" if model is None else eval_common.seed_demo.EMBEDDING_MODEL)
         eval_common.write_report(
             args.out, table, title="Retrieval Evaluation",
-            note=f"{len(data.entries)} entries; embeddings: `{embed_name}`; LLM: `{llm.name}` (unused).",
+            note=f"{len(data.entries)} entries; embeddings: `{embed_name}`; LLM: unused.",
         )
         print(f"\nwrote {args.out}")
     return table

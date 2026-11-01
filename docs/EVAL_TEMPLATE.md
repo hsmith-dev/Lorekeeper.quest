@@ -51,4 +51,9 @@ python scripts/seed_demo.py
 
 # Run the eval and refresh this report
 python scripts/<eval_script>.py --campaign-id <campaign-uuid> --out docs/<NAME>_EVAL.md
+
+# LLM steps use the stack's Ollama (KOBOLD_URL) by default; point them at
+# another Ollama, e.g. the remote GPU desktop:
+python scripts/<eval_script>.py --campaign-id <campaign-uuid> --out docs/<NAME>_EVAL.md \
+    --llm-url http://100.119.62.5:11434 --llm-model lorekeeper
 ```

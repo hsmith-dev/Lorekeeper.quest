@@ -141,7 +141,7 @@
       "description": "Cleric of the dawn with a spear and a holy symbol. Joined the party in Thornwick after the old mill and travelled with them until the Ember Keep.",
       "notes": "Played by the GM as a companion. Her brother Tam still lives in Thornwick and does not yet know she is dead.",
       "status_history": [
-        {"session": 1, "status": "alive"},
+        {"session": 2, "status": "alive"},
         {"session": 10, "status": "dead"}
       ]
     },

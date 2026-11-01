@@ -56,6 +56,8 @@ try:
     REPO_ROOT: Path | None = Path(__file__).resolve().parents[3]
 except IndexError:  # the container's /app/scripts is too shallow
     REPO_ROOT = None
+if REPO_ROOT is not None and not (REPO_ROOT / "seeds").is_dir():
+    REPO_ROOT = None  # e.g. /srv/app/scripts: parents[3] exists but is not the repo
 DOCS_DIR = (REPO_ROOT / "docs") if REPO_ROOT else (_BACKEND_DIR / "docs")
 TEMPLATE_PATH = DOCS_DIR / "EVAL_TEMPLATE.md"
 
@@ -196,6 +198,9 @@ async def sweep(
     if chosen_marker:
         table.chosen_marker = chosen_marker
     labels = [label for label, _ in points]
+    dupes = sorted({x for x in labels if labels.count(x) > 1})
+    if dupes:
+        raise ValueError(f"duplicate point labels: {dupes}")
     if chosen is not None and chosen not in labels:
         raise ValueError(f"chosen point {chosen!r} is not one of {labels}")
     for label, point in points:
