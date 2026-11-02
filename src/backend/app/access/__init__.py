@@ -23,7 +23,9 @@ map (`register_visibility_kind`), the extension points
 the cache key scheme (`cache_key`, `cache_generation`, `cached_json`,
 `invalidate_campaign_cache`, `CACHE_TTL_S`). E0-Jobs.6 registers `grant_watch` as
 app/core/sse.py's close watch (app.core may not import app.access), so every
-`sse_response` stream ends when its ctx's grant changes.
+`sse_response` stream ends when its ctx's grant changes. E0-WorldCore.3 adds
+`register_writer` (world_service registers the Canon tables' writer) and the
+registry's `gm_when` (deleted or merged Entities are GM only).
 """
 from app.access.audience import (
     ALWAYS_GM_FIELDS, GM_AUDIENCE, MEMBERS, PUBLIC, AnyOf, Audience, AudienceLevel, covers, ctx_audience,
@@ -47,7 +49,8 @@ from app.access.policy import (
 from app.access.registry import (
     DERIVED_REGISTRY, REGISTRY, SOURCE_KIND_MODELS, DerivedType, UnregisteredModel, always_gm, audience_of,
     derived, derived_from_sources, gm_fields, membership, parent, reached_through, register_derived,
-    owned_get, register_source_kind, registration, scoped_get, scoped_select, stored, visible_clause,
+    owned_get, register_source_kind, register_writer, registration, scoped_get, scoped_select, stored,
+    visible_clause,
 )
 from app.access.projection import (
     CHAT_DETAIL, CHAT_META, CHAT_REPLY, LITE, PROJECTIONS, REDACTED_NOTICE, WITH_COUNT, Projection,
@@ -177,6 +180,7 @@ __all__ = [
     "reached_through",
     "register_derived",
     "register_source_kind",
+    "register_writer",
     "registration",
     "require_campaign",
     "require_campaign_for",

@@ -44,3 +44,9 @@ Suggested sequencing (owner leaned this way, not locked): 1 first, then 2/3/6/7 
 - **TTS licence (PRD Q1):** decide after spike. Spike result (spikes/cpu-benchmarks.md): `pip install kokoro` bundles GPL-3.0 espeak-ng; with the fallback disabled, fantasy proper nouns are silently dropped from audio. → Kokoro+espeak is acceptable for the AGPL build as an optional container; the commercial build must not bundle it — use a TTS provider interface so the commercial build can swap in a permissive engine or browser speech.
 - **Dev/test environment:** owner is moving development to a desktop machine with Docker. Tests should use docker-compose.dev.yml Postgres+pgvector (built from migrations).
 - **Pages workflows:** pages.yml, static.yml, jekyll-gh-pages.yml all deploy to the same Pages site; static.yml publishes the whole repo. Pending owner decision (recommend keeping only pages.yml).
+
+## Owner decisions — round 4 (2026-11-01)
+- **Pre-publish history stays GM-only:** history rows (`entity_changes`) recorded while an Entity — or the specific field — was hidden from an audience stay hidden from that audience after it is published / un-hidden. Players see only changes made after publication. (Implement by recording the write-time audience on each history row and filtering on it, not on current visibility.)
+- **Tighter CPU targets approved (NFR-6):** live caption lag on CPU ≤ 10 s (was ≤ 30 s); narration on CPU ≤ 60 s (was ≤ 2 min). Basis: E0-QA.15 x86 benchmarks (`docs/BENCHMARKS.md`).
+- **Character Sheet stopgap:** until E7 links Players to their PCs, a Player may edit Character Sheets they themselves created (`created_by_user_id`), in Campaigns where they are a member. GM retains full control; preview/reduced contexts still refused.
+- **Mac hygiene:** builder agents must not install into the owner's Homebrew/system prefixes or run local servers (pgvector files a builder added to Homebrew postgresql@16 were removed 2026-11-01).
