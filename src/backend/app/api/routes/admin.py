@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime, timezone
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 
@@ -28,6 +28,9 @@ from app.schemas.admin import (
     LogsResponse,
 )
 from app.api.deps import require_admin
+from app.core.limiter import limiter, user_or_ip
+from app.jobs.control import job_counts
+from app.schemas.jobs import JobStatsResponse
 from app.services.email_service import send_admin_message_email
 from app.services.billing_service import admin_cancel_subscription, admin_set_access
 
@@ -427,6 +430,16 @@ def _read_log_tail(max_lines: int = 500, max_bytes: int = 2 * 1024 * 1024) -> tu
 async def recent_logs(lines: int = 200) -> LogsResponse:
     source, tail = _read_log_tail(max_lines=max(1, min(lines, 2000)))
     return LogsResponse(source=source, lines=tail)
+
+
+# ── System: background Jobs (E0-Jobs.7) ─────────────────────────────────────
+
+@router.get("/jobs/stats", response_model=JobStatsResponse)
+@limiter.limit("60/minute", key_func=user_or_ip)
+async def job_stats(request: Request, db: AsyncSession = Depends(get_db)) -> JobStatsResponse:
+    """Job counts by status and by queue, across every Campaign (counts
+    only: no kind, payload or Campaign data)."""
+    return JobStatsResponse(**await job_counts(db))
 
 
 @router.get("/support-bundle")

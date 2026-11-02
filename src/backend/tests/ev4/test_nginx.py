@@ -155,7 +155,9 @@ def test_real_config_parses_and_selects_the_https_server():
     assert "location /" in labels
     assert "location = /api/chat/stream" in labels
     # The commented-out templates are comments, not locations.
-    assert not any("/api/x/" in label or "/api/jobs/" in label for label in labels)
+    assert not any("/api/x/" in label for label in labels)
+    # E0-Jobs.7's stream is the only /api/jobs/ location (an exact one).
+    assert [label for label in labels if "/api/jobs/" in label] == ["location = /api/jobs/stream"]
     # A quoted regex with `{36}` (E0-Access.11's events route) parses as one location.
     assert sum("^/api/campaigns/[0-9a-fA-F-]{36}/events$" in label for label in labels) == 1
 

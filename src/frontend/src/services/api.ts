@@ -475,3 +475,6 @@ export const getAdminLogs = (lines = 200) =>
 
 export const getSupportBundle = () =>
   api.get<Blob>("/api/admin/support-bundle", { responseType: "blob" });
+
+// Admin — background Job counts by status and queue (E0-Jobs.7)
+export const getAdminJobStats = () => api.get<import("../types").AdminJobStats>("/api/admin/jobs/stats");
