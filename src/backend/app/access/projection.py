@@ -23,7 +23,13 @@ unless one is named (Campaign: `PublicCampaignResponse`).
      not see (hidden, or of another Campaign) is None; a field hidden by
      `field_visibility` renders as the schema default (None when none), and
      on an Entity as its unset value (`entity_types.party_view`: status the
-     type's default, a hidden attribute key dropped);
+     type's default, a hidden attribute key dropped); a history row
+     (entity_changes) never shows a value its Entity hides from ctx: a key
+     of its JSON values that carries a hidden field (`value_fields`: a Quest
+     status row's `completed_at`), or a GM-only key (`gm_value_keys`:
+     `journal_id`), is dropped, and a row whose field reveals a hidden one
+     (`field_requires`: `attributes.completed_at` reveals `status`) shows
+     no values. `project_all` loads the Entity; without it, fail closed;
   6. `extra` fields (counts, `is_owner`, `share_kind`) merged, then validated.
 
 `project_all(db, rows, ctx)` takes one ctx or a `role_map` (a per-row
@@ -60,7 +66,8 @@ from app.access.context import CampaignContext, RoleMap, role_ctx
 from app.access.policy import ANON, GM, PLAYER, not_found
 from app.domain import entity_types
 from app.access.registry import (
-    Derived, Stored, UnregisteredModel, audience_of, gm_fields, narrowed_audience, registration, scope_column,
+    REGISTRY, Derived, Stored, UnregisteredModel, audience_of, gm_fields, hidden_row_values, hidden_value_keys,
+    narrowed_audience, registration, scope_column,
 )
 from app.access.sources import message_refs, visible_refs as _visible_refs
 from app.db.models.campaign import Campaign
@@ -352,9 +359,11 @@ def _render_entity_unset(obj: Entity, schema: type[BaseModel], data: dict[str, A
 
 def project(obj: Any, ctx: CampaignContext, *, variant: str | None = None,
             extra: Mapping[str, Any] | None = None, links: Mapping[uuid.UUID, JournalTag] | None = None,
-            visible_refs: Iterable[SourceRef] | None = None) -> BaseModel:
+            visible_refs: Iterable[SourceRef] | None = None, parent: Any = None) -> BaseModel:
     """`obj` as the response schema for ctx (see the module docstring for the
-    order). `links` ({tag_id: JournalTag}) are an entry's tag links, needed
+    order). `parent` is a derived row's first parent when its relationship is
+    not loaded (`project_all` loads it); without either, a `value_fields` key
+    is dropped for a non-GM (fail closed). `links` ({tag_id: JournalTag}) are an entry's tag links, needed
     for a non-GM entry with tags (`project_all` loads them). `visible_refs`
     are the SourceRefs ctx may see among a chat session's messages
     (`project_chat` computes them): a message citing anything else is
@@ -392,8 +401,72 @@ def project(obj: Any, ctx: CampaignContext, *, variant: str | None = None,
             tags = kept
         data["tags"] = [_project_tag(t, ctx) for t in tags]
     _apply_field_visibility(obj, reg, schema, data, ctx)
+    _redact_value_fields(obj, reg, data, ctx, parent)
     data.update(extra)
     return schema.model_validate(data, from_attributes=True)
+
+
+# The JSON value columns of a history row (entity_changes).
+VALUE_COLUMNS = ("old_value", "new_value")
+
+
+def _drop_keys(value: Any, keys: frozenset[str]) -> Any:
+    """A copy of a JSON value without `keys`, at any depth."""
+    if isinstance(value, Mapping):
+        return {k: _drop_keys(v, keys) for k, v in value.items() if k not in keys}
+    if isinstance(value, list):
+        return [_drop_keys(v, keys) for v in value]
+    return value
+
+
+def _first_parent(obj: Any, reg: Any) -> Any:
+    link = reg.derive_from[0]
+    if link.attr is None or link.attr in sa.inspect(obj).unloaded:
+        return None
+    return getattr(obj, link.attr)
+
+
+def _redact_value_fields(obj: Any, reg: Any, data: dict[str, Any], ctx: CampaignContext, parent: Any) -> None:
+    """Step 5 for a derived row with `value_fields` (entity_changes): a key
+    inside its JSON values that carries a parent field ctx may not see is
+    dropped (a Quest status row's `completed_at` when `attributes` is hidden),
+    so history never shows what the parent itself hides."""
+    if not isinstance(reg, Derived) or not (reg.value_fields or reg.field_requires or reg.gm_value_keys):
+        return
+    parent_obj = parent if parent is not None else _first_parent(obj, reg)
+    if hidden_row_values(obj, ctx, parent_obj):
+        # The field itself would reveal a hidden partner (completed_at → status).
+        for name in VALUE_COLUMNS:
+            if name in data:
+                data[name] = None
+        return
+    hidden = hidden_value_keys(obj, ctx, parent_obj)
+    if not hidden:
+        return
+    for name, value in list(data.items()):
+        if isinstance(value, (Mapping, list)):
+            data[name] = _drop_keys(value, hidden)
+
+
+async def _value_field_parents(db: AsyncSession, rows: Sequence[Any]) -> dict[int, Any]:
+    """{id(row): first parent} for derived rows with value_fields whose parent
+    relationship is not loaded (one query per parent model)."""
+    wanted: dict[type, dict[Any, list[Any]]] = {}
+    for row in rows:
+        reg = REGISTRY.get(type(row))
+        if isinstance(reg, Derived) and (reg.value_fields or reg.field_requires) and _first_parent(row, reg) is None:
+            link = reg.derive_from[0]
+            key = getattr(row, link.fk)
+            if key is not None:
+                wanted.setdefault(link.model, {}).setdefault(key, []).append(row)
+    out: dict[int, Any] = {}
+    for model, by_key in wanted.items():
+        remote = getattr(model, "id")
+        for parent_row in (await db.execute(sa.select(model).where(remote.in_(list(by_key))))).scalars():
+            for row in by_key.get(parent_row.id, ()):
+                if getattr(parent_row, "campaign_id", None) == getattr(row, "campaign_id", None):
+                    out[id(row)] = parent_row
+    return out
 
 
 def _ctx_for_row(ctx: CampaignContext | Mapping[uuid.UUID, str], row: Any) -> CampaignContext:
@@ -435,11 +508,13 @@ async def project_all(db: AsyncSession, rows: Iterable[Any], ctx: CampaignContex
         return []
     entries = [r for r in rows if isinstance(r, JournalEntry)]
     links = await _entry_links(db, entries) if entries else {}
+    parents = await _value_field_parents(db, rows)
     out = []
     for row in rows:
         row_ctx = _ctx_for_row(ctx, row)
         out.append(project(row, row_ctx, variant=variant, extra=extra(row) if extra else None,
-                           links=links.get(row.id) if isinstance(row, JournalEntry) else None))
+                           links=links.get(row.id) if isinstance(row, JournalEntry) else None,
+                           parent=parents.get(id(row))))
     return out
 
 

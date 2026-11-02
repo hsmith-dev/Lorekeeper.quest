@@ -26,6 +26,13 @@ deferred:
       src/backend/app/services/world_service.py _merge
     severity: medium
   - summary: >-
+      History rows of ENTITY_REF attributes (attributes.location_entity_id, ...) show the id of an Entity the viewer may not see.
+    evidence: |-
+      Same as the Entity Party projection today (deferred from E0-WorldCore.2): only an id, no content. E0-WorldCore.5 resolves or drops references to Entities hidden from ctx and must apply the same rule to entity_changes values (access.project, value_fields path).
+    location: >-
+      src/backend/app/access/projection.py _redact_value_fields
+    severity: medium
+  - summary: >-
       CanonChange.quote is persisted only on Mentions.
     evidence: |-
       entity_changes has no quote column; E1 keeps the quote on its proposal rows.
@@ -140,6 +147,22 @@ deferred:
 - Given a Player ctx, when it reaches `apply_change`, `revert_change` or `set_visibility(entity)`, then `NotFound` and the row counts are unchanged.
 
 ## Spec Change Log
+
+### 2026-11-01 — Coordinator follow-up after the adversarial review (98920fa)
+- Trigger: a confirmed leak (strict xfail). On a Party Quest with `attributes` hidden, the Quest status history row's old/new carried `completed_at`, which a Player could read.
+- Amended (outside the intent contract): history values are redacted in `access.project` from registry declarations on `entity_changes`:
+  - `value_fields={"completed_at": "attributes.completed_at"}` drops the key at any depth when that field is hidden;
+  - `field_requires={"attributes.completed_at": "status"}` sets old/new to None when status is hidden, mirroring the Entity projection's rule;
+  - `gm_value_keys=("journal_id",)` drops `source_deleted` provenance.
+  - `project_all` loads the parent Entity; with no parent, the keys are dropped (fail closed).
+- Known-bad state avoided: a history row showing a value the viewer cannot see on the Entity itself.
+- KEEP: `apply_change` still records both values (story AC: "Both values are recorded in the change row"); only the Party projection redacts. SQL row visibility is unchanged (CI-11).
+- Audit of other ops that write derived values into history:
+  - create, delete, merge, canon_note, relationship and Mention rows are field NULL (GM);
+  - revert rows reuse the original field and value shapes (covered);
+  - `source_deleted.current_value` is covered at depth;
+  - `linked_user_id` is not writable through `update_field`, and `kind` cannot be hidden;
+  - ENTITY_REF ids are deferred to E0-WorldCore.5.
 
 ## Review Triage Log
 
@@ -273,3 +296,7 @@ Rejected, each with its reason in the triage log:
 **Needs desktop verification:** none. All tests ran on the desktop; there is no GPU, Ollama or compose work in this story.
 
 **Residual risks:** the deferred items above. In particular, E0-Access's events route must filter `entities` invalidations by Audience before any Player subscribes to `campaign:{id}:events`.
+
+**Follow-up (coordinator, after 98920fa):**
+- The `completed_at` leak is fixed through `access.project`, using the registry `value_fields`, `field_requires` and `gm_value_keys` on `entity_changes`. The xfail is now a passing test. New tests cover the reverse case (status hidden), the fail-closed path, and `journal_id` in `source_deleted`. A new EV-4 probe (`stamped` fixture) shows Players, share holders and the cross-Campaign Player see neither stamp, with a GM control.
+- One more deferred item: ENTITY_REF ids in history go to E0-WorldCore.5.

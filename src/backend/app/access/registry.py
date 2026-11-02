@@ -80,7 +80,7 @@ from sqlalchemy.orm import aliased
 import app.db.models  # noqa: F401  (every model is mapped before the completeness check)
 from app.access.audience import (
     GM_AUDIENCE, MEMBERS, PUBLIC, ALWAYS_GM_FIELDS, AnyOf, Audience, AudienceLevel, covers, field_audience,
-    most_restrictive, owner, stored_audience,
+    most_restrictive, owner, stored_audience, visible_to,
 )
 from app.access.policy import not_found
 from app.db.base import Base
@@ -191,6 +191,22 @@ class Derived:
     # row's `op_field` is one of `public_null_ops` (entity_changes: migrated).
     op_field: str | None = None
     public_null_ops: tuple[str, ...] = ()
+    # parent_field only: keys inside the row's JSON values (at any depth) that
+    # carry another field of the parent, as (key, parent field) pairs. A Quest
+    # status row holds `completed_at`, which is `attributes.completed_at`.
+    # `access.project` drops such a key for a viewer that field's Audience
+    # does not cover (`hidden_value_keys`), so a history row never shows a
+    # value the viewer cannot see on the parent itself.
+    value_fields: tuple[tuple[str, str], ...] = ()
+    # parent_field only: a row whose `field` is X also carries parent field Y,
+    # as (X, Y) pairs. A completion stamp reveals a Quest's status, so an
+    # `attributes.completed_at` row's values are redacted for a viewer who may
+    # not see `status` (the Entity projection drops completed_at likewise).
+    field_requires: tuple[tuple[str, str], ...] = ()
+    # parent_field only: keys inside the row's JSON values (at any depth) that
+    # only a GM sees, whatever the field (provenance: a `source_deleted` row's
+    # `journal_id`, which the Party schema leaves out as `source_journal_id`).
+    gm_value_keys: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.derive_from:
@@ -205,6 +221,9 @@ class Derived:
             raise ValueError("derived: field_rule='parent_field' needs a field and a parent(...) link")
         if self.floor is not None and not isinstance(self.derive_from[0], Parent):
             raise ValueError("derived: a floor needs parent(...) links")
+        if (self.value_fields or self.field_requires or self.gm_value_keys) and \
+                self.field_rule != FIELD_RULE_PARENT_FIELD:
+            raise ValueError("derived: value_fields, field_requires and gm_value_keys need field_rule='parent_field'")
 
 
 @dataclass(frozen=True)
@@ -253,9 +272,11 @@ def reached_through(child: type, fk: str, *, remote: str = "id") -> ReachedThrou
 def derived(derive_from: Sequence[Parent | ReachedThrough], *, field: str | None = None,
             gm_fields: Iterable[str] = (), floor: str | None = None,
             field_rule: str = FIELD_RULE_AUDIENCE, op_field: str | None = None,
-            public_null_ops: Iterable[str] = ()) -> Derived:
+            public_null_ops: Iterable[str] = (), value_fields: Mapping[str, str] | None = None,
+            field_requires: Mapping[str, str] | None = None, gm_value_keys: Iterable[str] = ()) -> Derived:
     return Derived(tuple(derive_from), field, tuple(gm_fields), floor, field_rule, op_field,
-                   tuple(public_null_ops))
+                   tuple(public_null_ops), tuple(sorted((value_fields or {}).items())),
+                   tuple(sorted((field_requires or {}).items())), tuple(gm_value_keys))
 
 
 def always_gm(*, owner_field: str | None = None, gm_fields: Iterable[str] = ()) -> AlwaysGM:
@@ -320,7 +341,12 @@ REGISTRY: dict[type, Registration] = {
     # A change with no field (create, delete, merge snapshots may hold gm_notes)
     # is GM, except the content-free `migrated` row.
     EntityChange: derived([parent(Entity, "entity_id", attr="entity")], field="field",
-                          field_rule=FIELD_RULE_PARENT_FIELD, op_field="op", public_null_ops=("migrated",)),
+                          field_rule=FIELD_RULE_PARENT_FIELD, op_field="op", public_null_ops=("migrated",),
+                          # A Quest's status rows hold {status, completed_at} (E0-WorldCore.3).
+                          value_fields={"completed_at": "attributes.completed_at"},
+                          field_requires={"attributes.completed_at": "status"},
+                          # source_deleted rows: which entry (GM provenance).
+                          gm_value_keys=("journal_id",)),
 }
 
 # Tables with a campaign_id that are not Campaign content, with the reason.
@@ -921,7 +947,18 @@ def _parent_field_audience(obj: Any, reg: Derived, parent_model: type, parent_ob
     if value is None:
         op = getattr(obj, reg.op_field) if reg.op_field is not None else None
         return PUBLIC if op is not None and str(op) in reg.public_null_ops else GM_AUDIENCE
-    name = str(value)
+    return parent_field_audience(parent_model, parent_obj, str(value))
+
+
+def parent_field_audience(parent_model: type, parent_obj: Any, name: str) -> Audience:
+    """The Audience that may see field `name` of `parent_obj` (a stored row
+    with field visibility, e.g. an Entity): GM for an always-GM field, a
+    gm_field, `field_visibility`/`visibility_floor` and their keys; otherwise
+    narrowed by `field_visibility[name]` and `field_visibility[<name up to its
+    first '.'>]`. The rule a `parent_field` history row is read by."""
+    preg = registration(parent_model)
+    if not isinstance(preg, Stored):
+        raise TypeError(f"parent_field_audience: {parent_model.__name__} is not a stored model")
     head = name.split(".", 1)[0]
     gm_names = _parent_gm_change_fields(preg)
     if name in gm_names or head in gm_names:
@@ -941,6 +978,42 @@ def _parent_field_audience(obj: Any, reg: Derived, parent_model: type, parent_ob
         if vis is not None:
             auds.append(_safe_stored_audience(vis, owner_id, kind))
     return most_restrictive(auds)
+
+
+def hidden_row_values(obj: Any, ctx: "CampaignContext", parent_obj: Any = None) -> bool:
+    """True when ctx may not see a derived row's values at all: its `field`
+    has a `field_requires` partner field that ctx may not see on the parent
+    (no parent row: True for a non-GM, fail closed). False for a GM ctx."""
+    reg = REGISTRY.get(type(obj))
+    if not isinstance(reg, Derived) or not reg.field_requires or ctx.audience.level is AudienceLevel.GM:
+        return False
+    name = getattr(obj, reg.field, None)
+    partners = [other for field_name, other in reg.field_requires if field_name == name]
+    if not partners:
+        return False
+    if parent_obj is None:
+        return True
+    parent_model = reg.derive_from[0].model
+    return any(not visible_to(parent_field_audience(parent_model, parent_obj, other), ctx) for other in partners)
+
+
+def hidden_value_keys(obj: Any, ctx: "CampaignContext", parent_obj: Any = None) -> frozenset[str]:
+    """The keys inside a derived row's JSON values that ctx may not see: its
+    `gm_value_keys`, and the `value_fields` keys whose parent field's Audience
+    does not cover ctx. With no parent row (not loaded, not given), every
+    value_fields key is hidden from a non-GM (fail closed). Empty for a GM
+    ctx and for models without either option."""
+    reg = REGISTRY.get(type(obj))
+    if not isinstance(reg, Derived) or not (reg.value_fields or reg.gm_value_keys) \
+            or ctx.audience.level is AudienceLevel.GM:
+        return frozenset()
+    hidden = set(reg.gm_value_keys)
+    if parent_obj is None:
+        return frozenset(hidden | {key for key, _field in reg.value_fields})
+    parent_model = reg.derive_from[0].model
+    hidden.update(key for key, field_name in reg.value_fields
+                  if not visible_to(parent_field_audience(parent_model, parent_obj, field_name), ctx))
+    return frozenset(hidden)
 
 
 def gm_fields(model: type) -> tuple[str, ...]:

@@ -145,3 +145,48 @@ async def test_gm_of_another_campaign_sees_nothing_of_a(ev4, db, world):
     raw = (await db.execute(sa.select(sa.func.count()).select_from(EntityChange).where(
         EntityChange.campaign_id == ev4.a.campaign_id))).scalar_one()
     assert raw > 0
+
+
+# ── Values a history row carries for another field (completed_at) ──────────
+
+@pytest.fixture
+async def stamped(ev4, db):
+    """Two Party Quests: one with `attributes` hidden (its status rows carry
+    completed_at), one with `status` hidden (its completed_at rows reveal it)."""
+    a = ev4.a.campaign_id
+    gm = await ctx_for(db, ev4.a.owner_id, a)
+    secrets = {"attrs_hidden": "1987-06-05T04:03:02+00:00", "status_hidden": "1976-05-04T03:02:01+00:00"}
+    hidden_attrs = (await apply_change(db, gm, CreateEntity(type="quest", name="Quiet quest",
+                                                            status="completed"))).entity_id
+    hidden_status = (await apply_change(db, gm, CreateEntity(type="quest", name="Open secret"))).entity_id
+    for qid in (hidden_attrs, hidden_status):
+        await set_visibility(db, gm, RecordRef(kind="entity", id=qid), "party")
+    await set_visibility(db, gm, RecordRef(kind="entity", id=hidden_attrs, field="attributes"), "gm")
+    await apply_change(db, gm, UpdateField(entity_id=hidden_attrs, field="attributes.completed_at",
+                                           value=secrets["attrs_hidden"]))
+    flip = await apply_change(db, gm, SetStatus(entity_id=hidden_attrs, status="active"))
+    await revert_change(db, gm, flip.id)
+    await set_visibility(db, gm, RecordRef(kind="entity", id=hidden_status, field="status"), "gm")
+    await apply_change(db, gm, UpdateField(entity_id=hidden_status, field="attributes.completed_at",
+                                           value=secrets["status_hidden"]))
+    await db.commit()
+    return {"gm": gm, "secrets": secrets, "quests": (hidden_attrs, hidden_status)}
+
+
+async def test_gm_sees_the_completion_stamps(ev4, db, stamped):
+    body = await _body(db, stamped["gm"], await _history(db, stamped["gm"]))
+    for value in stamped["secrets"].values():
+        assert value in body
+
+
+@pytest.mark.parametrize("name", NON_GM)
+async def test_non_gm_never_sees_a_hidden_completion_stamp_in_history(ev4, db, stamped, name):
+    actor, ctx = await _ctx(ev4, db, name)
+    rows = [r for r in await _history(db, ctx) if r.entity_id in stamped["quests"]]
+    body = await _body(db, ctx, rows)
+    for value in stamped["secrets"].values():
+        assert value not in body, name
+    if name == "player":
+        # The control: the status rows of the first Quest are there, without the stamp.
+        assert any(r.op in ("set_status", "revert") for r in rows)
+    assert canary_hits(actor, body) == []

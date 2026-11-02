@@ -1093,18 +1093,89 @@ async def test_revert_of_a_revert_and_after_a_merge(db, ev4, gm):
         assert await _code(revert_change(db, gm, edit.id, force=force)) == "merged"
 
 
-@pytest.mark.xfail(strict=True, reason="open: a Quest status row holds completed_at, which hidden attributes "
-                   "do not narrow (needs a decision: refuse GM edits of completed_at, or a two-field rule)")
+async def _projected_history(db, ctx, entity_id) -> list[dict]:
+    from app.access import project_all
+    rows = (await db.execute(ws.scoped_select(EntityChange, ctx).where(EntityChange.entity_id == entity_id)
+                             .order_by(EntityChange.created_at, EntityChange.id)
+                             .execution_options(populate_existing=True))).scalars().all()
+    return [b.model_dump(mode="json") for b in await project_all(db, rows, ctx)]
+
+
 async def test_a_quest_status_row_does_not_carry_a_hidden_attribute(db, ev4, gm):
-    """Party Quest, attributes hidden: a status row must not show a GM-edited completed_at."""
+    """Party Quest, attributes hidden: its status rows must not show completed_at to a Player."""
     quest = await _create(db, gm, type="quest", status="completed")
     await set_visibility(db, gm, RecordRef(kind="entity", id=quest.id), "party")
     await set_visibility(db, gm, RecordRef(kind="entity", id=quest.id, field="attributes"), "gm")
     secret = "1999-12-31T23:59:00+00:00"
     await apply_change(db, gm, UpdateField(entity_id=quest.id, field="attributes.completed_at", value=secret))
-    await apply_change(db, gm, SetStatus(entity_id=quest.id, status="active"))
+    status = await apply_change(db, gm, SetStatus(entity_id=quest.id, status="active"))
+    undo = await revert_change(db, gm, status.id)  # a revert row carries it too
     await db.commit()
     player = await _player(ev4, db)
-    rows = (await db.execute(ws.scoped_select(EntityChange, player).where(EntityChange.entity_id == quest.id)
-                             .execution_options(populate_existing=True))).scalars().all()
-    assert secret not in repr([(r.old_value, r.new_value) for r in rows])
+    seen = await _projected_history(db, player, quest.id)
+    assert secret not in repr(seen)
+    by_id = {r["id"]: r for r in seen}
+    # The status itself is still shown; only the hidden attribute is dropped.
+    assert by_id[str(status.id)]["old_value"] == {"status": "completed"}
+    assert by_id[str(status.id)]["new_value"] == {"status": "active"}
+    assert by_id[str(undo.id)]["new_value"] == {"status": "completed"}
+    assert all(r["field"] != "attributes.completed_at" for r in seen)  # that row is GM (attributes hidden)
+    # The GM sees every value.
+    assert secret in repr(await _projected_history(db, gm, quest.id))
+
+
+async def test_a_completion_stamp_row_does_not_reveal_a_hidden_status(db, ev4, gm):
+    """Party Quest, status hidden, attributes shown: an attributes.completed_at row reveals the status."""
+    quest = await _create(db, gm, type="quest")
+    await set_visibility(db, gm, RecordRef(kind="entity", id=quest.id), "party")
+    await set_visibility(db, gm, RecordRef(kind="entity", id=quest.id, field="status"), "gm")
+    stamp = "2001-02-03T04:05:06+00:00"
+    edit = await apply_change(db, gm, UpdateField(entity_id=quest.id, field="attributes.completed_at", value=stamp))
+    other = await apply_change(db, gm, UpdateField(entity_id=quest.id, field="attributes.reward", value="Gold"))
+    await db.commit()
+    player = await _player(ev4, db)
+    by_id = {r["id"]: r for r in await _projected_history(db, player, quest.id)}
+    assert (by_id[str(edit.id)]["old_value"], by_id[str(edit.id)]["new_value"]) == (None, None)
+    assert by_id[str(other.id)]["new_value"] == "Gold"  # other attributes are untouched
+    assert stamp not in repr(by_id)
+    gm_view = {r["id"]: r for r in await _projected_history(db, gm, quest.id)}
+    assert gm_view[str(edit.id)]["new_value"] == stamp
+
+
+async def test_history_values_fail_closed_without_the_parent(db, ev4, gm):
+    """project() with no loaded parent and none given drops the carried keys for a non-GM."""
+    from app.access import project, registry as access_registry
+    quest = await _create(db, gm, type="quest", status="completed")
+    await set_visibility(db, gm, RecordRef(kind="entity", id=quest.id), "party")
+    status = await apply_change(db, gm, SetStatus(entity_id=quest.id, status="active"))
+    await db.commit()
+    player = await _player(ev4, db)
+    row = (await db.execute(ws.scoped_select(EntityChange, player).where(EntityChange.id == status.id)
+                            .execution_options(populate_existing=True))).scalar_one()
+    assert "entity" in sa.inspect(row).unloaded
+    body = project(row, player).model_dump(mode="json")
+    assert body["old_value"] == {"status": "completed"} and body["new_value"] == {"status": "active"}
+    # Given the parent (attributes visible), completed_at is shown.
+    parent = await _get(db, Entity, quest.id)
+    assert "completed_at" in project(row, player, parent=parent).model_dump(mode="json")["old_value"]
+    assert access_registry.hidden_value_keys(row, gm) == frozenset()
+    assert access_registry.hidden_value_keys(row, player) == frozenset({"completed_at", "journal_id"})
+    assert access_registry.hidden_value_keys(row, player, parent) == frozenset({"journal_id"})
+
+
+
+async def test_a_source_deleted_row_hides_its_entry_from_a_player(db, ev4, gm):
+    """A field-based source_deleted row is readable with its field, but its journal_id is GM provenance."""
+    entity = await _create(db, gm, type="location", name="Harbor")
+    await set_visibility(db, gm, RecordRef(kind="entity", id=entity.id), "party")
+    journal_id = _entry(ev4)
+    row = await apply_change(db, gm.as_system("entry_deleted"), SourceDeleted(
+        entity_id=entity.id, source_journal_id=journal_id, field="description"))
+    await db.commit()
+    player = await _player(ev4, db)
+    seen = {r["id"]: r for r in await _projected_history(db, player, entity.id)}
+    assert str(row.id) in seen
+    assert "journal_id" not in seen[str(row.id)]["new_value"]
+    assert str(journal_id) not in repr(seen)
+    gm_view = {r["id"]: r for r in await _projected_history(db, gm, entity.id)}
+    assert gm_view[str(row.id)]["new_value"]["journal_id"] == str(journal_id)
