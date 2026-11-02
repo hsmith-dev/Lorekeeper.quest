@@ -511,6 +511,16 @@ export interface AdminLogs {
   lines: string[];
 }
 
+// GET /api/admin/jobs/stats (E0-Jobs.7): Job counts across every Campaign.
+export type JobStatusName = "queued" | "running" | "done" | "failed" | "cancelled";
+export type JobQueueName = "interactive" | "onsave" | "backfill";
+
+export interface AdminJobStats {
+  total: number;
+  by_status: Record<JobStatusName, number>;
+  by_queue: Record<JobQueueName, Record<JobStatusName, number>>;
+}
+
 export interface RetrievalCandidate {
   id: string;
   shorthand?: string; // GM only
