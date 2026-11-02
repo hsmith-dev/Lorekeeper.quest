@@ -235,7 +235,14 @@ def _edge(src: Entity | None, tgt: Entity | None, visibility: str = "party", flo
     return edge
 
 
-def test_check_create_counts_floor_and_endpoints():
+def test_check_create_counts_floor_and_endpoints(monkeypatch):
+    # check_create ends with can_write (E0-Access.6), which refuses any
+    # Player create but their own Player Journal entry:
+    with pytest.raises(NotFound):
+        check_create(_edge(entity("party"), entity("party")), PLAYER_CTX)
+    # The visibility half on its own (write gate off for this test):
+    from app.access import projection
+    monkeypatch.setattr(projection, "can_write", lambda ctx, obj: None)
     check_create(_edge(entity("party"), entity("party")), PLAYER_CTX)  # visible: allowed
     with pytest.raises(NotFound):
         check_create(_edge(entity("party"), entity("gm")), PLAYER_CTX)

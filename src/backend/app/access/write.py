@@ -19,8 +19,13 @@ Rules, in order:
   * `player` may write only
       - a `journal_entries` row with `kind=player` and `user_id = ctx.user_id`;
       - a `character_sheets` row whose `pc_entity_id` resolves to an Entity
-        with `linked_user_id = ctx.user_id`. Until F3-world adds `entities`
-        that check is always false (no query is made); E7 / F3 widen it here.
+        with `linked_user_id = ctx.user_id`. That check is always false for
+        now (no query is made); E7 links Players to their PCs and widens it;
+      - STOPGAP until E7 (owner decision 2026-11-01): an existing (persisted)
+        `character_sheets` row the Player created (`created_by_user_id =
+        ctx.user_id`) may be updated or deleted. A create is still refused
+        (a transient row never matches), templates stay GM-only, and another
+        user's sheet is the one 404. `SHEET_AUTHOR_STOPGAP = False` removes it.
 
 Every refusal is the one `not_found()` (never 403), so a write the caller may
 not make answers exactly like a missing row.
@@ -59,6 +64,10 @@ _JOURNAL_ENTRIES = "journal_entries"
 _CHARACTER_SHEETS = "character_sheets"
 # Unscoped tables whose rows follow a parent the route already gated.
 _PARENT_SCOPED = frozenset({"journal_tags"})
+# STOPGAP until E7 (owner decision 2026-11-01): Players may update / delete
+# the Character Sheets they created. E7 deletes this flag and its branch in
+# `_player_may_write` (tests/access/test_write_rules.py proves that is clean).
+SHEET_AUTHOR_STOPGAP = True
 _PLAYER_KIND = "player"  # app.domain.enums.EntryKind.PLAYER (a StrEnum compares equal)
 
 
@@ -84,10 +93,27 @@ def _player_may_write(ctx: CampaignContext, obj: Any) -> bool:
     if table == _JOURNAL_ENTRIES:
         return getattr(obj, "kind", None) == _PLAYER_KIND and getattr(obj, "user_id", None) == ctx.user_id
     if table == _CHARACTER_SHEETS:
-        # pc_entity_id -> entities.linked_user_id: no `entities` table until
-        # F3-world, so no sheet is a Player's own linked PC yet.
+        # pc_entity_id -> entities.linked_user_id: E7 links Players to PCs;
+        # until then no sheet is a Player's own linked PC.
+        # STOPGAP until E7 (owner decision 2026-11-01): the sheet's author may
+        # update or delete it. Only a persisted row (an update or delete,
+        # never a create) by this user.
+        if SHEET_AUTHOR_STOPGAP and _persisted(obj):
+            return getattr(obj, "created_by_user_id", None) == ctx.user_id
         return False
     return False
+
+
+def _persisted(obj: Any) -> bool:
+    """True for a row loaded from (or flushed to) the database, False for a
+    transient one being created."""
+    from sqlalchemy import inspect as sa_inspect
+    from sqlalchemy.exc import NoInspectionAvailable
+
+    try:
+        return bool(sa_inspect(obj).persistent)
+    except NoInspectionAvailable:
+        return False
 
 
 def may_write(ctx: CampaignContext, obj: Any) -> bool:

@@ -297,6 +297,84 @@ async def test_player_tags_untags_and_deletes_only_their_own_player_entries(clie
         assert await db.scalar(sa.select(sa.func.count()).where(JournalEntry.id == e.id)) == 0
 
 
+# ── STOPGAP until E7 (owner decision 2026-11-01): a Player's own sheets ───
+
+async def _sheets(db, ev4):
+    """A sheet by the Player, one by another Player, one by the Owner (all
+    Party, so the Player can see each)."""
+    a = ev4.a.campaign_id
+    player = await ev4.actor("player")
+    other = await ev4.make_member("player", label="sheet-other")
+    template_id = ev4.a.ids["character_sheet_templates"][0]
+
+    def sheet(author):
+        s = CharacterSheet(campaign_id=a, template_id=template_id, created_by_user_id=author,
+                           name=f"Pc {uuid.uuid4().hex[:6]}", data={}, visibility="party")
+        db.add(s)
+        return s
+
+    own, others, gms = sheet(player.user_id), sheet(other.id), sheet(ev4.a.owner_id)
+    await db.commit()
+    return player, own, others, gms
+
+
+async def test_player_edits_only_their_own_sheets(client, db, ev4):
+    player, own, others, gms = await _sheets(db, ev4)
+    for s in (others, gms):
+        for method, kw in (("PATCH", {"json": {"name": "Mine now"}}), ("DELETE", {})):
+            r = await client.request(method, f"/api/character-sheets/{s.id}", headers=player.headers, **kw)
+            missing = await client.request(method, f"/api/character-sheets/{MISSING}", headers=player.headers, **kw)
+            assert (r.status_code, r.content) == (missing.status_code, missing.content) == (404, NOT_FOUND_BYTES)
+        assert await db.scalar(sa.select(sa.func.count()).where(CharacterSheet.id == s.id,
+                                                                 CharacterSheet.name != "Mine now")) == 1
+    r = await client.patch(f"/api/character-sheets/{own.id}", json={"name": "Pippa"}, headers=player.headers)
+    assert r.status_code == 200 and r.json()["name"] == "Pippa", r.text
+    # Creates and templates stay GM-only.
+    a = str(ev4.a.campaign_id)
+    template_id = str(ev4.a.ids["character_sheet_templates"][0])
+    r = await client.post("/api/character-sheets/", headers=player.headers,
+                          json={"campaign_id": a, "template_id": template_id, "name": "New", "data": {}})
+    assert (r.status_code, r.content) == (404, NOT_FOUND_BYTES)
+    r = await client.patch(f"/api/character-sheets/templates/{template_id}", json={"name": "X"},
+                           headers=player.headers)
+    assert (r.status_code, r.content) == (404, NOT_FOUND_BYTES)
+    assert (await client.delete(f"/api/character-sheets/{own.id}", headers=player.headers)).status_code == 204
+    assert await db.scalar(sa.select(sa.func.count()).where(CharacterSheet.id == own.id)) == 0
+
+
+async def test_sheet_stopgap_is_refused_to_reduced_ctxs(client, db, ev4):
+    """Preview and audience ctxs never pass, even on the viewer's own sheet;
+    a transient sheet (a create) never matches the stopgap."""
+    player, own, _, _ = await _sheets(db, ev4)
+    row = await db.get(CharacterSheet, own.id)
+    p_ctx = _ctx(PLAYER, player.user_id, ev4.a.campaign_id)
+    assert may_write(p_ctx, row)
+    assert not may_write(audience_ctx(ev4.a.campaign_id, as_user(player.user_id), by=p_ctx), row)
+    assert not may_write(audience_ctx(ev4.a.campaign_id, ANON_VIEW, by=p_ctx), row)
+    new = CharacterSheet(campaign_id=ev4.a.campaign_id, template_id=row.template_id,
+                         created_by_user_id=player.user_id, name="New", data={})
+    assert not may_write(p_ctx, new)
+    co_gm = await ev4.actor("co_gm")
+    r = await client.patch(f"/api/character-sheets/{own.id}", json={"name": "Preview"},
+                           headers={**co_gm.headers, "X-Lorekeeper-Preview": "member"})
+    assert (r.status_code, r.content) == (404, NOT_FOUND_BYTES)
+
+
+async def test_sheet_stopgap_removes_cleanly(client, db, ev4, monkeypatch):
+    """E7 deletes SHEET_AUTHOR_STOPGAP: with it off a Player edits no sheet
+    (the uniform 404) and GMs are unchanged."""
+    from app.access import write
+
+    player, own, _, _ = await _sheets(db, ev4)
+    monkeypatch.setattr(write, "SHEET_AUTHOR_STOPGAP", False)
+    r = await client.patch(f"/api/character-sheets/{own.id}", json={"name": "Nope"}, headers=player.headers)
+    missing = await client.patch(f"/api/character-sheets/{MISSING}", json={"name": "Nope"}, headers=player.headers)
+    assert (r.status_code, r.content) == (missing.status_code, missing.content) == (404, NOT_FOUND_BYTES)
+    co_gm = await ev4.actor("co_gm")
+    r = await client.patch(f"/api/character-sheets/{own.id}", json={"name": "GM edit"}, headers=co_gm.headers)
+    assert r.status_code == 200, r.text
+
+
 async def test_a_previewing_gm_writes_nothing(client, db, ev4):
     a = ev4.a.campaign_id
     owner = await ev4.actor("gm_owner")

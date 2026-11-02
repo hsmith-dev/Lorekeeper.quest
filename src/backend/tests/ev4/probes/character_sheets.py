@@ -3,10 +3,10 @@ sheet is visibility gm (canary name and data): absent from lists and from
 template counts, and answered like a missing sheet by id.
 
 E0-Access.6: every sheet and template write goes through access.can_write.
-A Player may write only the sheet of their own linked PC, which no sheet is
-until F3-world, so a Player's write on a visible sheet or template (and a
-create) answers exactly like a missing one and changes nothing. A Co-GM
-writes as before."""
+A Player's write on someone else's visible sheet, on a template, and a create
+answer exactly like a missing one and change nothing. STOPGAP until E7 (owner
+decision 2026-11-01): a Player may update and delete a sheet they created.
+A Co-GM writes as before."""
 from __future__ import annotations
 
 from tests.ev4.families import assert_counts_and_ranking_unchanged, assert_hidden_equals_missing, assert_no_canary
@@ -54,11 +54,22 @@ async def probe_update_sheet(ev4, actor):
         assert r.status_code == 200, r.text
         assert_no_canary(actor, r)
         return
-    # Hidden sheets, and (E0-Access.6) a visible Party sheet: like missing.
-    for sheet in [*await _hidden_sheets(ev4), party]:
+    # Hidden sheets, and (E0-Access.6) another user's visible Party sheet
+    # (the Owner's, another Player's): like missing.
+    others = [party]
+    if authenticated(actor):
+        peer = await ev4.make_member("player", label="sheet-peer")
+        others.append(await add_sheet(ev4, visibility="party", author=peer.id))
+    for sheet in [*await _hidden_sheets(ev4), *others]:
         await assert_hidden_equals_missing(actor, f"{BASE}/{sheet}", f"{BASE}/{MISSING}", method="PATCH",
                                            json={"name": "Renamed"})
         assert await row_count(ev4, CharacterSheet, CharacterSheet.id == sheet, CharacterSheet.name == "Renamed") == 0
+    if authenticated(actor):
+        # STOPGAP until E7: the Player's own sheet.
+        own = await add_sheet(ev4, visibility="party", author=actor.user_id, canary=False)
+        r = await actor.patch(f"{BASE}/{own}", json={"name": "Renamed"})
+        assert r.status_code == 200, r.text
+        assert_no_canary(actor, r)
 
 
 @ev4_probe("DELETE", "/api/character-sheets/{sheet_id}", actors=WITH_CO_GM)
@@ -72,9 +83,20 @@ async def probe_delete_sheet(ev4, actor):
         assert r.status_code == 204, r.text
         assert await row_count(ev4, CharacterSheet, CharacterSheet.id == party) == 0
         return
-    for sheet in [*await _hidden_sheets(ev4), party]:
+    others = [party]
+    if authenticated(actor):
+        peer = await ev4.make_member("player", label="sheet-peer")
+        others.append(await add_sheet(ev4, visibility="party", author=peer.id))
+    for sheet in [*await _hidden_sheets(ev4), *others]:
         await assert_hidden_equals_missing(actor, f"{BASE}/{sheet}", f"{BASE}/{MISSING}", method="DELETE")
         assert await row_count(ev4, CharacterSheet, CharacterSheet.id == sheet) == 1
+    if authenticated(actor):
+        # STOPGAP until E7: the Player's own sheet.
+        own = await add_sheet(ev4, visibility="party", author=actor.user_id, canary=False)
+        r = await actor.delete(f"{BASE}/{own}")
+        assert_no_canary(actor, r)
+        assert r.status_code == 204, r.text
+        assert await row_count(ev4, CharacterSheet, CharacterSheet.id == own) == 0
 
 
 @ev4_probe("POST", "/api/character-sheets/", actors=WITH_CO_GM)
