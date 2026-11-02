@@ -7,3 +7,5 @@
 #     reason: "Static liveness payload; reads no Campaign data."
 - route: "GET /api/chat/health"
   reason: "Reports only whether the local LLM backend answers ({ai_online: bool}); reads no Campaign, session or user data."
+- route: "GET /api/admin/jobs/stats"
+  reason: "Admin-only (router-level require_admin): Job counts by status and queue across every Campaign; no kind, payload, Campaign id or other Campaign data."
