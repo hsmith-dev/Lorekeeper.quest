@@ -25,6 +25,7 @@ import httpx
 import pytest
 import pytest_asyncio
 import redis.asyncio as aioredis
+import sqlalchemy as sa
 from rq import Queue
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -35,10 +36,13 @@ from app.core import pubsub, valkey_client
 from app.core.config import get_settings
 from app.core.limiter import limiter, user_or_ip
 from app.db.models import Campaign, Genre, Job, JournalEntry
+from app.db.models.campaign_member import CampaignMember
 from app.db.session import get_db
 from app.domain.enums import JobQueue, JobStatus
 from app.jobs import control, outbox, worker
 from app.jobs.control import JobConflict, cancel_job, job_counts, retry_job
+from app.jobs.registry import get_kind
+from app.jobs.worker import reap
 from tests.ev4.fixtures import bearer, create_user, make_member
 from tests.test_sse import Reader, serve  # noqa: F401  (the uvicorn fixture)
 
@@ -83,14 +87,14 @@ class World:
 
     async def job(self, starter, *, status: str = "queued", ctx_kind: str | None = None, created_at=None,
                   result_ref=None, kind: str = "system.noop", queue: str = "interactive", key: str | None = None,
-                  finished_at=None, campaign_id=None) -> uuid.UUID:
+                  finished_at=None, campaign_id=None, access_epoch: int = 0) -> uuid.UUID:
         now = datetime.now(timezone.utc)
         if ctx_kind is None:
             ctx_kind = "gm" if starter in (self.owner, self.co_gm) else "player"
         terminal = status in ("done", "failed", "cancelled")
         row = Job(id=uuid.uuid4(), campaign_id=campaign_id or self.cid, kind=kind, queue=queue, status=status,
                   payload={}, idempotency_key=key or f"test-jr:{uuid.uuid4().hex}", ctx_kind=ctx_kind,
-                  ctx_user_id=starter.id, created_by=starter.id, access_epoch=0,
+                  ctx_user_id=starter.id, created_by=starter.id, access_epoch=access_epoch,
                   attempts=3 if status == "failed" else 0, progress=0.4 if status == "running" else None,
                   stage="Working" if status == "running" else None,
                   error_code="internal" if status == "failed" else None,
@@ -207,6 +211,32 @@ async def test_list_default_window_newest_first(client, world):
     assert [j["id"] for j in r.json()["jobs"]] == [str(recent)]
     r = await client.get(f"/api/jobs/?campaign_id={world.cid}&status=bogus", headers=bearer(world.owner))
     assert r.status_code == 422
+
+
+async def test_list_never_cuts_active_jobs_for_newer_finished_ones(client, world):
+    now = datetime.now(timezone.utc)
+    old_queued = await world.job(world.owner, status="queued", created_at=now - timedelta(days=2))
+    for i in range(access_jobs.LIST_LIMIT + 5):
+        world.db.add(Job(id=uuid.uuid4(), campaign_id=world.cid, kind="system.noop", queue="interactive",
+                         status="done", payload={}, idempotency_key=f"test-jr:{uuid.uuid4().hex}", ctx_kind="gm",
+                         ctx_user_id=world.owner.id, created_by=world.owner.id,
+                         created_at=now - timedelta(minutes=i), finished_at=now - timedelta(minutes=i)))
+    await world.db.commit()
+    r = await client.get(f"/api/jobs/?campaign_id={world.cid}", headers=bearer(world.owner))
+    assert r.status_code == 200, r.text
+    jobs = r.json()["jobs"]
+    assert len(jobs) == access_jobs.LIST_LIMIT + 1
+    assert jobs[-1]["id"] == str(old_queued) and jobs[-1]["queue_position"] == 0
+
+
+async def test_an_explicit_status_has_no_time_window(client, world):
+    now = datetime.now(timezone.utc)
+    old_failed = await world.job(world.owner, status="failed", created_at=now - timedelta(days=4),
+                                 finished_at=now - timedelta(days=3))
+    r = await client.get(f"/api/jobs/?campaign_id={world.cid}&status=failed", headers=bearer(world.owner))
+    assert [j["id"] for j in r.json()["jobs"]] == [str(old_failed)]
+    r = await client.get(f"/api/jobs/?campaign_id={world.cid}", headers=bearer(world.owner))
+    assert str(old_failed) not in [j["id"] for j in r.json()["jobs"]]
 
 
 async def test_list_is_scoped_and_counts_only_visible_jobs_ahead(client, world):
@@ -332,13 +362,19 @@ async def test_cancel_releases_dependents(world, rq_conn):
 # ── Retry ──────────────────────────────────────────────────────────────────
 
 async def test_retry_failed_requeues_the_same_row_and_pushes_after_commit(client, world, rq_conn):
-    job_id = await world.job(world.player, status="failed")
+    job_id = await world.job(world.player, status="failed", queue="backfill",
+                             result_ref=_ref(world.party_entry))
+    row = await world.row(job_id)
+    row.eta_seconds = 30
+    row.heartbeat_at = datetime.now(timezone.utc)
+    await world.db.commit()
     r = await client.post(f"/api/jobs/{job_id}/retry", headers=bearer(world.player))
     assert r.status_code == 202 and r.json() == {"job_id": str(job_id)}
     row = await world.row(job_id)
     assert row.status == JobStatus.QUEUED and row.attempts == 0
+    assert row.queue == get_kind(row.kind).queue == JobQueue.INTERACTIVE
     assert (row.error_code, row.error_message, row.progress, row.stage, row.worker_id, row.started_at,
-            row.finished_at, row.next_run_at) == (None,) * 8
+            row.finished_at, row.next_run_at, row.result_ref, row.eta_seconds, row.heartbeat_at) == (None,) * 11
     assert Queue("interactive", connection=rq_conn).job_ids == [str(job_id)]
     # A GM retries anyone's failed Job.
     other = await world.job(world.player2, status="failed")
@@ -352,6 +388,34 @@ async def test_retry_runs_again_under_jobs_eager(client, world):
     assert r.status_code == 202
     row = await world.row(job_id)
     assert row.status == JobStatus.DONE and row.attempts == 1
+
+
+async def test_the_starter_retrying_takes_their_current_epoch(client, world):
+    """Demoted then re-promoted: the grant's epoch moved, so the old Job
+    failed `permission_changed`. Retried by its starter, it runs."""
+    await world.db.execute(sa.update(CampaignMember).where(
+        CampaignMember.campaign_id == world.cid, CampaignMember.user_id == world.player.id).values(access_epoch=2))
+    await world.db.commit()
+    job_id = await world.job(world.player, status="failed", access_epoch=1)
+    r = await client.post(f"/api/jobs/{job_id}/retry", headers=bearer(world.player))
+    assert r.status_code == 202, r.text
+    row = await world.row(job_id)
+    assert row.access_epoch == 2
+    assert row.status == JobStatus.DONE  # JOBS_EAGER ran the system.noop
+
+
+async def test_a_key_taken_after_the_check_is_409_and_writes_nothing(client, world, rq_conn, monkeypatch):
+    """The partial unique index backs the pre-check: with the check blind
+    (no active statuses), the savepoint's flush fails and maps to 409."""
+    key = f"test-jr:{uuid.uuid4().hex}"
+    failed = await world.job(world.owner, status="failed", key=key)
+    await world.job(world.owner, status="queued", key=key)
+    monkeypatch.setattr(control, "ACTIVE_STATUSES", ())
+    r = await client.post(f"/api/jobs/{failed}/retry", headers=bearer(world.owner))
+    assert r.status_code == 409 and r.json() == {"detail": control.KEY_IN_USE}
+    await world.db.commit()
+    assert (await world.row(failed)).status == JobStatus.FAILED
+    assert Queue("interactive", connection=rq_conn).job_ids == []
 
 
 async def test_retry_conflicts(client, world, rq_conn):
@@ -393,6 +457,28 @@ async def test_writes_need_a_writable_ctx(world):
     for action in (cancel_job, retry_job):
         with pytest.raises(NotFound):
             await action(world.db, view, job_id)
+
+
+async def test_the_reaper_leaves_cancelled_jobs_alone(world):
+    conn = fakeredis.FakeRedis(server=fakeredis.FakeServer())
+    long_ago = datetime.now(timezone.utc) - timedelta(hours=2)
+    idle = await world.job(world.owner, status="cancelled", created_at=long_ago)
+    stale = await world.job(world.owner, status="cancelled", created_at=long_ago)
+    row = await world.row(stale)
+    row.heartbeat_at = long_ago
+    row.worker_id = "w-gone"
+    await world.db.commit()
+    try:
+        result = await reap(_factory(world), conn)
+        for job_id in (idle, stale):
+            assert job_id not in result.pushed + result.requeued + result.failed
+            row = await world.row(job_id)
+            assert row.status == JobStatus.CANCELLED and row.started_at is None
+            for q in JobQueue:
+                assert str(job_id) not in Queue(q.value, connection=conn).job_ids
+            assert await worker.run_job(job_id, _factory(world), "w-test") is None
+    finally:
+        conn.close()
 
 
 # ── Admin counts ───────────────────────────────────────────────────────────

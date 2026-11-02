@@ -1,7 +1,9 @@
 """Jobs, mounted under /api/jobs (E0-Jobs.7, AD-5, AD-13).
 
     GET  /stream?campaign_id=   SSE: `subscribed`, then the `job` events the caller may see
-    GET  /?campaign_id=&status= the caller's visible Jobs (running, queued, finished <= 24 h), newest first
+    GET  /?campaign_id=&status= the caller's visible Jobs, newest first: by default every running and
+                                queued Job plus those finished in the last 24 h; with `status`, that
+                                status at any age (app/access/jobs.py `list_jobs`)
     GET  /{job_id}              one Job (JobResponse)
     POST /{job_id}/retry        a failed Job, queued again: 202 {"job_id"}
     POST /{job_id}/cancel       a queued Job, cancelled: 200 JobResponse

@@ -2,7 +2,7 @@
 title: 'E0-Jobs.7: Job routes and the SSE stream'
 type: 'feature'
 created: '2026-11-02'
-status: 'in-progress'
+status: 'in-review'
 baseline_revision: '8466b141fb4db647a3e5aceb4d588cacf01c6979'
 review_loop_iteration: 0
 followup_review_recommended: false
