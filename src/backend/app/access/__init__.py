@@ -13,7 +13,8 @@ Share Links (`share_ctx`, `resolve_share_token`), `ctx_for_request`,
 `role_ctx` and the `Vary` middleware. E0-Access.5 adds `role_map_for_request`
 (cross-Campaign lists honour the preview header). E0-Access.8 adds citations
 (`register_resolver`, `visible_refs`, `resolve_sources`, `message_refs`) and
-the chat projections (`project_chat`, `replay_history`). E0-Access.9 adds
+the chat projections (`project_chat`, `replay_history`). E0-Access.6 adds
+the single write gate (`can_write`, `may_write`). E0-Access.9 adds
 the one Visibility writer (`set_visibility`, `set_visibility_many`), its kind
 map (`register_visibility_kind`), the extension points
 (`register_stale_marker`, `register_visibility_listener`) and
@@ -60,6 +61,7 @@ from app.access.projection import (
 from app.access.sources import (
     field_visible, message_refs, register_resolver, registered_resolvers, resolve_sources, visible_refs,
 )
+from app.access.write import can_write, may_write
 from app.access.share import COLLABORATE, READ_ONLY, ctx_for_share, resolve_share_token, share_ctx
 from app.access.visibility import (
     VisibilityError, VisibilityKind, mark_dependents_stale, register_stale_marker, register_visibility_kind,
@@ -86,6 +88,8 @@ __all__ = [
     "publish_grant_change",
     "remove_member",
     "revoke_share_token",
+    "can_write",
+    "may_write",
     "VisibilityError",
     "VisibilityKind",
     "mark_dependents_stale",

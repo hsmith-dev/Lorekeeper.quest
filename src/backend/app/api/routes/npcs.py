@@ -6,7 +6,8 @@ from sqlalchemy.orm import selectinload
 
 from app.access import (
     GM, LITE,
-    CampaignContext, check_create, ctx_for_request, project, project_all, require_campaign, require_campaign_for,
+    CampaignContext, can_write, check_create, ctx_for_request, project, project_all, require_campaign,
+    require_campaign_for,
     scoped_get, scoped_select,
 )
 from app.db.session import get_db
@@ -17,7 +18,7 @@ from app.db.models.journal import JournalEntry
 from app.db.models.tag import Tag
 from app.schemas.npc import NpcCreate, NpcUpdate, NpcGMResponse, NpcExtractResponse
 from app.schemas.journal import JournalLiteResponse
-from app.api.deps import get_current_user, get_user_llm_config
+from app.api.deps import PARTY_READ, get_current_user, get_user_llm_config
 from app.services.nlp_service import extract_tags
 from app.services.chat_service import generate_npc_bio
 from app.services.llm_provider import LLMConfig
@@ -32,6 +33,13 @@ router = APIRouter()
 # FastAPI must not coerce a Party body into the GM schema).
 _GM_OR_PARTY = "GM: NpcGMResponse; Player or member preview: NpcPartyResponse (no `notes`)."
 _npc_ctx = require_campaign_for(NpcEntry, "npc_id")
+# E0-Access.6: writes and generation declare `gm` in the NPC's own Campaign,
+# so a Player gets the missing-row 404 before any LLM config is resolved
+# or any usage metered; every write also calls can_write on the row.
+# Account gate (app/api/deps.py): the list, the item and its entries are
+# Party reads (openapi_extra=PARTY_READ); every other route needs a paid
+# or granted account.
+_npc_gm = require_campaign_for(NpcEntry, "npc_id", "gm")
 
 
 async def _get_accessible_npc(db: AsyncSession, npc_id: uuid.UUID, ctx: CampaignContext) -> NpcEntry:
@@ -41,14 +49,14 @@ async def _get_accessible_npc(db: AsyncSession, npc_id: uuid.UUID, ctx: Campaign
     return await scoped_get(db, NpcEntry, ctx, npc_id)
 
 
-async def _visible_npc(npc_id: uuid.UUID, ctx: CampaignContext = Depends(_npc_ctx),
+async def _visible_npc(npc_id: uuid.UUID, ctx: CampaignContext = Depends(_npc_gm),
                        db: AsyncSession = Depends(get_db)) -> NpcEntry:
     """As a dependency, so a hidden NPC is the 404 before any later
     dependency (the LLM config's 402) can answer differently."""
     return await _get_accessible_npc(db, npc_id, ctx)
 
 
-@router.get("/", response_model=None,
+@router.get("/", response_model=None, openapi_extra=PARTY_READ,
             responses={200: {"model": list[NpcGMResponse], "description": _GM_OR_PARTY}})
 async def list_npcs(
     ctx: CampaignContext = Depends(require_campaign("player")),
@@ -66,7 +74,7 @@ async def create_npc(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    ctx = await ctx_for_request(request, db, user, body.campaign_id)
+    ctx = await ctx_for_request(request, db, user, body.campaign_id, "gm")
     npc = NpcEntry(user_id=user.id, **body.model_dump())
     check_create(npc, ctx)  # a row the caller could not see is refused before writing
     db.add(npc)
@@ -80,10 +88,11 @@ async def create_npc(
 async def update_npc(
     npc_id: uuid.UUID,
     body: NpcUpdate,
-    ctx: CampaignContext = Depends(_npc_ctx),
+    ctx: CampaignContext = Depends(_npc_gm),
     db: AsyncSession = Depends(get_db),
 ):
     npc = await _get_accessible_npc(db, npc_id, ctx)
+    can_write(ctx, npc)
     for field, value in body.model_dump(exclude_none=True).items():
         setattr(npc, field, value)
     await db.commit()
@@ -95,15 +104,16 @@ async def update_npc(
 @router.delete("/{npc_id}", status_code=204)
 async def delete_npc(
     npc_id: uuid.UUID,
-    ctx: CampaignContext = Depends(_npc_ctx),
+    ctx: CampaignContext = Depends(_npc_gm),
     db: AsyncSession = Depends(get_db),
 ) -> None:
     npc = await _get_accessible_npc(db, npc_id, ctx)
+    can_write(ctx, npc)
     await db.delete(npc)
     await db.commit()
 
 
-@router.get("/{npc_id}", response_model=None,
+@router.get("/{npc_id}", response_model=None, openapi_extra=PARTY_READ,
             responses={200: {"model": NpcGMResponse, "description": _GM_OR_PARTY}})
 async def get_npc(
     npc_id: uuid.UUID,
@@ -113,7 +123,7 @@ async def get_npc(
     return project(await _get_accessible_npc(db, npc_id, ctx), ctx)
 
 
-@router.get("/{npc_id}/entries", response_model=None,
+@router.get("/{npc_id}/entries", response_model=None, openapi_extra=PARTY_READ,
             responses={200: {"model": list[JournalLiteResponse], "description": _GM_OR_PARTY}})
 async def get_npc_entries(
     npc_id: uuid.UUID,
@@ -142,7 +152,7 @@ async def get_npc_entries(
 async def generate_npc_bio_route(
     npc_id: uuid.UUID,
     npc: NpcEntry = Depends(_visible_npc),
-    ctx: CampaignContext = Depends(_npc_ctx),
+    ctx: CampaignContext = Depends(_npc_gm),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     config: LLMConfig = Depends(get_user_llm_config),

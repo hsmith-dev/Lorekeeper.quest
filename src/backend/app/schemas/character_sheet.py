@@ -90,6 +90,9 @@ class CharacterSheetGMResponse(BaseModel):
     id: uuid.UUID
     campaign_id: uuid.UUID
     template_id: uuid.UUID
+    # The sheet's author: the UI shows a Player edit controls on their own
+    # sheets (the E0-Access.6 stopgap until E7; the server checks can_write).
+    created_by_user_id: uuid.UUID
     name: str
     data: dict[str, Any]
     created_at: datetime
@@ -102,6 +105,9 @@ class CharacterSheetPartyResponse(BaseModel):
     id: uuid.UUID
     campaign_id: uuid.UUID
     template_id: uuid.UUID
+    # The sheet's author: the UI shows a Player edit controls on their own
+    # sheets (the E0-Access.6 stopgap until E7; the server checks can_write).
+    created_by_user_id: uuid.UUID
     name: str
     data: dict[str, Any]
     created_at: datetime

@@ -29,7 +29,7 @@ from app.api.routes import (
     admin, shorthand, character_sheets, members, visibility, files,
 )
 from app.api.routes import settings as settings_routes
-from app.api.deps import require_active_account, require_admin
+from app.api.deps import account_gate, require_admin
 
 logger = logging.getLogger(__name__)
 
@@ -133,15 +133,21 @@ def create_app() -> FastAPI:
         }
 
     # ── Routers ────────────────────────────────────────────────────────────────
-    # Feature routers get require_active_account at registration time — every
-    # route in them needs a promo-redeemed or subscribed account, enforced once
-    # here rather than added to each route individually. auth/billing/settings
-    # are deliberately excluded: a not-yet-paid account still needs to log in,
+    # Feature routers get `account_gate` at registration time (E0-Access.6,
+    # app/api/deps.py). It is fail-closed: every route in them needs a
+    # promo-redeemed or subscribed account (require_active_account) unless the
+    # route opts out with `openapi_extra=PARTY_READ` — a safe-method Party
+    # read (a `player` ctx or a role map, no hosted-AI call), which a Player
+    # with no paid account may use. AI routes, GM authoring and management
+    # stay gated, and a new route is gated by default. Each route module says
+    # which of its routes are Party reads. auth/billing/settings are
+    # deliberately excluded: a not-yet-paid account still needs to log in,
     # see its billing status, start checkout, and configure its own LLM key.
     # share.router is excluded too — most of it is unauthenticated public
-    # reads; its one authenticated route (join) is gated inline instead (see
+    # reads; its one authenticated route (join) checks the account inline,
+    # and only for a link granting more than Player (see
     # app/api/routes/share.py).
-    gate = [Depends(require_active_account)]
+    gate = [Depends(account_gate)]
     app.include_router(auth.router,      prefix="/api/auth",      tags=["auth"])
     app.include_router(billing.router,   prefix="/api/billing",   tags=["billing"])
     app.include_router(campaigns.router, prefix="/api/campaigns", tags=["campaigns"], dependencies=gate)
@@ -161,7 +167,7 @@ def create_app() -> FastAPI:
     app.include_router(character_sheets.router, prefix="/api/character-sheets", tags=["character-sheets"], dependencies=gate)
     # E0-Jobs.8: GET /{file_id}, access-checked, served by nginx via X-Accel-Redirect.
     app.include_router(files.router,     prefix="/api/files",     tags=["files"],     dependencies=gate)
-    # POST / only needs require_active_account (covered by `gate` here); the
+    # POST / only needs the account gate (covered by `gate` here); the
     # admin-only GET routes layer Depends(require_admin) on top per-route
     # (see feedback.py) since require_admin itself builds on
     # require_active_account rather than replacing it.

@@ -1,5 +1,5 @@
 import uuid
-from fastapi import Depends, HTTPException
+from fastapi import Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db
@@ -8,22 +8,23 @@ from app.db.models.user import User
 # user without importing app.api. Re-exported as the same objects:
 # `app.dependency_overrides[get_current_user]` works with either import.
 from app.access.identity import bearer_scheme, get_current_user  # noqa: F401
-from app.access.context import ctx_for
+from app.access.context import ctx_for, role_map
 from app.access.registry import scoped_get
-from app.access.policy import not_found
+from app.access.policy import GM, not_found
 
 
 async def require_active_account(user: User = Depends(get_current_user)) -> User:
     """Gate for feature routes: a valid JWT alone isn't enough once account
     gating exists — the account also needs access_granted (redeemed promo code
     or an active/past_due subscription; see app/services/billing_service.py
-    and app/api/routes/auth.py's register()). Applied at router-registration
-    time in app/main.py via `dependencies=[Depends(require_active_account)]`
-    for feature routers, so it's enforced without touching every individual
-    route. NOT applied to auth/billing/settings routes, which a not-yet-paid
-    account still needs to reach (to see billing status, subscribe, or manage
-    their own API key) — and not applied to share.py's public read endpoints,
-    which take no user at all."""
+    and app/api/routes/auth.py's register()). Applied to feature routers at
+    registration time in app/main.py through `account_gate` below
+    (E0-Access.6), which skips it only for routes marked PARTY_READ. NOT
+    applied to auth/billing/settings routes, which a not-yet-paid account
+    still needs to reach (to see billing status, subscribe, or manage their
+    own API key) — and not applied to share.py's public read endpoints, which
+    take no user at all; share.py's join calls it only for a link granting
+    more than Player."""
     if not user.access_granted:
         # Open-access mode (admin-portal checkbox, app_config row) waives the
         # gate entirely — including for accounts created while gating was on,
@@ -44,6 +45,48 @@ async def require_active_account(user: User = Depends(get_current_user)) -> User
             headers={"X-Gate-Reason": "account-gate"},
         )
     return user
+
+
+# ── The router-level account gate (E0-Access.6) ────────────────────────────
+#
+# Feature routers are mounted with `dependencies=[Depends(account_gate)]`
+# (app/main.py). The gate is fail-closed: it applies `require_active_account`
+# to every route EXCEPT one that opts out with `openapi_extra=PARTY_READ`, so
+# a new route is gated unless its author marks it a Party read.
+#
+# PARTY_READ goes only on a safe-method (GET) route that takes a `player`
+# ctx (`require_campaign("player")`, `require_campaign_for(..., "player")`,
+# `ctx_for_request(...)` at player) or a role map, and that makes no
+# hosted-AI call. A Player with no paid or granted account can then read
+# their Campaign's Party content. AI routes, GM authoring and management stay
+# gated, and hosted-AI routes keep the BYOK / quota rules of
+# `get_user_llm_config` on top. (This replaces the tech note's per-route
+# `require_campaign_paid()`: same effect today, but gated by default.)
+
+PARTY_READ_KEY = "x-lorekeeper-party-read"
+PARTY_READ: dict = {PARTY_READ_KEY: True}
+
+
+def is_party_read(route) -> bool:
+    """True when `route` opted out of the account gate with PARTY_READ."""
+    extra = getattr(route, "openapi_extra", None) or {}
+    return bool(extra.get(PARTY_READ_KEY))
+
+
+async def account_gate(request: Request, user: User = Depends(get_current_user),
+                       db: AsyncSession = Depends(get_db)) -> User:
+    """Router-level dependency for feature routers: `require_active_account`
+    unless the matched route carries `openapi_extra=PARTY_READ` (and is a safe
+    method, so a mis-marked write still pays) AND the user is GM in no
+    Campaign. The exemption is for Players only: an unpaid Owner or Co-GM
+    would otherwise read full GM projections for free. Fail-closed: no
+    matched route, or no marker, means gated."""
+    route = request.scope.get("route")
+    if (route is not None and is_party_read(route) and request.method.upper() in ("GET", "HEAD", "OPTIONS")
+            and not user.access_granted):
+        if GM not in (await role_map(db, user)).values():
+            return user
+    return await require_active_account(user)
 
 
 def is_admin_user(user: User) -> bool:

@@ -123,12 +123,17 @@ async def add_quest(ev4, campaign_id: uuid.UUID | None = None) -> uuid.UUID:
     return quest.id
 
 
-async def add_sheet(ev4, *, visibility: str = "gm") -> uuid.UUID:
+async def add_sheet(ev4, *, visibility: str = "gm", author: uuid.UUID | None = None, seeded=None,
+                    canary: bool = True) -> uuid.UUID:
+    """A sheet in `seeded` (default Campaign A) by `author` (default its
+    Owner), named with a canary (or plain text with canary=False)."""
     from app.db.models.character_sheet import CharacterSheet
 
-    cid = ev4.a.campaign_id
-    sheet = CharacterSheet(id=uuid.uuid4(), campaign_id=cid, template_id=ev4.a.ids["character_sheet_templates"][0],
-                           created_by_user_id=ev4.a.owner_id, name=mint_canary("XSHEET", cid).token,
+    seeded = seeded or ev4.a
+    cid = seeded.campaign_id
+    name = mint_canary("XSHEET", cid).token if canary else f"Pc {uuid.uuid4().hex[:8]}"
+    sheet = CharacterSheet(id=uuid.uuid4(), campaign_id=cid, template_id=seeded.ids["character_sheet_templates"][0],
+                           created_by_user_id=author or seeded.owner_id, name=name,
                            data={}, visibility=visibility)
     ev4.db.add(sheet)
     await ev4.db.commit()
