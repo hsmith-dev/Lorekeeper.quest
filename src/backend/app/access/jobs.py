@@ -175,18 +175,31 @@ async def get_job(db: AsyncSession, ctx: CampaignContext, job_id: Any, *, for_up
 
 async def list_jobs(db: AsyncSession, ctx: CampaignContext, *, status: JobStatus | str | None = None,
                     now: datetime | None = None, limit: int = LIST_LIMIT) -> list[Job]:
-    """The ctx's visible Jobs, newest first (`created_at`, then `id`): every
-    queued and running Job, and the finished ones (done, failed, cancelled)
-    of the last FINISHED_WINDOW. `status` narrows that set to one status. At
-    most `limit` rows."""
+    """The ctx's visible Jobs, newest first (`created_at`, then `id`).
+
+    By default: every queued and running Job (never cut by `limit`), plus at
+    most `limit` finished ones (done, failed, cancelled) of the last
+    FINISHED_WINDOW. With `status`: the Jobs of that status, with no time
+    window (so an old failed Job can be listed and retried), at most `limit`
+    for a terminal status."""
     now = now or datetime.now(timezone.utc)
     active = [s.value for s in ACTIVE_STATUSES]
-    finished_at = sa.func.coalesce(Job.finished_at, Job.created_at)
-    stmt = scoped_select(Job, ctx).where(sa.or_(Job.status.in_(active), finished_at >= now - FINISHED_WINDOW))
+    newest = (Job.created_at.desc(), Job.id.desc())
     if status is not None:
-        stmt = stmt.where(Job.status == JobStatus(status).value)
-    stmt = stmt.order_by(Job.created_at.desc(), Job.id.desc()).limit(limit)
-    return list((await db.execute(stmt)).scalars())
+        value = JobStatus(status).value
+        stmt = scoped_select(Job, ctx).where(Job.status == value).order_by(*newest)
+        if value not in active:
+            stmt = stmt.limit(limit)
+        return list((await db.execute(stmt)).scalars())
+    running = list((await db.execute(
+        scoped_select(Job, ctx).where(Job.status.in_(active)).order_by(*newest)
+    )).scalars())
+    finished_at = sa.func.coalesce(Job.finished_at, Job.created_at)
+    finished = list((await db.execute(
+        scoped_select(Job, ctx).where(Job.status.notin_(active), finished_at >= now - FINISHED_WINDOW)
+        .order_by(*newest).limit(limit)
+    )).scalars())
+    return sorted(running + finished, key=lambda job: (job.created_at, job.id), reverse=True)
 
 
 async def queue_positions(db: AsyncSession, ctx: CampaignContext,

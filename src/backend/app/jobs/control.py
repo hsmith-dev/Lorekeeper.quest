@@ -25,7 +25,12 @@ the claim skips it.
 **Retry** only a `failed` Job of a still-registered kind: the same row goes
 back to `queued` with `attempts` 0 and its run state and error cleared, and
 is pushed after commit through the outbox (`record_pending`). Its
-idempotency key must be free: an active Job holding it now is a 409.
+idempotency key must be free: an active Job holding it now is a 409. When
+the starter retries their own Job, the row takes their current grant's
+`access_epoch` (a Job that failed `permission_changed` after a demote and a
+re-promote can run again); `ctx_kind` and `ctx_user_id` stay, so the worker
+still fails a starter whose Role really dropped, and a GM retrying a Player's
+Job still runs it as that Player (at its stored epoch).
 """
 from __future__ import annotations
 
@@ -103,6 +108,8 @@ async def retry_job(db: AsyncSession, ctx: CampaignContext, job_id: Any) -> uuid
         raise JobConflict(KEY_IN_USE)
     job.status = JobStatus.QUEUED
     job.queue = kind.queue
+    if ctx.user_id == job.ctx_user_id:
+        job.access_epoch = ctx.access_epoch  # the starter's grant now
     job.attempts = 0
     job.progress = job.stage = job.eta_seconds = None
     job.error_code = job.error_message = None
