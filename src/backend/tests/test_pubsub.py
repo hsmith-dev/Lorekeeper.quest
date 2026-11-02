@@ -216,6 +216,105 @@ async def test_keyed_campaign_events_are_not_throttled(valkey, fast_windows):
     await got.close()
 
 
+async def test_announce_yields_subscribed_first_then_every_later_message(valkey):
+    """The resync point (E0-Access.11): `subscribed` once the SUBSCRIBE is
+    confirmed; a message published right after it is delivered."""
+    cid, ref = uuid.uuid4(), uuid.uuid4()
+    for listen, channel, publish in (
+        (listen_campaign_events, campaign_events_channel(cid), lambda: publish_campaign_event(cid, "entities", ref)),
+        (listen_jobs, jobs_channel(cid), lambda: publish_job(cid, job_data(ref))),
+        (listen_live, live_channel(cid), lambda: publish_live(cid, {"t": 1})),
+    ):
+        got = Collector(listen(cid, announce=True))
+        await wait_until(lambda: got.items)
+        assert got.items == [(pubsub.SUBSCRIBED_EVENT, {})]
+        assert await numsub(valkey, channel) == 1  # live before it said so
+        await publish()
+        await wait_until(lambda: len(got.items) == 2)
+        assert got.items[1][0] in ("invalidate", "job", "live")
+        await got.close()
+
+
+async def test_without_announce_there_is_no_subscribed(valkey):
+    cid = uuid.uuid4()
+    got = Collector(listen_campaign_events(cid))
+    await got.subscribed(valkey, campaign_events_channel(cid))
+    await publish_campaign_event(cid, "entities", uuid.uuid4())
+    await wait_until(lambda: got.items)
+    assert [e for e, _d in got.items] == ["invalidate"]
+    await got.close()
+
+
+class _StubPubSub:
+    """A pubsub whose SUBSCRIBE confirmation the test releases by hand."""
+
+    def __init__(self, confirm: asyncio.Event | None, fail: bool = False):
+        self.confirm, self.fail, self.confirmed = confirm, fail, False
+
+    async def subscribe(self, *channels):
+        pass
+
+    async def get_message(self, ignore_subscribe_messages=False, timeout=None):
+        if self.fail:
+            raise ConnectionError("gone")
+        if not self.confirmed and not ignore_subscribe_messages and self.confirm is not None:
+            try:
+                await asyncio.wait_for(self.confirm.wait(), timeout)
+            except asyncio.TimeoutError:
+                return None
+            self.confirmed = True
+            return {"type": "subscribe", "channel": "x", "data": 1}
+        await asyncio.sleep(min(timeout or 0.01, 0.01))
+        return None
+
+    async def unsubscribe(self):
+        pass
+
+    async def aclose(self):
+        pass
+
+
+class _StubClient:
+    def __init__(self, stub):
+        self.stub = stub
+
+    def pubsub(self):
+        return self.stub
+
+
+async def test_subscribed_waits_for_the_servers_confirmation(monkeypatch):
+    confirm = asyncio.Event()
+    previous = valkey_client.set_valkey(_StubClient(_StubPubSub(confirm)))
+    try:
+        got = Collector(listen_campaign_events(uuid.uuid4(), announce=True))
+        await asyncio.sleep(0.2)
+        assert got.items == []  # SUBSCRIBE sent, not confirmed: no resync point yet
+        confirm.set()
+        await wait_until(lambda: got.items)
+        assert got.items == [(pubsub.SUBSCRIBED_EVENT, {})]
+        await got.close()
+    finally:
+        valkey_client.set_valkey(previous)
+
+
+@pytest.mark.parametrize("fail", [False, True])
+async def test_unconfirmed_subscribe_ends_without_subscribed(monkeypatch, caplog, fail):
+    monkeypatch.setattr(pubsub, "PUBLISH_TIMEOUT_S", 0.2)
+    previous = valkey_client.set_valkey(_StubClient(_StubPubSub(None if fail else asyncio.Event(), fail=fail)))
+    caplog.set_level(logging.WARNING, logger="app.core.pubsub")
+    try:
+        items = [item async for item in listen_campaign_events(uuid.uuid4(), announce=True)]
+    finally:
+        valkey_client.set_valkey(previous)
+    assert items == []
+    assert ("pubsub_subscribe_failed" if fail else "pubsub_subscribe_unconfirmed") in caplog.text
+
+
+async def test_announce_without_valkey_yields_nothing(no_valkey):
+    items = [item async for item in listen_campaign_events(uuid.uuid4(), announce=True)]
+    assert items == []
+
+
 async def test_bad_json_is_skipped_and_logged(valkey, caplog):
     cid = uuid.uuid4()
     got = Collector(listen_jobs(cid))

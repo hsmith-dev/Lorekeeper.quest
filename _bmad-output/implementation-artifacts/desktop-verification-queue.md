@@ -125,3 +125,8 @@ Stories were merged on green GitHub CI while the desktop was offline (owner deci
 - [ ] (after E0-Jobs.7/E0-Access.11 add the first stream route) Behind nginx: `curl -N -H "Authorization: Bearer <t>" https://<host>/api/<stream>` → ping within 15 s, events arrive immediately, `X-Accel-Buffering: no`
 - [ ] Keep a stream open ≥30 min through nginx — pings continue, no 504/60 s idle cut
 - [ ] After disconnects, `valkey-cli CLIENT LIST | grep -c "sub=[1-9]"` returns to baseline; demote/remove a member → their stream ends with `access_changed` within 2 s
+
+## E0-Access.11 — Campaign events route + useCampaignEvents (PR #67)
+- [ ] Real stack behind nginx: `curl -skN https://<host>/api/campaigns/<id>/events -H "Authorization: Bearer <jwt>"` → `event: subscribed` immediately, `event: ping` every 15 s; GM changes an entry's Visibility → `invalidate {"domain":"visibility","id":null}` at once
+- [ ] Browser, as a Player: a record the GM hides disappears from their list without reload
+- [ ] Load: per-Player DB query per id-bearing event (deferred) — measure with ~10 connected Players

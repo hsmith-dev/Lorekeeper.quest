@@ -154,8 +154,10 @@ def test_real_config_parses_and_selects_the_https_server():
     assert "location /api/auth/" in labels
     assert "location /" in labels
     assert "location = /api/chat/stream" in labels
-    # The commented-out template (unquoted {36}) is a comment, not a location.
-    assert not any("{36}" in label for label in labels)
+    # The commented-out templates are comments, not locations.
+    assert not any("/api/x/" in label or "/api/jobs/" in label for label in labels)
+    # A quoted regex with `{36}` (E0-Access.11's events route) parses as one location.
+    assert sum("^/api/campaigns/[0-9a-fA-F-]{36}/events$" in label for label in labels) == 1
 
 
 def test_real_config_http_server_has_no_locations():

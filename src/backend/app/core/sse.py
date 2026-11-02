@@ -33,6 +33,11 @@ listeners yield) or of ready frames (`format_event`). The response:
   listener's Valkey subscription and the watch's go, bounded by
   CLEANUP_TIMEOUT_S.
 
+Resync (app/core/pubsub.py): a stream whose client must not miss events
+passes a listener started with `announce=True`, so its first frame is
+`event: subscribed`; the client refetches on every `subscribed` (there are
+no event ids and no replay: reconnect, `subscribed`, refetch).
+
 With no close watch registered (app.access never imported) `sse_response`
 raises RuntimeError: no stream without the revocation check.
 """
