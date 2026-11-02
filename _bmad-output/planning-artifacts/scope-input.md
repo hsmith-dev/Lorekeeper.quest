@@ -45,6 +45,16 @@ Suggested sequencing (owner leaned this way, not locked): 1 first, then 2/3/6/7 
 - **Dev/test environment:** owner is moving development to a desktop machine with Docker. Tests should use docker-compose.dev.yml Postgres+pgvector (built from migrations).
 - **Pages workflows:** pages.yml, static.yml, jekyll-gh-pages.yml all deploy to the same Pages site; static.yml publishes the whole repo. Pending owner decision (recommend keeping only pages.yml).
 
+
+## Owner decisions — round 3 (2026-11-01)
+- **Redis → Valkey:** switch every Redis container to Valkey (BSD-3, Linux Foundation; drop-in). Redis 7.4+ is RSALv2/SSPL, incompatible with the commercial edition. Python `redis` client stays (protocol-compatible).
+- **Valkey naming:** rename the compose service/hostname to `valkey` and the env var to `VALKEY_URL` (with `REDIS_URL` accepted as a deprecated fallback) — avoid confusion with Redis. `redis://` scheme and the Python `redis` client remain.
+- **Licence exceptions (OD-3 / E0-QA.9):** replace rather than accept where possible — **fpdf2 → WeasyPrint** (BSD) now; **easyocr (+ its python-bidi LGPL dep) → RapidOCR** (Apache-2.0, ONNX) in the backend and the `ml` sidecar, with an OCR-quality check on the desktop; **caniuse-lite** stays (build-time-only data via autoprefixer/browserslist, never shipped; CC-BY attribution in NOTICE).
+- **OD-1:** privacy first — option A confirmed (legacy NPCs/Quests GM-only until published as Entities). Optional story E0-Access.14 is dropped.
+- **Hugging Face split:** approved — move `lorekeeper-lora/` to `Lorekeeper-Mistral-7B-LoRA` once `hf auth login` is done on the desktop.
+- **Distribution:** the project publishes source on GitHub only; no prebuilt images are distributed, so the image GPL source-offer obligation does not apply to the owner (self-hosters build locally).
+- **Entity attributes (E0-WorldCore.1 follow-up):** add Character `voice` (voice & mannerisms), `appearance`, `pronouns`, `goals`; Location `kind`; Faction `goals`; Item `rarity`; Quest `reward` + `location_entity_id`. Memberships (NPC↔faction, PC↔party) are **relationship edges** (F3), not attributes.
+
 ## Owner decisions — round 4 (2026-11-01)
 - **Pre-publish history stays GM-only:** history rows (`entity_changes`) recorded while an Entity — or the specific field — was hidden from an audience stay hidden from that audience after it is published / un-hidden. Players see only changes made after publication. (Implement by recording the write-time audience on each history row and filtering on it, not on current visibility.)
 - **Tighter CPU targets approved (NFR-6):** live caption lag on CPU ≤ 10 s (was ≤ 30 s); narration on CPU ≤ 60 s (was ≤ 2 min). Basis: E0-QA.15 x86 benchmarks (`docs/BENCHMARKS.md`).
