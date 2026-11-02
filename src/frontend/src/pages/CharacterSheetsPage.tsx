@@ -1,4 +1,6 @@
 import { useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { getMe } from "../services/api";
 import { useCampaigns } from "../hooks/useCampaigns";
 import { usePageCampaign } from "../hooks/useCurrentCampaign";
 import { useEffectiveRole } from "../hooks/useEffectiveRole";
@@ -390,10 +392,14 @@ function CampaignCharacterSheets({ campaign }: { campaign: Campaign }) {
   const [showTemplates, setShowTemplates] = useState(false);
   const [editingSheet, setEditingSheet] = useState<CharacterSheet | null>(null);
   const [creatingSheet, setCreatingSheet] = useState(false);
-  // Sheet and template writes are GM-only for now (E0-Access.6: a Player may
-  // write only their own linked PC's sheet, which arrives with F3-world). The
-  // server enforces it; this only hides the controls.
-  const { isGm: canWrite } = useEffectiveRole(campaign.id);
+  // Templates and creates are GM-only (E0-Access.6). STOPGAP until E7 (owner
+  // decision 2026-11-01): a Player may edit and delete the sheets they
+  // created. Never while previewing as a Player. The server enforces both
+  // (access.can_write); this only hides the controls.
+  const { isGm: canWrite, previewing } = useEffectiveRole(campaign.id);
+  const { data: me } = useQuery({ queryKey: ["me"], queryFn: () => getMe().then((r) => r.data), staleTime: 60_000 });
+  const canEditSheet = (c: CharacterSheet) =>
+    canWrite || (!previewing && !!me?.id && c.created_by_user_id === me.id);
 
   const templateById = (id: string) => (templates ?? []).find((t) => t.id === id);
 
@@ -466,7 +472,7 @@ function CampaignCharacterSheets({ campaign }: { campaign: Campaign }) {
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           {(sheets ?? []).map((c) =>
-            canWrite && editingSheet?.id === c.id ? (
+            canEditSheet(c) && editingSheet?.id === c.id ? (
               <div key={c.id} className="sm:col-span-2">
                 <CharacterEditor
                   campaign={campaign}
@@ -481,7 +487,7 @@ function CampaignCharacterSheets({ campaign }: { campaign: Campaign }) {
                 key={c.id}
                 character={c}
                 template={templateById(c.template_id)}
-                canWrite={canWrite}
+                canWrite={canEditSheet(c)}
                 onEdit={() => setEditingSheet(c)}
                 onDelete={() => deleteSheet.mutate(c.id)}
               />

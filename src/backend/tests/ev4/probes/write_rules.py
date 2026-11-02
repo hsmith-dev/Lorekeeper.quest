@@ -14,7 +14,7 @@ from __future__ import annotations
 import uuid
 
 from tests.ev4.families import assert_captured_context_clean, assert_hidden_equals_missing, assert_no_canary
-from tests.ev4.probes._support import MISSING, assert_same_answer, authenticated, previewing, row_count
+from tests.ev4.probes._support import MISSING, add_sheet, assert_same_answer, authenticated, previewing, row_count
 from tests.ev4.probes.retrieval import use_fake_llm
 from tests.ev4.registry import DEFAULT_ACTORS, ev4_probe
 
@@ -84,6 +84,12 @@ async def probe_preview_update_sheet(ev4, actor):
     await assert_hidden_equals_missing(pv, f"/api/character-sheets/{sheet}", f"/api/character-sheets/{MISSING}",
                                        method="PATCH", json={"name": "Renamed"})
     assert await row_count(ev4, CharacterSheet, CharacterSheet.id == sheet, CharacterSheet.name == "Renamed") == 0
+    # A Party sheet the GM wrote: the sheet-author stopgap (until E7) never
+    # lets a preview write through.
+    own = await add_sheet(ev4, visibility="party", author=actor.user_id, seeded=seeded, canary=False)
+    await assert_hidden_equals_missing(pv, f"/api/character-sheets/{own}", f"/api/character-sheets/{MISSING}",
+                                       method="PATCH", json={"name": "Renamed"})
+    assert await row_count(ev4, CharacterSheet, CharacterSheet.id == own, CharacterSheet.name == "Renamed") == 0
 
 
 @ev4_probe("DELETE", "/api/campaigns/{campaign_id}/tag-categories/{category_id}", actors=GM_SOMEWHERE)

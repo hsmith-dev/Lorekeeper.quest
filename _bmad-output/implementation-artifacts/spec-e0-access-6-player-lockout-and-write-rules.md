@@ -111,6 +111,12 @@ deferred:
 
 ## Spec Change Log
 
+### 2026-11-01 — Owner decision: Character Sheet stopgap (outside the contract)
+- Trigger: the owner's decision, relayed by the coordinator after review: "Until E7 links Players to PCs, a Player may edit (update/delete) Character Sheets they created, in a Campaign where they are a member".
+- Amended: `can_write` adds a `SHEET_AUTHOR_STOPGAP` branch. A persisted `character_sheets` row whose `created_by_user_id` is the Player passes. A transient row (a create) never does, and templates, preview, audience and anon are unchanged. The intent-contract's Player rule and its "sheet writes are GM-only today" are left as written; this entry records the deviation.
+- Also: the sheet GM/Party schemas carry `created_by_user_id`, so CharacterSheetsPage can show Edit/Delete on a Player's own sheets (`useEffectiveRole` plus ownership, never while previewing). EV-4 sheet PATCH/DELETE probes cover own (200/204), another Player's (missing 404) and a preview write on the GM's own sheet (404). `test_sheet_stopgap_removes_cleanly` shows that turning the flag off restores the GM-only rule.
+- KEEP: the stopgap lives only in `app/access/write.py` and is marked `# STOPGAP until E7 (owner decision 2026-11-01)`. E7 deletes the flag and the branch.
+
 ## Review Triage Log
 
 ### 2026-11-01 — Review pass
@@ -181,7 +187,7 @@ Status: done (step-04 review ran after the PR opened; the branch was rebased ont
 
 **Summary:** `access.can_write` / `may_write` (`app/access/write.py`) is the single write gate. It refuses reduced (read_only) and anon ctxs and rows from another Campaign. GMs may write any row. Players may write only their own `kind=player` entries; the linked-PC sheet check stays false until F3-world. `check_create` ends with `can_write`. The story's GM-only routes declare `gm` before any LLM config is resolved. Journal delete and tag attach / detach are `player` + `can_write`. Sheet and template writes go through `can_write`. `account_gate` fails closed and exempts only `PARTY_READ` safe-method routes. Join gates only non-Player links. Rebased onto origin/main (E0-Access.9, E0-Jobs.4/5, E0-QA.15, v1.1); the only conflict was the `app/access/__init__.py` exports.
 
-**Verification:** after the rebase onto E0-Access.10 and the review patches, the desktop full suite (cached image, isolated pg + valkey, removed afterwards) gave 1803 passed, 4 skipped; `EV-4: probes=94 exemptions=1 pending=44 leaks=0`; lint-imports 5 contracts kept. Before the review the result was 1738 passed and probes=91. `check_scoped_queries.py` ok, with no baseline lines added and no script edits. Frontend `tsc --noEmit` and `npm run build` pass. CI runs on PR #61.
+**Verification:** after the rebase onto E0-Access.10 and the review patches, the desktop full suite (cached image, isolated pg + valkey, removed afterwards) gave 1803 passed, 4 skipped; `EV-4: probes=94 exemptions=1 pending=44 leaks=0`; lint-imports 5 contracts kept. Before the review the result was 1738 passed and probes=91. After the sheet stopgap and a rebase onto E0-Jobs.6 / WorldCore.2 / Journal.1, the full suite gave 2068 passed and 1 failed: WorldCore.2's `test_check_create_counts_floor_and_endpoints` expected a Player edge create to pass, which `can_write` now refuses. That test was adjusted (the create is refused; the visibility half is checked with the gate stubbed), and `tests/access` then gave 391 passed. EV-4: probes=95 exemptions=1 pending=44 leaks=0. `check_scoped_queries.py` ok, with no baseline lines added and no script edits. Frontend `tsc --noEmit` and `npm run build` pass. CI runs on PR #61.
 
 **Needs desktop verification:** nothing specific (no Ollama, GPU, compose or nginx surface).
 
