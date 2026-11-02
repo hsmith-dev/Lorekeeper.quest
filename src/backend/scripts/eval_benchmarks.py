@@ -54,15 +54,16 @@ SPIKE2_DEMO_NAMES = 6  # len(spikes/spike2_stt.NAMES)
 @dataclass(frozen=True)
 class Row:
     id: str
-    group: str        # "NFR-6" or "NFR-2"
+    group: str        # "NFR-6", "NFR-2" or an FR with its own target ("FR-14")
     label: str
     target_cpu: str
     target_gpu: str
     owner: str        # owning epic(s)
 
 
-# The PRD's NFR-6 table and NFR-2 memory cases. Targets are copied, never
-# changed here: a reset needs owner sign-off in .memlog.md and a PRD update.
+# The PRD's NFR-6 table and NFR-2 memory cases, plus an FR's own latency target
+# (FR-14, match_names). Targets are copied, never changed here: a reset needs
+# owner sign-off in .memlog.md and a PRD update.
 NFR2_LIMIT = "≤ 14.5 GB container-limit sum"
 ROWS: tuple[Row, ...] = (
     Row("proposals", "NFR-6", "Change Proposals ready after save (≈500-word entry)", "≤ 3 min", "≤ 30 s", "E1"),
@@ -75,6 +76,9 @@ ROWS: tuple[Row, ...] = (
     Row("narration_300", "NFR-6", "Narration of a 300-word recap", "≤ 2 min", "≤ 30 s", "E5"),
     Row("chronicle_100", "NFR-6", "Chronicle export, 100 entries", "≤ 3 min", "n/a", "E8"),
     Row("portal_warm", "NFR-6", "Portal page load (warm)", "≤ 2 s", "≤ 2 s", "E7"),
+    # FR-14 (E0-WorldCore.4): the matcher under B5's quick lookup and STT initial_prompt.
+    Row("match_names", "FR-14", "match_names on a 500-word Narrative (300 Entities, 600 aliases)",
+        "≤ 200 ms", "n/a", "E0-WorldCore"),
     Row("nfr2_idle", "NFR-2", "Stack memory: idle", NFR2_LIMIT, NFR2_LIMIT, "E0-Platform"),
     Row("nfr2_heavy_job", "NFR-2", "Stack memory: one heavy Job", NFR2_LIMIT, NFR2_LIMIT, "E0-Platform"),
     Row("nfr2_live", "NFR-2", "Stack memory: Live Session (speech-to-text + Rolling Recap)",

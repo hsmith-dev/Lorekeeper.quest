@@ -63,6 +63,12 @@ unless `force=True`. Reverting `create_entity` soft-deletes the Entity.
 `merge`, Visibility changes, `migrated`, `source_deleted`, `canon_note` and
 reverts of non-field changes are `not_revertible`.
 
+**Names** (E0-WorldCore.4). Every alias key is `normalize_name(alias)`
+(app/domain/names.py), recomputed from the stored surface form when compared;
+"Brother Aldric" and "Aldric" are the same alias. The matchers
+`match_names` and `candidates` (app/services/world_matching.py) are
+re-exported here with `normalize_name` and `NAME_PREFIXES`.
+
 **Merge primitive** (`op=merge`, E0-WorldCore.9's wrapper calls it under
 `as_system("merge")`): the absorbed Entity's aliases, Mentions and edges move
 to the survivor, floored `gm`/`private` when the absorbed Entity is not
@@ -96,6 +102,7 @@ from app.db.models.entity import (
 )
 from app.db.models.journal import JournalEntry
 from app.domain import entity_types as et
+from app.domain.names import NAME_PREFIXES, normalize_name
 from app.domain.enums import EntityChangeOp as Op
 from app.domain.enums import EntityType, Visibility
 from app.schemas.entities import (
@@ -104,6 +111,7 @@ from app.schemas.entities import (
     SetKind, SetStatus, SourceDeleted, UpdateField, UpdateQuestStep, UpdateRelationship, parse_canon_change,
 )
 from app.schemas.sources import RecordRef
+from app.services.world_matching import NameCandidate, NameMatch, candidates, match_names
 
 try:  # E0-Access.6's single write gate, once it is merged.
     from app.access.write import can_write as _can_write
@@ -178,12 +186,6 @@ def _parse_dt(value: Any) -> datetime | None:
     if isinstance(value, datetime):
         return value
     return datetime.fromisoformat(str(value))
-
-
-def _alias_key(alias: str) -> str:
-    """The stored `normalized_alias`: whitespace collapsed, casefolded.
-    (E0-WorldCore.4's normalize_name replaces it.)"""
-    return " ".join(alias.split()).casefold()
 
 
 def _restrictive_floor(value: Any) -> bool:
@@ -535,19 +537,19 @@ async def _aliases(run: _Run, entity_id: uuid.UUID) -> list[EntityAlias]:
 
 
 def _alias_matches(key: str, side: str) -> Callable[[EntityChange], bool]:
-    return lambda r: isinstance(_val(r, side, "alias"), str) and _alias_key(_val(r, side, "alias")) == key
+    return lambda r: isinstance(_val(r, side, "alias"), str) and normalize_name(_val(r, side, "alias")) == key
 
 
 async def _add_alias(run: _Run, c: AddAlias) -> EntityChange:
     entity = await _entity(run, c.entity_id)
     alias = " ".join(c.alias.split())
-    key = _alias_key(alias)
+    key = normalize_name(alias)
     if not key:
         raise CanonChangeError("invalid", "An alias needs text")
     repeat = await _repeat(run, Op.ADD_ALIAS, entity.id, "aliases", _alias_matches(key, "new"))
     if repeat is not None:
         return repeat
-    if any(a.normalized_alias == key for a in await _aliases(run, entity.id)):
+    if any(normalize_name(a.alias) == key for a in await _aliases(run, entity.id)):
         earlier = await _earlier(run, entity.id, (Op.ADD_ALIAS,), _alias_matches(key, "new"))
         if earlier is not None:
             return earlier
@@ -558,13 +560,13 @@ async def _add_alias(run: _Run, c: AddAlias) -> EntityChange:
 
 async def _remove_alias(run: _Run, c: RemoveAlias) -> EntityChange:
     entity = await _entity(run, c.entity_id)
-    key = _alias_key(c.alias)
+    key = normalize_name(c.alias)
     # A floored remove wrote field NULL (below), so a repeat looks under both.
     repeat = (await _repeat(run, Op.REMOVE_ALIAS, entity.id, "aliases", _alias_matches(key, "old"))
               or await _repeat(run, Op.REMOVE_ALIAS, entity.id, None, _alias_matches(key, "old")))
     if repeat is not None:
         return repeat
-    row = next((a for a in await _aliases(run, entity.id) if a.normalized_alias == key), None)
+    row = next((a for a in await _aliases(run, entity.id) if normalize_name(a.alias) == key), None)
     if row is None:
         raise CanonChangeError("not_found", "No such alias")
     floor = row.visibility_floor
@@ -859,19 +861,21 @@ async def _merge(run: _Run, c: Merge) -> _MergePlan | EntityChange:
         if floor is not None and not _restrictive_floor(row.visibility_floor):
             floors.append((row, floor))
 
-    keys = {a.normalized_alias for a in await _aliases(run, survivor.id)}
+    keys = {normalize_name(a.alias) for a in await _aliases(run, survivor.id)}
     moved = {"aliases": 0, "mentions": 0, "relationships": 0, "self_loops_dropped": 0, "quest_steps": 0}
     for alias in await _aliases(run, absorbed.id):
-        if alias.normalized_alias in keys:
+        alias_key = normalize_name(alias.alias)
+        if alias_key in keys:
             await run.delete(alias)
             continue
         alias.entity_id = survivor.id
+        alias.normalized_alias = alias_key
         run.touch(alias)
         floored(alias)
-        keys.add(alias.normalized_alias)
+        keys.add(alias_key)
         moved["aliases"] += 1
-    name_key = _alias_key(absorbed.name)
-    if name_key and name_key not in keys and name_key != _alias_key(survivor.name):
+    name_key = normalize_name(absorbed.name)
+    if name_key and name_key not in keys and name_key != normalize_name(survivor.name):
         floored(run.add(EntityAlias(campaign_id=run.ctx.campaign_id, entity_id=survivor.id,
                                     alias=" ".join(absorbed.name.split()), normalized_alias=name_key)))
     for mention in await run.all(scoped_select(EntityMention, run.ctx).where(EntityMention.entity_id == absorbed.id)):
@@ -1024,8 +1028,8 @@ async def _revert(run: _Run, c: Revert) -> EntityChange:
 
     entity = await _entity(run, target.entity_id)
     if op is Op.ADD_ALIAS:
-        key = _alias_key(str(_val(target, "new", "alias") or ""))
-        row = next((a for a in await _aliases(run, entity.id) if a.normalized_alias == key), None)
+        key = normalize_name(str(_val(target, "new", "alias") or ""))
+        row = next((a for a in await _aliases(run, entity.id) if normalize_name(a.alias) == key), None)
         if row is None:
             raise CanonChangeError("superseded", "That alias is already gone")
         await run.delete(row)
@@ -1033,8 +1037,8 @@ async def _revert(run: _Run, c: Revert) -> EntityChange:
         return done({"alias": row.alias, "visibility_floor": _json(row.visibility_floor)}, None)
     if op is Op.REMOVE_ALIAS:
         alias = str(_val(target, "old", "alias") or "")
-        key = _alias_key(alias)
-        if not key or any(a.normalized_alias == key for a in await _aliases(run, entity.id)):
+        key = normalize_name(alias)
+        if not key or any(normalize_name(a.alias) == key for a in await _aliases(run, entity.id)):
             raise CanonChangeError("superseded", "That alias is back already")
         run.add(EntityAlias(campaign_id=run.ctx.campaign_id, entity_id=entity.id, alias=alias, normalized_alias=key,
                             visibility_floor=_val(target, "old", "visibility_floor")))
@@ -1213,4 +1217,7 @@ register_visibility_kind("entity_relationship", EntityRelationship, options=(
     selectinload(EntityRelationship.source_entity), selectinload(EntityRelationship.target_entity)))
 
 
-__all__ = ["CanonChangeError", "DOMAIN", "HIDEABLE_FIELDS", "STALE_KIND", "apply_change", "revert_change"]
+__all__ = [
+    "CanonChangeError", "DOMAIN", "HIDEABLE_FIELDS", "NAME_PREFIXES", "NameCandidate", "NameMatch", "STALE_KIND",
+    "apply_change", "candidates", "match_names", "normalize_name", "revert_change",
+]

@@ -367,7 +367,7 @@ async def test_aliases(db, ev4, gm, stale):
     again = await apply_change(db, gm, AddAlias(entity_id=entity.id, alias="the grey"))
     assert again.id == first.id and (first.field, first.new_value) == ("aliases", {"alias": "The Grey"})
     aliases = (await db.execute(sa.select(EntityAlias).where(EntityAlias.entity_id == entity.id))).scalars().all()
-    assert [(a.alias, a.normalized_alias) for a in aliases] == [("The Grey", "the grey")]
+    assert [(a.alias, a.normalized_alias) for a in aliases] == [("The Grey", "grey")]
     assert stale == []
     removed = await apply_change(db, gm, RemoveAlias(entity_id=entity.id, alias="THE GREY"))
     assert (removed.op, removed.field, removed.old_value["alias"]) == ("remove_alias", "aliases", "The Grey")
@@ -643,6 +643,32 @@ async def test_merge_primitive(db, ev4, gm, stale, events):
                                                                      survivor_id=survivor.id))) == "merged"
     assert await _code(apply_change(db, gm.as_system("merge"), Merge(
         entity_id=third.id, survivor_id=(await _create(db, gm, type="item")).id))) == "invalid"
+
+
+async def test_merge_dedupes_by_normalize_name(db, ev4, gm):
+    async def survivor_aliases(entity_id):
+        return list((await db.execute(sa.select(EntityAlias).where(EntityAlias.entity_id == entity_id)
+                                      .execution_options(populate_existing=True))).scalars())
+
+    # Case 1: "Brother Aldric" and "Aldric" share the key `aldric`; a stale stored key is rewritten on the move.
+    survivor = await _create(db, gm, name="Aldric Vane")
+    absorbed = await _create(db, gm, name="Aldric Vane")
+    await apply_change(db, gm, AddAlias(entity_id=survivor.id, alias="Aldric"))
+    await apply_change(db, gm, AddAlias(entity_id=absorbed.id, alias="Brother Aldric"))
+    db.add(EntityAlias(campaign_id=ev4.a.campaign_id, entity_id=absorbed.id, alias="Sister Grey",
+                       normalized_alias="sister grey"))  # the old casefold key
+    await db.flush()
+    await apply_change(db, gm.as_system("merge"), Merge(entity_id=absorbed.id, survivor_id=survivor.id))
+    rows = await survivor_aliases(survivor.id)
+    assert sorted(a.normalized_alias for a in rows) == ["aldric", "grey"]
+    assert {a.alias for a in rows} == {"Aldric", "Sister Grey"}
+    assert all(a.normalized_alias == ws.normalize_name(a.alias) for a in rows)
+
+    # Case 2: "The King" differs from "King" only by a prefix: no alias is added for the absorbed name.
+    king = await _create(db, gm, name="King")
+    the_king = await _create(db, gm, name="The King")
+    await apply_change(db, gm.as_system("merge"), Merge(entity_id=the_king.id, survivor_id=king.id))
+    assert await survivor_aliases(king.id) == []
 
 
 async def test_merge_moves_quest_steps_only_when_safe(db, ev4, gm):

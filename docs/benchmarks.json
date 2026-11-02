@@ -1,6 +1,17 @@
 {
   "format": 1,
-  "rows": {},
+  "rows": {
+    "match_names": {
+      "cpu": {
+        "value": "13.3 ms",
+        "peak_rss_mb": null,
+        "n": 7,
+        "date": "2026-11-02",
+        "hardware": "AMD Ryzen 9 9900X 12-Core Processor, 60 GB host",
+        "note": "median, range 12.9-14.8 ms; test runner image"
+      }
+    }
+  },
   "spikes": [
     {
       "spike": "SPIKE-1",
