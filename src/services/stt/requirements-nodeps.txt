@@ -1,0 +1,6 @@
+# Installed with `pip install --no-deps` after requirements.txt (see the
+# Dockerfile). faster-whisper's metadata requires av (PyAV), which must never
+# be installed in this image (see the header of requirements.txt). Its real
+# runtime dependencies are pinned in requirements.txt, and
+# stt_service/whisper_loader.py imports it without av.
+faster-whisper==1.2.1
