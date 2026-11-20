@@ -10,7 +10,28 @@ context:
   - '{project-root}/_bmad-output/implementation-artifacts/epic-9-context.md'
   - '{project-root}/_bmad-output/implementation-artifacts/spec-e0-worldcore-3-apply-change-history-and-revert.md'
 warnings: ['oversized']
-deferred: []
+deferred:
+  - summary: >-
+      Player history keeps `attributes.<ref>` rows with null values when the referenced Entity is hidden.
+    evidence: |-
+      No id leaks (values are nulled), but the row shows a hidden reference was set; hiding such rows changes history semantics. E0-WorldCore.11 (history UI) should decide.
+    location: >-
+      src/backend/app/access/projection.py
+    severity: low
+  - summary: >-
+      Non-GM list with a status filter (and any q search) loads and projects every matching Entity, then paginates in Python; q keeps only the top 100 candidates.
+    evidence: |-
+      Correct and leak-free, but O(Campaign) per request; SQL-side filtering of hidden status needs field_visibility-aware SQL.
+    location: >-
+      src/backend/app/api/routes/entities.py list_entities
+    severity: medium
+  - summary: >-
+      Duplicate-name check on create is check-then-insert without a lock.
+    evidence: |-
+      Two concurrent GM creates of the same normalized name and type can both pass; needs pg_advisory_xact_lock(campaign, type) or a unique index on a normalized-name column.
+    location: >-
+      src/backend/app/api/routes/entities.py create_entity
+    severity: medium
 ---
 
 <intent-contract>
@@ -151,3 +172,44 @@ Backend root: `src/backend/`. Tests run against Postgres (CI); `tests/conftest.p
 - Not run here: every DB-backed test (EV-4 probes, `tests/test_entities_api.py`, `tests/ev4/test_entity_api_history.py`, the new `tests/services/test_world_service.py` cases, CI-11, the snapshot upgrade/downgrade). They run in CI on the draft PR.
 
 **Needs desktop verification:** none beyond CI (no new service, model or image).
+
+## Spec Change Log
+
+## Review Triage Log
+
+### 2026-11-20 — Review pass
+- verdicts: 32 findings — high 0, medium 11, low 10, false 8, maybe-false 3
+- findings:
+  - `[medium]` `[patch]` (blind) entity_field resolver blanks visible ENTITY_REF quotes for a Player — resolver is async with db, loads visible ids via scoped_select and passes them to project.
+  - `[medium]` `[patch]` (blind) resolver still cites a hidden ENTITY_REF (title + empty quote) — the ref is now dropped (None) when the target is not visible.
+  - `[low]` `[defer]` (blind) Player history keeps the `attributes.<ref>` row with null values — no id leaks; hiding the rows changes history semantics; deferred to E0-WorldCore.11.
+  - `[false]` `[reject]` (blind) ENTITY_REF detection ignores the Entity type — every ENTITY_REF key ends in `_entity_id` and is a ref on every type defining it.
+  - `[false]` `[reject]` (blind) whole-`attributes` history rows not redacted — no op writes `field="attributes"` (UpdateField requires `attributes.<key>`; create/merge rows are field NULL, GM).
+  - `[low]` `[patch]` (blind) dotted citation of an undefined attribute key survives — resolver returns None for a key the type does not define.
+  - `[medium]` `[defer]` (blind) non-GM status filter and q search load the whole filtered Campaign — correct and leak-free; deferred (needs field_visibility-aware SQL).
+  - `[medium]` `[defer]` (blind) duplicate-name check has no lock — concurrent GM creates can both pass; needs an advisory lock or unique index (schema). Missing `code` patched (`"duplicate"`).
+  - `[low]` `[patch]` (blind) PATCH `{"attributes": {}}` commits nothing with 200 — EntityPatch rejects an empty attributes dict (422).
+  - `[false]` `[reject]` (blind) add_alias returns an arbitrary row — aliases are unique per Entity by normalize_name, so at most one row matches.
+  - `[false]` `[reject]` (blind) bulk route double-counts duplicate ids — set_visibility_many dedupes via dedupe_targets.
+  - `[false]` `[reject]` (blind) migration "exact" claim misses source_deleted rows — nothing outside world_service emits source_deleted yet (E0-WorldCore.8 unbuilt).
+  - `[false]` `[reject]` (blind) moving `data.update(extra)` changes other models — only Entity has field_visibility and only EntityChange has value_fields.
+  - `[low]` `[reject]` (blind) missing tests for bogus aliases floor, merge-row stamping, None row_ctx — merge rows are field NULL (GM regardless); floor_audience fails closed; low value.
+  - `[false]` `[reject]` (blind) nginx `/api/entities/` duplicates `/api/` — the story AC requires a locations.conf line in the api zone.
+  - `[medium]` `[patch]` (vgap) route mention_count never checked non-zero or per audience — test added (GM 2, Player 1).
+  - `[medium]` `[patch]` (vgap) hidden `attributes` head does not drop a dotted citation, untested — test added.
+  - `[low]` `[patch]` (vgap) Player status filter positive match untested — probe asserts `status=unknown` returns exactly the two Entities.
+  - `[medium]` `[patch]` (vgap) resolver blanks visible refs — same fix as blind row 1.
+  - `[low]` `[patch]` (vgap) undefined attribute key citation survives — same fix as blind row 6.
+  - `[medium]` `[patch]` (edge) resolver lacks visible ids — same fix as blind row 1.
+  - `[medium]` `[patch]` (edge) non-GM `visibility` filter reveals stored Visibility — filter is GM-only; probe asserts identical bodies.
+  - `[low]` `[defer]` (edge) q matches past the top 100 candidates are lost — documented cap; deferred with the list-performance item.
+  - `[medium]` `[defer]` (edge) non-GM status filter loads every Entity — same as blind row 7.
+  - `[medium]` `[defer]` (edge) concurrent duplicate creates — same as blind row 8.
+  - `[low]` `[patch]` (edge) PATCH `{"attributes": {}}` — same fix as blind row 9.
+  - `[false]` `[reject]` (edge) add_quest_step result may lack step_id — `_step_values` always includes step_id.
+  - `[low]` `[patch]` (edge) field_visible accepts unknown dotted fields — handled in the resolver (the only dotted-field caller).
+  - `[low]` `[patch]` (edge) register_visibility_kind ignores different fields= — now raises ValueError.
+  - `[maybe-false]` `[reject]` (intent) anon Share Link holders get 401 on /api/entities — no non-share route accepts share tokens; anon Party projection is exercised via share_ctx + project in EV-4 world tests; share routes are not in the story's route list. Settled by an owner ruling; low if true.
+  - `[maybe-false]` `[reject]` (intent) one prefix nginx block vs per-route lines — every route resolves to it in zone api; low if true.
+  - `[maybe-false]` `[reject]` (intent) (d) deferral not in the diff — recorded in this spec and PR #75 (the audit saw a code-only diff).
+- CI follow-up: the first run failed `tests/ev4/test_world_rows.py::test_loaded_rows_project_and_narrow`, which expected a Player to see the F3 `migrated` rows after publication; updated to assert they stay GM-only (owner decision).

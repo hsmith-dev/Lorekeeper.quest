@@ -18,6 +18,7 @@ from app.db.models.entity import Entity, EntityChange
 from app.schemas.sources import SourceKind, SourceRef
 from app.services.world_service import apply_change
 from tests.ev4.probes._support import MISSING, outsider
+from tests.ev4.fixtures import ev4  # noqa: F401  (registers the fixture)
 
 BASE = "/api/entities"
 
