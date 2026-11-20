@@ -2,10 +2,10 @@
 title: 'E0-Platform.6: Web and worker image without models: async client wrappers and lifespan cleanup'
 type: 'refactor'
 created: '2026-11-20'
-status: 'in-review'
+status: 'done'
 baseline_revision: '9b73f0bcdec1f75aec6b389349b9e1fdf893bba1'
 review_loop_iteration: 0
-followup_review_recommended: false
+followup_review_recommended: true
 context: []
 warnings: [oversized]
 deferred:
@@ -164,3 +164,25 @@ Environment: there is no Postgres or Valkey on this Mac, and you must not start 
 - `python scripts/check_model_packages.py && python -m pytest -q scripts/test_check_model_packages.py scripts/test_import_ratchet.py` -- pass
 - `cd src/frontend && npx tsc --noEmit && npm run build && npm run lint:tokens` -- pass
 - GitHub CI: backend-tests, gates, frontend-ci, license-check (image-licenses backend prints the size) -- green
+
+## Auto Run Result
+
+Status: done. Draft PR #76 (branch `story/e0-platform-6-slim-backend-image`), commits a571095 (measurement), 73cd389 (implementation), ee8aff8 (review fixes). GitHub CI is fully green: backend-tests 2474 passed / 4 skipped; gates 516 passed plus 28 (DB gates); EV-4 probes=104 exemptions=3 pending=44 leaks=0; frontend, licences in both editions, and all four image scans pass.
+
+**Summary:** `embedding_service` (`embed`, `embed_many`, `use_client`) and `nlp_service` (`extract_tags`, label mapping) are async wrappers over `app/clients/ml.py`, and every caller awaits them. The lifespan only does Valkey setup and teardown. torch, torchvision, spaCy, sentence-transformers, en_core_web_trf, build-essential and libpq-dev left requirements.txt, both Dockerfiles and backend CI. The CI-3 baseline and the import-linter ignores are empty. `check_model_packages.py --installed` checks the built image's `pip list` in CI. Journal save with ml down saves with no tags and NULL vectors, and logs a warning. Source upload, reindex and NPC extract return 503. `GET /api/admin/sidecars` and the System tab card show both sidecars' status.
+
+**Measured (CI image-licenses job, `docker image inspect` Size, linux/amd64):** backend image 1,634,509,150 bytes (1.52 GiB) before, 147,023,523 bytes (141 MiB) after, about 91% smaller. The before run's `--installed` check listed en-core-web-trf, sentence-transformers, spacy, torch, torchvision and the transitive transformers. The after run lists none.
+
+**Files:** app services (embedding, nlp, journal, retrieval, source, eval), routes (journals, sources, npcs, admin), schemas/admin, main.py, scripts (seed_demo, eval_common, eval_retrieval, backfill_party_embeddings), tests (new test_ml_callers.py and test_dockerfile_no_models.py; test_nlp.py and test_dockerfile_cpu_torch.py removed; monkeypatches updated), frontend admin card, requirements and both Dockerfiles, the three workflows, .importlinter and the ratchet test, the CI-3 baseline and its script and test, licenses/register.yaml (about 100 backend-only rows pruned; libatomic1 restored for backend+stt after the scan), license-policy comments, compose comments, README, LICENSING.md, RETRIEVAL_EVAL.md.
+
+**Review:** 35 findings. Patched: 2 medium root causes (sidecar status serial timeouts; journal save making three serial ml calls) and the medium test-gap group (stored chunk, reindex and eval-score vectors), plus 9 low. Deferred: 1 (no CI job runs real-model NER, owned by E0-QA's ml job). Rejected: 3 false, 4 maybe-false and 12 low, each with its reason in the triage log. Follow-up review: recommended (3 medium entries patched). The named unverified risk is real-sidecar behaviour, which CI uses fakes for: spaCy 3.8/trf 3.8.0 tags compared with the old 3.7 output, and save latency against a hanging (not refusing) ml.
+
+**Residual risks:** the real-model NER and embedding checks run only on manual desktop runs until E0-QA adds an ml CI job. Apt rows removed from the register are judged only by the scan's "nothing missing" result; stale rows are not detected.
+
+### Needs desktop verification
+- Worker RSS before and after (main vs this branch), with 4 gunicorn workers plus the RQ worker, idle and at boot peak:
+  `docker compose -f docker-compose.prod.yml up -d --build backend worker ml stt && sleep 60 && docker stats --no-stream backend worker ml stt`, and `cat /sys/fs/cgroup/memory.peak` inside the backend container (old: ~6.4 GB idle, 11.86 GiB peak).
+- Boot to healthy in under 10 s with the sidecars stopped: `docker compose -f docker-compose.prod.yml stop ml stt && docker compose -f docker-compose.prod.yml restart backend && time (until docker inspect -f '{{.State.Health.Status}}' $(docker compose -f docker-compose.prod.yml ps -q backend) | grep -q healthy; do sleep 1; done)`. The healthcheck interval is 30 s, so either run `curl localhost:8000/api/health` in a loop from inside the container, or read the gunicorn "Application startup complete" timestamp.
+- RETRIEVAL_EVAL re-measure against the ml sidecar on the 12-entry seed (the docs/RETRIEVAL_EVAL.md "Reproducing" commands with `--embeddings require`). Expected hybrid@0.65 14/16 hit@3 and 5/5 gate-holds; if it differs, update the doc from the real run.
+- Tag parity: save the demo narratives and compare tags with main's in-process spaCy 3.7 output (ml runs spaCy 3.8.18 / en_core_web_trf 3.8.0).
+- arm64 build of `src/backend/Dockerfile.prod` with no compiler: `docker buildx build --platform linux/arm64 -f src/backend/Dockerfile.prod src/backend`.
