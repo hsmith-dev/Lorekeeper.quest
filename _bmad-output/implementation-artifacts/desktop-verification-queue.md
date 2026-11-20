@@ -139,3 +139,7 @@ Stories were merged on green GitHub CI while the desktop was offline (owner deci
 ## E0-Jobs.7 — Job routes and the SSE stream (PR #69)
 - [ ] Prod compose: `curl -N -H "Authorization: Bearer <token>" "https://<host>/api/jobs/stream?campaign_id=<id>"` → `event: subscribed` immediately and a `job` frame within 5 s of starting a `system.noop` Job; `nginx -t` passes
 - [ ] With the `worker` stopped: enqueue a Job, cancel it, start the worker → row stays `cancelled`, the Job never runs
+
+## E0-Access.12 — Members API and Roles (PR #74)
+- [ ] Unpaid Player (account gating ON) logs in → lands on `/dashboard`, browses Party content with no 402s from other dashboard calls
+- [ ] Timing-sensitive probe: `pytest tests/test_members_api.py tests/ev4/test_probes.py -k members` in `lorekeeper-backend-test` (with TEST_DATABASE_URL/DATABASE_URL/VALKEY_URL/VALKEY_TEST_URL) — `probe_demotion_closes_the_events_stream` passes reliably
