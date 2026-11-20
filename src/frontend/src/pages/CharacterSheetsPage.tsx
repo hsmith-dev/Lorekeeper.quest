@@ -1,6 +1,9 @@
 import { useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { getMe } from "../services/api";
 import { useCampaigns } from "../hooks/useCampaigns";
 import { usePageCampaign } from "../hooks/useCurrentCampaign";
+import { useEffectiveRole } from "../hooks/useEffectiveRole";
 import {
   useCharacterTemplates, useCreateCharacterTemplate, useUpdateCharacterTemplate, useDeleteCharacterTemplate,
   useCharacterSheets, useCreateCharacterSheet, useUpdateCharacterSheet, useDeleteCharacterSheet,
@@ -128,13 +131,13 @@ function TemplateEditor({
   );
 }
 
-function TemplateManager({ campaign }: { campaign: Campaign }) {
+function TemplateManager({ campaign, canWrite }: { campaign: Campaign; canWrite: boolean }) {
   const { data: templates, isLoading } = useCharacterTemplates(campaign.id);
   const deleteTemplate = useDeleteCharacterTemplate(campaign.id);
   const [editing, setEditing] = useState<CharacterSheetTemplate | null | "new">(null);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
 
-  if (editing) {
+  if (editing && canWrite) {
     return (
       <TemplateEditor
         campaign={campaign}
@@ -149,7 +152,9 @@ function TemplateManager({ campaign }: { campaign: Campaign }) {
       {isLoading && <p className="text-xs text-muted-foreground">Loading templates…</p>}
       {!isLoading && (templates ?? []).length === 0 && (
         <p className="text-xs text-muted-foreground italic">
-          No templates yet — create one to define what a character sheet looks like for this campaign's system.
+          {canWrite
+            ? "No templates yet — create one to define what a character sheet looks like for this campaign's system."
+            : "No templates yet — your GM sets them up."}
         </p>
       )}
       {(templates ?? []).map((t) => (
@@ -160,6 +165,7 @@ function TemplateManager({ campaign }: { campaign: Campaign }) {
               {t.fields.length} field{t.fields.length === 1 ? "" : "s"} · {t.character_count} character{t.character_count === 1 ? "" : "s"}
             </p>
           </div>
+          {canWrite && (
           <div className="flex items-center gap-2 shrink-0">
             <button onClick={() => setEditing(t)} className="text-xs px-2.5 py-1 rounded-md border border-input text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors">
               Edit
@@ -185,11 +191,14 @@ function TemplateManager({ campaign }: { campaign: Campaign }) {
               </button>
             )}
           </div>
+          )}
         </div>
       ))}
-      <button onClick={() => setEditing("new")} className="self-start text-xs text-primary hover:underline underline-offset-2 mt-1">
-        + New Template
-      </button>
+      {canWrite && (
+        <button onClick={() => setEditing("new")} className="self-start text-xs text-primary hover:underline underline-offset-2 mt-1">
+          + New Template
+        </button>
+      )}
     </div>
   );
 }
@@ -319,8 +328,11 @@ function CharacterEditor({
 }
 
 function CharacterCard({
-  character, template, onEdit, onDelete,
-}: { character: CharacterSheet; template: CharacterSheetTemplate | undefined; onEdit: () => void; onDelete: () => void }) {
+  character, template, canWrite, onEdit, onDelete,
+}: {
+  character: CharacterSheet; template: CharacterSheetTemplate | undefined; canWrite: boolean;
+  onEdit: () => void; onDelete: () => void;
+}) {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const preview = (template?.fields ?? []).slice(0, 3);
 
@@ -346,6 +358,7 @@ function CharacterCard({
           })}
         </dl>
       )}
+      {canWrite && (
       <div className="flex items-center gap-2 pt-1">
         <button onClick={onEdit} className="text-xs px-2.5 py-1 rounded-md border border-input text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors">
           Edit
@@ -365,6 +378,7 @@ function CharacterCard({
           </button>
         )}
       </div>
+      )}
     </div>
   );
 }
@@ -378,6 +392,14 @@ function CampaignCharacterSheets({ campaign }: { campaign: Campaign }) {
   const [showTemplates, setShowTemplates] = useState(false);
   const [editingSheet, setEditingSheet] = useState<CharacterSheet | null>(null);
   const [creatingSheet, setCreatingSheet] = useState(false);
+  // Templates and creates are GM-only (E0-Access.6). STOPGAP until E7 (owner
+  // decision 2026-11-01): a Player may edit and delete the sheets they
+  // created. Never while previewing as a Player. The server enforces both
+  // (access.can_write); this only hides the controls.
+  const { isGm: canWrite, previewing } = useEffectiveRole(campaign.id);
+  const { data: me } = useQuery({ queryKey: ["me"], queryFn: () => getMe().then((r) => r.data), staleTime: 60_000 });
+  const canEditSheet = (c: CharacterSheet) =>
+    canWrite || (!previewing && !!me?.id && c.created_by_user_id === me.id);
 
   const templateById = (id: string) => (templates ?? []).find((t) => t.id === id);
 
@@ -396,7 +418,7 @@ function CampaignCharacterSheets({ campaign }: { campaign: Campaign }) {
         </button>
         {showTemplates && (
           <div className="mt-3">
-            <TemplateManager campaign={campaign} />
+            <TemplateManager campaign={campaign} canWrite={canWrite} />
           </div>
         )}
       </div>
@@ -406,7 +428,7 @@ function CampaignCharacterSheets({ campaign }: { campaign: Campaign }) {
           <h2 className="text-xs font-semibold uppercase tracking-widest text-muted-foreground" style={{ fontFamily: "var(--font-heading)" }}>
             Characters
           </h2>
-          {!creatingSheet && (templates ?? []).length > 0 && (
+          {canWrite && !creatingSheet && (templates ?? []).length > 0 && (
             <button
               onClick={() => setCreatingSheet(true)}
               className="text-xs px-3 py-1.5 rounded-md bg-primary text-primary-foreground font-medium hover:opacity-90 transition-opacity"
@@ -422,11 +444,15 @@ function CampaignCharacterSheets({ campaign }: { campaign: Campaign }) {
           <div className="text-center py-12 text-muted-foreground border border-dashed border-border rounded-xl">
             <p className="text-3xl mb-2">🧙</p>
             <p className="text-sm font-medium text-foreground mb-1">No templates yet</p>
-            <p className="text-xs">Open Templates above and create one before adding characters.</p>
+            <p className="text-xs">
+              {canWrite
+                ? "Open Templates above and create one before adding characters."
+                : "Your GM hasn't set up a character sheet template yet."}
+            </p>
           </div>
         )}
 
-        {creatingSheet && (templates ?? []).length > 0 && (
+        {canWrite && creatingSheet && (templates ?? []).length > 0 && (
           <div className="mb-3">
             <CharacterEditor
               campaign={campaign}
@@ -439,12 +465,14 @@ function CampaignCharacterSheets({ campaign }: { campaign: Campaign }) {
         )}
 
         {!sheetsLoading && (templates ?? []).length > 0 && (sheets ?? []).length === 0 && !creatingSheet && (
-          <p className="text-sm text-muted-foreground text-center py-8">No characters yet — create one above.</p>
+          <p className="text-sm text-muted-foreground text-center py-8">
+            {canWrite ? "No characters yet — create one above." : "No characters yet."}
+          </p>
         )}
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           {(sheets ?? []).map((c) =>
-            editingSheet?.id === c.id ? (
+            canEditSheet(c) && editingSheet?.id === c.id ? (
               <div key={c.id} className="sm:col-span-2">
                 <CharacterEditor
                   campaign={campaign}
@@ -459,6 +487,7 @@ function CampaignCharacterSheets({ campaign }: { campaign: Campaign }) {
                 key={c.id}
                 character={c}
                 template={templateById(c.template_id)}
+                canWrite={canEditSheet(c)}
                 onEdit={() => setEditingSheet(c)}
                 onDelete={() => deleteSheet.mutate(c.id)}
               />

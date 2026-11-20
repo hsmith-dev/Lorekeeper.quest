@@ -331,6 +331,8 @@ export interface CharacterSheet {
   id: string;
   campaign_id: string;
   template_id: string;
+  /** The sheet's author (E0-Access.6 stopgap: a Player edits their own). */
+  created_by_user_id: string;
   name: string;
   data: Record<string, CharacterFieldValue>;
   created_at: string;

@@ -8,6 +8,7 @@ from app.core.limiter import limiter, user_or_ip
 from app.db.session import get_db
 from app.db.models.user import User
 from app.db.models.journal import JournalEntry
+from app.domain.enums import EntryKind
 from app.db.models.campaign import Campaign
 from app.db.models.tag import Tag, JournalTag
 from app.db.models.tag_category import TagCategory
@@ -26,10 +27,11 @@ from app.schemas.journal import (
 )
 from app.schemas.tag import TagAttachRequest, TagGMResponse
 from app.access import (
-    GM, CampaignContext, ctx_for_request, not_found, project, project_all, require_campaign, require_campaign_for,
+    GM, CampaignContext, can_write, ctx_for_request, not_found, project, project_all, require_campaign,
+    require_campaign_for,
     role_ctx, role_map_for_request, scoped_get, scoped_select, scoped_select_multi,
 )
-from app.api.deps import get_current_user, get_user_llm_config
+from app.api.deps import PARTY_READ, get_current_user, get_user_llm_config
 from app.services.journal_service import create_journal_entry, generate_draft_narrative
 from app.services.dedup_service import check_hash
 from app.services.chat_service import autocomplete_notes, generate_session_recap, summarize_session_transcript
@@ -45,9 +47,20 @@ router = APIRouter()
 # schema); `responses=` keeps the GM schema in the OpenAPI docs.
 _GM_OR_PARTY = "GM: the GM schema; Player or member preview: the Party schema (no `shorthand`)."
 _ENTRY_TAGS = selectinload(JournalEntry.tags).selectinload(Tag.custom_category)
-# E0-Access.5: tag attach / detach and delete need `gm` in the entry's own
-# Campaign (Player Journal deletes arrive with E7 through can_write).
-_entry_gm = require_campaign_for(JournalEntry, "journal_id", "gm")
+# E0-Access.6: tag attach / detach and delete need `player` in the entry's
+# own Campaign, then `scoped_get`, then `can_write(ctx, entry)`: a GM may
+# write any entry; a Player only their own `kind=player` entries. A GM-kind
+# entry they wrote, another user's entry and a hidden entry all answer the
+# same 404 as a missing one.
+#
+# GM-only (`gm`, refused with the missing-Campaign 404 before any LLM config
+# is resolved or any usage metered): generate-draft, generate, recap,
+# summarize-session, autocomplete with a Campaign, and reindex.
+#
+# Account gate (app/api/deps.py `account_gate`): the list and the item read
+# are Party reads (`openapi_extra=PARTY_READ`), open to a Player with no paid
+# account; every other route here needs one.
+_entry_player = require_campaign_for(JournalEntry, "journal_id", "player")
 
 
 @router.post("/generate-draft", response_model=GenerateDraftResponse)
@@ -57,16 +70,15 @@ async def generate_journal_draft(
     body: GenerateDraftRequest,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
-    config: LLMConfig = Depends(get_user_llm_config),
 ) -> GenerateDraftResponse:
     """Generate a narrative WITHOUT saving anything — the first half of the
     interactive flow (draft → user reviews/edits → POST /generate persists
     it). Nothing here touches the journal_entries table or the dedup hash
     store; a user can generate several drafts for the same notes without
     creating duplicate-entry noise, and a draft they never save leaves no
-    trace."""
-    ctx = await ctx_for_request(request, db, user, body.campaign_id)
-    # A non-GM's draft gets no GM-only context (glossary, source canon).
+    trace. GM only (E0-Access.6): checked before the LLM config is resolved."""
+    ctx = await ctx_for_request(request, db, user, body.campaign_id, "gm")
+    config = await get_user_llm_config(user=user, db=db)
     narrative = await generate_draft_narrative(db, user.id, body.campaign_id, body.notes, config,
                                                gm_context=ctx.is_gm)
     await llm_config_service.meter(db, user, config, body.notes, narrative)
@@ -82,7 +94,11 @@ async def generate_journal(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    ctx = await ctx_for_request(request, db, user, body.campaign_id)
+    # GM only (E0-Access.6). The duplicate check is keyed per (Campaign,
+    # caller), so no 409 can reveal another author's row.
+    ctx = await ctx_for_request(request, db, user, body.campaign_id, "gm")
+    # The service adds the entry itself: gate the row it will write.
+    can_write(ctx, JournalEntry(campaign_id=body.campaign_id, user_id=user.id, kind=EntryKind.GM))
     if await check_hash(body.campaign_id, user.id, body.entry_hash):
         raise HTTPException(status_code=409, detail="Duplicate entry detected")
 
@@ -112,7 +128,7 @@ async def generate_journal(
     return (await project_all(db, [entry], ctx))[0]
 
 
-@router.get("/", response_model=None,
+@router.get("/", response_model=None, openapi_extra=PARTY_READ,
             responses={200: {"model": JournalGMListResponse, "description": _GM_OR_PARTY}})
 async def list_journals(
     request: Request,
@@ -192,7 +208,7 @@ async def list_journals(
     return {"items": await project_all(db, items, scope), "total": total, "page": page, "limit": limit}
 
 
-@router.get("/{journal_id}", response_model=None,
+@router.get("/{journal_id}", response_model=None, openapi_extra=PARTY_READ,
             responses={200: {"model": JournalResponse, "description": _GM_OR_PARTY}})
 async def get_journal(
     journal_id: uuid.UUID,
@@ -208,10 +224,11 @@ async def get_journal(
 async def attach_tag(
     journal_id: uuid.UUID,
     body: TagAttachRequest,
-    ctx: CampaignContext = Depends(_entry_gm),
+    ctx: CampaignContext = Depends(_entry_player),
     db: AsyncSession = Depends(get_db),
 ):
     entry = await scoped_get(db, JournalEntry, ctx, journal_id)
+    can_write(ctx, entry)
     name = body.name.strip().title()[:200]
     if not name:
         raise HTTPException(status_code=422, detail="Tag name cannot be empty.")
@@ -248,10 +265,11 @@ async def attach_tag(
 async def detach_tag(
     journal_id: uuid.UUID,
     tag_id: uuid.UUID,
-    ctx: CampaignContext = Depends(_entry_gm),
+    ctx: CampaignContext = Depends(_entry_player),
     db: AsyncSession = Depends(get_db),
 ) -> None:
     entry = await scoped_get(db, JournalEntry, ctx, journal_id)
+    can_write(ctx, entry)
     # A link the caller may not see (a Shorthand tag, for a Player) is missing.
     result = await db.execute(
         scoped_select(JournalTag, ctx).where(JournalTag.journal_id == entry.id, JournalTag.tag_id == tag_id)
@@ -270,11 +288,11 @@ async def autocomplete_journal_notes(
     body: AutocompleteRequest,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
-    config: LLMConfig = Depends(get_user_llm_config),
 ) -> AutocompleteResponse:
     """With `campaign_id`, the Campaign's name and genre steer the
     suggestion; that needs `gm` there (Owner or Co-GM; anyone else gets the
-    one 404). Without it, no Campaign context."""
+    one 404, before the LLM config is resolved). Without it, no Campaign
+    context."""
     campaign_name: str | None = None
     genre: str | None = None
     if body.campaign_id:
@@ -282,6 +300,7 @@ async def autocomplete_journal_notes(
         campaign = await scoped_get(db, Campaign, ctx, ctx.campaign_id)
         campaign_name = campaign.name
         genre = campaign.genre.value
+    config = await get_user_llm_config(user=user, db=db)
     suggestion = await autocomplete_notes(body.text, campaign_name, genre, config=config)
     await llm_config_service.meter(db, user, config, body.text, suggestion)
     return AutocompleteResponse(suggestion=suggestion)
@@ -294,11 +313,11 @@ async def recap_campaign_session(
     body: RecapRequest,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
-    config: LLMConfig = Depends(get_user_llm_config),
 ) -> RecapResponse:
     # GM only: the recap is built from Shorthand (GM content).
     ctx = await ctx_for_request(request, db, user, body.campaign_id, "gm")
     campaign = await scoped_get(db, Campaign, ctx, ctx.campaign_id)
+    config = await get_user_llm_config(user=user, db=db)
 
     entries_result = await db.execute(
         scoped_select(JournalEntry, ctx)
@@ -322,10 +341,11 @@ async def summarize_session(
     body: SessionSummaryRequest,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
-    config: LLMConfig = Depends(get_user_llm_config),
 ) -> SessionSummaryResponse:
-    ctx = await ctx_for_request(request, db, user, body.campaign_id)
+    # GM only (E0-Access.6), checked before the LLM config is resolved.
+    ctx = await ctx_for_request(request, db, user, body.campaign_id, "gm")
     campaign = await scoped_get(db, Campaign, ctx, ctx.campaign_id)
+    config = await get_user_llm_config(user=user, db=db)
 
     if not body.transcript.strip():
         raise HTTPException(status_code=422, detail="Transcript is empty.")
@@ -348,6 +368,7 @@ async def reindex_journal_embeddings(
     entries_result = await db.execute(scoped_select(JournalEntry, ctx))
     entries = list(entries_result.scalars().all())
     for entry in entries:
+        can_write(ctx, entry)
         text = f"{entry.shorthand} {entry.narrative}"
         entry.embedding = embedding_service.embed(text)
         await index_party_fields(db, entry)
@@ -358,12 +379,13 @@ async def reindex_journal_embeddings(
 @router.delete("/{journal_id}", status_code=204)
 async def delete_journal(
     journal_id: uuid.UUID,
-    ctx: CampaignContext = Depends(_entry_gm),
+    ctx: CampaignContext = Depends(_entry_player),
     db: AsyncSession = Depends(get_db),
 ) -> None:
     # A GM of the entry's Campaign (Owner or Co-GM) may delete any entry
-    # there; anyone else gets the one 404 (Player Journal deletes arrive with
-    # E7 through can_write).
+    # there; a Player only their own `kind=player` entries (can_write).
+    # Anything else is the one 404.
     entry = await scoped_get(db, JournalEntry, ctx, journal_id)
+    can_write(ctx, entry)
     await db.delete(entry)
     await db.commit()

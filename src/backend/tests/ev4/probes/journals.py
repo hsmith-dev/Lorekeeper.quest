@@ -1,7 +1,10 @@
 """EV-4 probes for api/routes/journals.py (E0-Access.4): list, get, tag
-attach/detach, delete and the generate write response. E0-Access.5: tag
-attach / detach and delete need `gm` in the entry's Campaign (a Player gets
-the missing-entry 404 even on a visible entry); a Co-GM may."""
+attach/detach, delete and the generate write response. E0-Access.6: tag
+attach / detach and delete need `player` in the entry's Campaign and then
+`can_write`: a GM (Co-GM) may write any entry; a Player only their own
+`kind=player` entry. A hidden entry, the GM's, the Player's own GM-kind
+entry and another Player's entry all answer like a missing one, untouched.
+Generate is GM only."""
 from __future__ import annotations
 
 import sqlalchemy as sa
@@ -92,6 +95,23 @@ async def probe_get_journal(ev4, actor):
     assert [t["name"].split()[0] for t in r.json()["tags"]] == ["Pelor"]
 
 
+async def _forbidden_entries(ev4, actor) -> list:
+    """Entries of A a non-GM actor may see (or not) but never write: a hidden
+    GM-only entry, a Party entry the GM wrote, a `kind=gm` entry the actor
+    wrote, and another Player's own Party `kind=player` entry."""
+    other = await ev4.make_member("player", label="other_player")
+    return [
+        await add_entry(ev4, visibility="gm"),
+        await add_entry(ev4, visibility="party", canary=False),
+        await add_entry(ev4, visibility="party", kind="gm", author=actor.user_id, canary=False),
+        await add_entry(ev4, visibility="party", kind="player", author=other.id, canary=False),
+    ]
+
+
+async def _own_player_entry(ev4, actor):
+    return await add_entry(ev4, visibility="party", kind="player", author=actor.user_id, canary=False)
+
+
 @ev4_probe("POST", "/api/journals/{journal_id}/tags", actors=ACTORS)
 async def probe_attach_tag(ev4, actor):
     from app.db.models.tag import JournalTag
@@ -105,11 +125,22 @@ async def probe_attach_tag(ev4, actor):
     party = await add_entry(ev4, visibility="party", canary=False)
     hidden_cat = await add_category(ev4, visibility="gm")
     if not is_gm_of_a(ev4, actor):
-        # gm only: a hidden and a visible entry both answer like a missing one.
-        for entry in (await add_entry(ev4, visibility="gm"), party):
+        # E0-Access.6 (can_write): only the caller's own `kind=player` entry.
+        # Anything else (hidden, the GM's, their own GM-kind entry, another
+        # Player's) answers like a missing entry and gains no link.
+        for entry in await _forbidden_entries(ev4, actor):
             await assert_hidden_equals_missing(actor, f"/api/journals/{entry}/tags", f"/api/journals/{MISSING}/tags",
                                                method="POST", json=body)
-        assert await row_count(ev4, JournalTag, JournalTag.journal_id == party) == 0
+            assert await row_count(ev4, JournalTag, JournalTag.journal_id == entry) == 0
+        own = await _own_player_entry(ev4, actor)
+        r = await actor.post(f"/api/journals/{own}/tags", json=body)
+        assert r.status_code == 201, r.text
+        assert_no_canary(actor, r)
+        assert await row_count(ev4, JournalTag, JournalTag.journal_id == own) == 1
+        # A hidden category on the caller's own entry is a missing one.
+        r_hidden = await actor.post(f"/api/journals/{own}/tags", json={"name": "Bree", "custom_category_id": str(hidden_cat)})
+        r_missing = await actor.post(f"/api/journals/{own}/tags", json={"name": "Bree", "custom_category_id": MISSING})
+        assert_same_answer(actor, r_hidden, r_missing, "tag category")
         return
     # A GM (Co-GM): a category of another Campaign is a missing one.
     other_cat = await add_category(ev4, visibility="party")
@@ -141,12 +172,26 @@ async def probe_detach_tag(ev4, actor):
         r = await actor.delete(f"/api/journals/{entry}/tags/{shorthand_tag}")
         assert r.status_code == 204, r.text
         return
-    # gm only: a Shorthand-only link and a visible manual one both answer
-    # like a missing link, and nothing is deleted.
+    # The GM's entry: a Shorthand-only link and a visible manual one both
+    # answer like a missing link, and nothing is deleted.
     for tag in (shorthand_tag, manual_tag):
         await assert_hidden_equals_missing(actor, f"/api/journals/{entry}/tags/{tag}",
                                            f"/api/journals/{entry}/tags/{MISSING}", method="DELETE")
         assert await row_count(ev4, JournalTag, JournalTag.journal_id == entry, JournalTag.tag_id == tag) == 1
+    if not authenticated(actor):
+        return
+    # E0-Access.6: any entry the caller may not write keeps its link ...
+    for target in await _forbidden_entries(ev4, actor):
+        tag = await add_tag(ev4, target, source_field="manual", name="Bree")
+        await assert_hidden_equals_missing(actor, f"/api/journals/{target}/tags/{tag}",
+                                           f"/api/journals/{MISSING}/tags/{tag}", method="DELETE")
+        assert await row_count(ev4, JournalTag, JournalTag.journal_id == target, JournalTag.tag_id == tag) == 1
+    # ... and the caller's own `kind=player` entry may be untagged.
+    own = await _own_player_entry(ev4, actor)
+    tag = await add_tag(ev4, own, source_field="manual", name="Bree")
+    r = await actor.delete(f"/api/journals/{own}/tags/{tag}")
+    assert r.status_code == 204, r.text
+    assert await row_count(ev4, JournalTag, JournalTag.journal_id == own) == 0
 
 
 @ev4_probe("DELETE", "/api/journals/{journal_id}", actors=ACTORS)
@@ -162,22 +207,52 @@ async def probe_delete_journal(ev4, actor):
         assert (await actor.delete(f"/api/journals/{gm_entry}")).status_code == 204
         assert await row_count(ev4, JournalEntry, JournalEntry.id == gm_entry) == 0
         return
-    own = await add_entry(ev4, visibility="party", kind="player", author=actor.user_id, canary=False) \
-        if authenticated(actor) else party_by_gm
-    for target in (gm_entry, party_by_gm, own):
-        # Hidden, visible, or the caller's own: gm only, the same 404.
+    targets = [gm_entry, party_by_gm]
+    if authenticated(actor):
+        targets += await _forbidden_entries(ev4, actor)
+    for target in targets:
+        # Hidden, visible, the caller's GM-kind entry, another Player's: the same 404.
         await assert_hidden_equals_missing(actor, f"/api/journals/{target}", f"/api/journals/{MISSING}",
                                            method="DELETE")
         assert await row_count(ev4, JournalEntry, JournalEntry.id == target) == 1
+    if not authenticated(actor):
+        return
+    # E0-Access.6: a Player may delete their own `kind=player` entry.
+    own = await _own_player_entry(ev4, actor)
+    r = await actor.delete(f"/api/journals/{own}")
+    assert r.status_code == 204, r.text
+    assert await row_count(ev4, JournalEntry, JournalEntry.id == own) == 0
 
 
-@ev4_probe("POST", "/api/journals/generate")
+@ev4_probe("POST", "/api/journals/generate", actors=ACTORS)
 async def probe_generate_journal(ev4, actor):
+    """GM only (E0-Access.6): a non-GM of A is refused like a missing
+    Campaign, with no LLM call and no row (with or without a narrative)."""
+    from app.db.models.journal import JournalEntry
+    from app.services import llm_provider
+    from tests.ev4.probes.retrieval import use_fake_llm
+
+    await use_fake_llm(ev4, actor)
     hidden = await outsider(ev4)
 
-    def body(campaign_id):
-        return {"notes": "n", "campaign_id": str(campaign_id), "entry_hash": "h" * 64, "narrative": "A narrative."}
+    def body(campaign_id, narrative="A narrative."):
+        out = {"notes": "n", "campaign_id": str(campaign_id), "entry_hash": "h" * 64}
+        if narrative is not None:
+            out["narrative"] = narrative
+        return out
 
     r_hidden = await actor.post("/api/journals/generate", json=body(hidden.campaign_id))
     r_missing = await actor.post("/api/journals/generate", json=body(MISSING))
     assert_same_answer(actor, r_hidden, r_missing, "Campaign")
+    a = ev4.a.campaign_id
+    if is_gm_of_a(ev4, actor):
+        # A GM's save needs the dedup store (Valkey); tests/access covers it.
+        return
+    before = await row_count(ev4, JournalEntry, JournalEntry.campaign_id == a)
+    for narrative in ("A narrative.", None):
+        with llm_provider.capture() as cap:
+            r = await actor.post("/api/journals/generate", json=body(a, narrative))
+        assert cap.calls == [], "a refused generate made an LLM call"
+        assert_same_answer(actor, r, await actor.post("/api/journals/generate", json=body(MISSING, narrative)),
+                           "Campaign (gm only)")
+    assert await row_count(ev4, JournalEntry, JournalEntry.campaign_id == a) == before

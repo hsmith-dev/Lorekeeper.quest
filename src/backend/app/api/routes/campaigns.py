@@ -22,10 +22,10 @@ from app.db.models.campaign_member import CampaignMember
 from app.schemas.share import ShareTokenResponse, ShareTokenCreate, CampaignMemberResponse
 from app.schemas.tag_category import TagCategoryCreate, TagCategoryResponse
 from app.access import (
-    CampaignContext, campaign_grants_removed, check_create, project, project_all, remove_member, require_campaign,
-    revoke_share_token as revoke_grant, role_map_for_request, scoped_get, scoped_select,
+    CampaignContext, campaign_grants_removed, can_write, check_create, project, project_all, remove_member,
+    require_campaign, revoke_share_token as revoke_grant, role_map_for_request, scoped_get, scoped_select,
 )
-from app.api.deps import get_current_user, get_user_llm_config
+from app.api.deps import PARTY_READ, get_current_user, get_user_llm_config
 from app.services.export_service import build_campaign_markdown, build_campaign_pdf
 from app.services.chat_service import generate_campaign_concept
 from app.services.llm_provider import LLMConfig
@@ -37,7 +37,14 @@ router = APIRouter()
 # through require_campaign. Management (PATCH / DELETE the Campaign, Share
 # Links, members) is Owner-only; authoring and GM reads (export, analytics,
 # tag-category writes) need `gm` (Owner or Co-GM); Party reads need `player`.
-# Every denial is the one 404 {"detail": "Not found"}.
+# Every denial is the one 404 {"detail": "Not found"}. E0-Access.6: every
+# write calls can_write on the row it writes (leave removes the caller's own
+# grant, not a Campaign row, and needs only `player`).
+#
+# Account gate (app/api/deps.py `account_gate`): the list, the Campaign read
+# and the tag-category list are Party reads (openapi_extra=PARTY_READ), open
+# to a Player with no paid account. Create, generate-concept, export,
+# analytics, management, the tag-category writes and leave need one.
 _owner = require_campaign("owner")
 _gm = require_campaign("gm")
 _player = require_campaign("player")
@@ -81,7 +88,7 @@ def _campaign_extra(campaign: Campaign, is_owner: bool) -> dict:
     return {"is_owner": is_owner, "owner_display_name": None if is_owner else campaign.user.display_name}
 
 
-@router.get("/", response_model=None,
+@router.get("/", response_model=None, openapi_extra=PARTY_READ,
             responses={200: {"model": list[CampaignResponse], "description": _GM_OR_PARTY}})
 async def list_campaigns(
     request: Request,
@@ -108,7 +115,7 @@ async def list_campaigns(
     return await project_all(db, owned + joined, roles, extra=lambda c: _campaign_extra(c, c.user_id == user.id))
 
 
-@router.get("/{campaign_id}", response_model=None,
+@router.get("/{campaign_id}", response_model=None, openapi_extra=PARTY_READ,
             responses={200: {"model": CampaignResponse, "description": _GM_OR_PARTY}})
 async def get_campaign(
     ctx: CampaignContext = Depends(require_campaign("player")),
@@ -127,6 +134,7 @@ async def update_campaign(
     db: AsyncSession = Depends(get_db),
 ) -> CampaignResponse:
     campaign = await scoped_get(db, Campaign, ctx, ctx.campaign_id)
+    can_write(ctx, campaign)
     for field, value in body.model_dump(exclude_none=True).items():
         setattr(campaign, field, value)
     await db.commit()
@@ -247,6 +255,7 @@ async def create_share_token(
         token=secrets.token_urlsafe(24),
         kind=body.kind,
     )
+    can_write(ctx, token)
     db.add(token)
     await db.commit()
     await db.refresh(token)
@@ -260,6 +269,7 @@ async def revoke_share_token(
     db: AsyncSession = Depends(get_db),
 ) -> None:
     token = await scoped_get(db, CampaignShareToken, ctx, token_id)
+    can_write(ctx, token)
     # E0-Access.10: revoked, access_epoch + 1, and the access: publish after commit.
     await revoke_grant(db, token)
     await db.commit()
@@ -302,11 +312,13 @@ async def remove_campaign_member(
     db: AsyncSession = Depends(get_db),
 ) -> None:
     member = await scoped_get(db, CampaignMember, ctx, member_id)
+    can_write(ctx, member)
     if delete_entries:
         entries_result = await db.execute(
             scoped_select(JournalEntry, ctx).where(JournalEntry.user_id == member.user_id)
         )
         for entry in entries_result.scalars().all():
+            can_write(ctx, entry)
             await db.delete(entry)
     # E0-Access.10: the grant is gone; open streams close on the publish.
     await remove_member(db, member)
@@ -337,7 +349,8 @@ async def leave_campaign(
     await db.commit()
 
 
-@router.get("/{campaign_id}/tag-categories", response_model=list[TagCategoryResponse])
+@router.get("/{campaign_id}/tag-categories", response_model=list[TagCategoryResponse],
+            openapi_extra=PARTY_READ)
 async def list_tag_categories(
     ctx: CampaignContext = Depends(_player),
     db: AsyncSession = Depends(get_db),
@@ -379,6 +392,7 @@ async def delete_tag_category(
     db: AsyncSession = Depends(get_db),
 ) -> None:
     category = await scoped_get(db, TagCategory, ctx, category_id)
+    can_write(ctx, category)
     await db.delete(category)
     await db.commit()
 
@@ -389,6 +403,7 @@ async def delete_campaign(
     db: AsyncSession = Depends(get_db),
 ) -> None:
     campaign = await scoped_get(db, Campaign, ctx, ctx.campaign_id)
+    can_write(ctx, campaign)
     # Every grant goes with the Campaign: close their streams after commit.
     await campaign_grants_removed(db, ctx.campaign_id)
     await db.delete(campaign)

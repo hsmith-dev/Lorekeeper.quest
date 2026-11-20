@@ -275,9 +275,19 @@ async def test_check_create_refuses_an_unseen_row(scene):
         check_create(NpcEntry(campaign_id=a, user_id=player.user_id, name="x"), player)
     check_create(NpcEntry(campaign_id=a, user_id=gm.user_id, name="x"), gm)
     sheet = dict(campaign_id=a, template_id=uuid.uuid4(), created_by_user_id=player.user_id, name="n", data={})
-    check_create(CharacterSheet(**sheet), player)  # default visibility party
+    check_create(CharacterSheet(**sheet), gm)  # default visibility party
+    # E0-Access.6: check_create ends with can_write. A Player sees a Party
+    # sheet but may write only their own linked PC's (none until F3-world).
+    with pytest.raises(NotFound):
+        check_create(CharacterSheet(**sheet), player)
     with pytest.raises(NotFound):
         check_create(CharacterSheet(**sheet, visibility="gm"), player)
+    entry = dict(campaign_id=a, shorthand="s", narrative="n", entry_hash="h")
+    check_create(JournalEntry(**entry, user_id=player.user_id, kind="player"), player)
+    for row in (JournalEntry(**entry, user_id=player.user_id),  # default kind gm
+                JournalEntry(**entry, user_id=gm.user_id, kind="player")):
+        with pytest.raises(NotFound):
+            check_create(row, player)
     with pytest.raises(NotFound):
         check_create(CharacterSheet(**{**sheet, "campaign_id": uuid.uuid4()}), gm)
 
@@ -518,8 +528,8 @@ async def test_delete_journal_allowed_paths(client, db, scene):
 
     own, players, gms = entry(player.user_id), entry(player.user_id), entry(ev4.a.owner_id)
     await db.commit()
-    # E0-Access.5: delete needs `gm` in the entry's Campaign. A Player cannot
-    # delete even their own entry (Player Journal deletes arrive with E7).
+    # E0-Access.6 (can_write): a Player deletes only their own `kind=player`
+    # entries; an entry they wrote as `kind=gm` (the default) is not theirs.
     r = await client.delete(f"/api/journals/{own.id}", headers=player.headers)
     assert r.status_code == 404 and r.json() == NOT_FOUND
     assert await db.scalar(sa.select(sa.func.count()).where(JournalEntry.id == own.id)) == 1
@@ -533,25 +543,40 @@ async def test_delete_journal_allowed_paths(client, db, scene):
         assert await db.scalar(sa.select(sa.func.count()).where(JournalEntry.id == e.id)) == 0
 
 
-async def test_character_sheet_success_paths_as_a_player(client, scene):
+async def test_character_sheet_writes_are_gm_only_and_players_read(client, scene):
+    """E0-Access.6: sheet and template writes go through can_write. A Co-GM
+    writes; a Player reads the Party sheet but every write (create, PATCH,
+    DELETE, on a sheet or a template) is the missing-row 404."""
     ev4 = scene.ev4
     a = str(ev4.a.campaign_id)
     player = (await ev4.actor("player")).headers
-    t = await client.post("/api/character-sheets/templates", json={
-        "campaign_id": a, "name": "Mine", "fields": [{"key": "cls", "label": "Class"}]}, headers=player)
+    co_gm = (await ev4.actor("co_gm")).headers
+    template_body = {"campaign_id": a, "name": "Mine", "fields": [{"key": "cls", "label": "Class"}]}
+    r = await client.post("/api/character-sheets/templates", json=template_body, headers=player)
+    assert r.status_code == 404 and r.json() == NOT_FOUND
+    t = await client.post("/api/character-sheets/templates", json=template_body, headers=co_gm)
     assert t.status_code == 201 and t.json()["character_count"] == 0, t.text
-    s = await client.post("/api/character-sheets/", json={
-        "campaign_id": a, "template_id": t.json()["id"], "name": "Pip", "data": {"cls": "Bard"}}, headers=player)
+    sheet_body = {"campaign_id": a, "template_id": t.json()["id"], "name": "Pip", "data": {"cls": "Bard"}}
+    r = await client.post("/api/character-sheets/", json=sheet_body, headers=player)
+    assert r.status_code == 404 and r.json() == NOT_FOUND
+    s = await client.post("/api/character-sheets/", json=sheet_body, headers=co_gm)
     assert s.status_code == 201 and s.json()["name"] == "Pip", s.text
     sheet_id = s.json()["id"]
     listing = (await client.get(f"/api/character-sheets/?campaign_id={a}", headers=player)).json()
     assert [x["id"] for x in listing] == [sheet_id]
     assert (await client.get(f"/api/character-sheets/{sheet_id}", headers=player)).json()["data"] == {"cls": "Bard"}
-    p = await client.patch(f"/api/character-sheets/{sheet_id}", json={"name": "Pippa"}, headers=player)
+    for method, url, kw in (("PATCH", f"/api/character-sheets/{sheet_id}", {"json": {"name": "Pippa"}}),
+                            ("DELETE", f"/api/character-sheets/{sheet_id}", {}),
+                            ("PATCH", f"/api/character-sheets/templates/{t.json()['id']}", {"json": {"name": "X"}}),
+                            ("DELETE", f"/api/character-sheets/templates/{t.json()['id']}", {})):
+        missing = await client.request(method, url.rsplit("/", 1)[0] + f"/{RANDOM}", headers=player, **kw)
+        r = await client.request(method, url, headers=player, **kw)
+        assert (r.status_code, r.content) == (missing.status_code, missing.content) == (404, b'{"detail":"Not found"}')
+    p = await client.patch(f"/api/character-sheets/{sheet_id}", json={"name": "Pippa"}, headers=co_gm)
     assert p.status_code == 200 and p.json()["name"] == "Pippa"
     templates = (await client.get(f"/api/character-sheets/templates?campaign_id={a}", headers=player)).json()
     assert {x["name"]: x["character_count"] for x in templates}["Mine"] == 1
-    assert (await client.delete(f"/api/character-sheets/{sheet_id}", headers=player)).status_code == 204
+    assert (await client.delete(f"/api/character-sheets/{sheet_id}", headers=co_gm)).status_code == 204
     assert (await client.get(f"/api/character-sheets/{sheet_id}", headers=player)).status_code == 404
 
 
@@ -570,12 +595,18 @@ async def test_generate_write_response_is_projected(client, scene, monkeypatch):
     monkeypatch.setattr(journal_service, "extract_tags", lambda _text: [])
     monkeypatch.setattr(journal_service.embedding_service, "embed", lambda _text: None)
     ev4 = scene.ev4
-    for who, has_shorthand in (("player", False), ("gm_owner", True)):
-        body = {"notes": "GM notes", "campaign_id": str(ev4.a.campaign_id), "entry_hash": uuid.uuid4().hex,
+    def body():
+        return {"notes": "GM notes", "campaign_id": str(ev4.a.campaign_id), "entry_hash": uuid.uuid4().hex,
                 "narrative": "A narrative."}
-        r = await client.post("/api/journals/generate", json=body, headers=(await ev4.actor(who)).headers)
-        assert r.status_code == 201, r.text
-        assert ("shorthand" in r.json()) is has_shorthand, who
+
+    r = await client.post("/api/journals/generate", json=body(), headers=(await ev4.actor("gm_owner")).headers)
+    assert r.status_code == 201, r.text
+    assert "shorthand" in r.json()
+    # E0-Access.6: GM only. A Player, and a GM in member preview, get the 404.
+    preview = {**(await ev4.actor("gm_owner")).headers, "X-Lorekeeper-Preview": "member"}
+    for headers in ((await ev4.actor("player")).headers, preview):
+        r = await client.post("/api/journals/generate", json=body(), headers=headers)
+        assert r.status_code == 404 and r.json() == NOT_FOUND, r.text
 
 
 async def test_tag_attach_and_detach_paths(client, db, scene):
