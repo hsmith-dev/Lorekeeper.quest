@@ -176,10 +176,12 @@ async def _pdf_export_text(ev4, actor, label: str) -> str:
     assert r.status_code == 200, r.text
     text = _pdf_text(r.content)
     assert_no_canary(actor, text, label=label)
+    # A token wrapped across lines is still a leak.
+    assert_no_canary(actor, text.replace("\n", ""), label=f"{label} (lines joined)")
     return text
 
 
-@ev4_probe("GET", "/api/campaigns/{campaign_id}/export", actors=WITH_CO_GM)
+@ev4_probe("GET", "/api/campaigns/{campaign_id}/export", actors=(*WITH_CO_GM, "anonymous"))
 async def probe_export_campaign(ev4, actor):
     from app.db.models.journal import JournalEntry
 
@@ -211,7 +213,7 @@ async def probe_export_campaign(ev4, actor):
         record_leak(f"EV-4 leak: a GM-only entry changed {actor.name}'s PDF export", [after[:300]])
 
 
-@ev4_probe("GET", "/api/campaigns/{campaign_id}/analytics", actors=WITH_CO_GM)
+@ev4_probe("GET", "/api/campaigns/{campaign_id}/analytics", actors=(*WITH_CO_GM, "anonymous"))
 async def probe_campaign_analytics(ev4, actor):
     allowed = authenticated(actor)
     r = await _campaign_route(ev4, actor, "GET", "/analytics", allowed=allowed)

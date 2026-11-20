@@ -21,7 +21,10 @@ def _entry_date(entry: BaseModel) -> str:
 
 
 def _shorthand(entry: BaseModel) -> str | None:
-    # Only the GM projection (JournalGMResponse) has the field.
+    # Only the GM projection (JournalGMResponse) has the field. An ORM row
+    # also has it, so refuse one: it would print Shorthand for anyone.
+    if not isinstance(entry, BaseModel):
+        raise TypeError("export_service: pass projected entries (project_all), not ORM rows")
     return getattr(entry, "shorthand", None)
 
 

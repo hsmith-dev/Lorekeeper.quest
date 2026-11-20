@@ -200,7 +200,8 @@ async def get_campaign_analytics(
 ) -> CampaignAnalytics:
     """Stats over every entry of the Campaign the caller may see
     (E0-Access.13): every Member's entries for a GM; for a Player, the
-    entries their Audience covers (Party plus their own Private ones)."""
+    entries their Audience covers (Party plus their own Private ones). A GM
+    previewing as a Player gets the member view (Party entries only)."""
     visible = scoped_select(JournalEntry, ctx)
 
     totals_result = await db.execute(
