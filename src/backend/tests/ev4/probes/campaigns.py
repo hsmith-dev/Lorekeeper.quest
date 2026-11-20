@@ -6,6 +6,7 @@ members) is Owner-only; export, analytics and tag-category writes need
 `gm` (Owner or Co-GM); the tag-category list and leave need `player`. A
 caller below the route's Role gets the one 404, byte-identical to a missing
 Campaign, and nothing changes. None of the probe actors owns Campaign A.
+The Members routes (E0-Access.12) are probed in members.py.
 """
 from __future__ import annotations
 
@@ -113,26 +114,6 @@ async def probe_revoke_share_token(ev4, actor):
                                        f"{BASE}/{MISSING}/share/{MISSING}", method="DELETE")
     assert await row_count(ev4, CampaignShareToken, CampaignShareToken.id == token,
                            CampaignShareToken.revoked.is_(False)) == 1
-
-
-@ev4_probe("GET", "/api/campaigns/{campaign_id}/members", actors=WITH_CO_GM)
-async def probe_list_members(ev4, actor):
-    await _campaign_route(ev4, actor, "GET", "/members", allowed=False)
-
-
-@ev4_probe("DELETE", "/api/campaigns/{campaign_id}/members/{member_id}", actors=WITH_CO_GM)
-async def probe_remove_member(ev4, actor):
-    from app.db.models.campaign_member import CampaignMember
-
-    victim = await ev4.make_member("player", label="victim")
-    member = (await ev4.db.execute(sa.select(CampaignMember.id).where(
-        CampaignMember.campaign_id == ev4.a.campaign_id, CampaignMember.user_id == victim.id))).scalar_one()
-    await assert_hidden_equals_missing(actor, f"{BASE}/{ev4.a.campaign_id}/members/{member}",
-                                       f"{BASE}/{MISSING}/members/{MISSING}", method="DELETE")
-    hidden = await outsider(ev4)
-    await assert_hidden_equals_missing(actor, f"{BASE}/{hidden.campaign_id}/members/{member}",
-                                       f"{BASE}/{MISSING}/members/{MISSING}", method="DELETE")
-    assert await row_count(ev4, CampaignMember, CampaignMember.id == member) == 1
 
 
 # ── GM reads ───────────────────────────────────────────────────────────────
