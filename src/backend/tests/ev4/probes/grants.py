@@ -130,7 +130,10 @@ async def probe_chat_stream_closes_on_grant_change(ev4, actor):
             r = await player_now.post("/api/chat/stream", json=body)
             assert r.status_code == 200, r.text
             assert_no_canary(player_now, r)
-            await assert_hidden_equals_missing(player_now, f"{BASE}/{a}/analytics", f"{BASE}/{MISSING}/analytics")
+            # A still-gm route (tag-category create) answers like a missing Campaign.
+            await assert_hidden_equals_missing(player_now, f"{BASE}/{a}/tag-categories",
+                                               f"{BASE}/{MISSING}/tag-categories", method="POST",
+                                               json={"name": "Deities"})
         else:
             await _gone_from_a(ev4, actor)
             assert_same_answer(actor, await actor.post("/api/chat/stream", json=body),

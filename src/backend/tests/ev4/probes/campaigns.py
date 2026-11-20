@@ -2,18 +2,25 @@
 (E0-Access.4), and every other Campaign route (E0-Access.5).
 
 E0-Access.5 roles: management (PATCH / DELETE the Campaign, Share Links,
-members) is Owner-only; export, analytics and tag-category writes need
-`gm` (Owner or Co-GM); the tag-category list and leave need `player`. A
-caller below the route's Role gets the one 404, byte-identical to a missing
-Campaign, and nothing changes. None of the probe actors owns Campaign A.
+members) is Owner-only; tag-category writes need `gm` (Owner or Co-GM);
+export, analytics (E0-Access.13), the tag-category list and leave need
+`player`. A caller below the route's Role gets the one 404, byte-identical
+to a missing Campaign, and nothing changes. None of the probe actors owns
+Campaign A.
 """
 from __future__ import annotations
+
+import io
+import uuid
 
 import sqlalchemy as sa
 
 from tests.ev4.families import assert_counts_and_ranking_unchanged, assert_hidden_equals_missing, assert_no_canary
-from tests.ev4.probes._support import MISSING, add_category, authenticated, is_gm_of_a, outsider, row_count
+from tests.ev4.probes._support import (
+    MISSING, add_category, add_entry, add_tag, authenticated, is_gm_of_a, outsider, row_count,
+)
 from tests.ev4.registry import DEFAULT_ACTORS, ev4_probe
+from tests.ev4.report import record_leak
 
 WITH_CO_GM = (*DEFAULT_ACTORS, "co_gm")
 BASE = "/api/campaigns"
@@ -135,16 +142,92 @@ async def probe_remove_member(ev4, actor):
     assert await row_count(ev4, CampaignMember, CampaignMember.id == member) == 1
 
 
-# ── GM reads ───────────────────────────────────────────────────────────────
+# ── Export and analytics (E0-Access.13) ────────────────────────────────────
+#
+# Open to every Member of A, over every Member's entries scoped by Role. A
+# non-GM's analytics and export must not move across two mutations: first
+# another Player's Private entry plus a Shorthand-derived tag on a Party
+# entry, then a GM-only entry with a canary tag. A GM's export and analytics
+# do include the planted Private entry (and its Shorthand).
+
+async def _plant_hidden(ev4, actor) -> uuid.UUID:
+    """Another Player's Private entry and a Shorthand-derived tag on a seeded
+    Party entry; returns the Private entry's id."""
+    other = await ev4.actor("player_2" if actor.name != "player_2" else "player")
+    private = await add_entry(ev4, visibility="private", kind="player", author=other.user_id)
+    await add_tag(ev4, ev4.a.ids["journal_entries"][0], source_field="shorthand")
+    return private
+
+
+async def _add_gm_only_entry(ev4) -> None:
+    entry = await add_entry(ev4, visibility="gm")
+    await add_tag(ev4, entry, source_field="narrative")
+
+
+def _pdf_text(content: bytes) -> str:
+    from pypdf import PdfReader
+
+    return "\n".join(page.extract_text() for page in PdfReader(io.BytesIO(content)).pages)
+
+
+async def _pdf_export_text(ev4, actor, label: str) -> str:
+    """A's PDF export as extracted text (once per response), checked for canaries."""
+    r = await actor.get(f"{BASE}/{ev4.a.campaign_id}/export?format=pdf")
+    assert r.status_code == 200, r.text
+    text = _pdf_text(r.content)
+    assert_no_canary(actor, text, label=label)
+    return text
+
 
 @ev4_probe("GET", "/api/campaigns/{campaign_id}/export", actors=WITH_CO_GM)
 async def probe_export_campaign(ev4, actor):
-    await _campaign_route(ev4, actor, "GET", "/export?format=markdown", allowed=is_gm_of_a(ev4, actor))
+    from app.db.models.journal import JournalEntry
+
+    allowed = authenticated(actor)
+    md = await _campaign_route(ev4, actor, "GET", "/export?format=markdown", allowed=allowed)
+    if md is None:
+        await _campaign_route(ev4, actor, "GET", "/export?format=pdf", allowed=False)
+        return
+    assert_no_canary(actor, md.content, label="markdown export")
+    url = f"{BASE}/{ev4.a.campaign_id}/export?format=markdown"
+    if is_gm_of_a(ev4, actor):
+        # A GM's export covers every Member's entries, Private ones included,
+        # with their Shorthand.
+        private = await _plant_hidden(ev4, actor)
+        narrative, shorthand = (await ev4.db.execute(sa.select(JournalEntry.narrative, JournalEntry.shorthand)
+                                                     .where(JournalEntry.id == private))).one()
+        md = await actor.get(url)
+        assert md.status_code == 200, md.text
+        assert narrative in md.text and f"*Notes: {shorthand}*" in md.text, md.text[:300]
+        await _pdf_export_text(ev4, actor, "PDF export text")
+        return
+    assert "Notes:" not in md.text
+    await assert_counts_and_ranking_unchanged(actor, url, lambda: _plant_hidden(ev4, actor))
+    before = await _pdf_export_text(ev4, actor, "PDF export text")
+    assert "Notes:" not in before
+    await assert_counts_and_ranking_unchanged(actor, url, lambda: _add_gm_only_entry(ev4))
+    after = await _pdf_export_text(ev4, actor, "PDF export text after a GM-only entry")
+    if after != before:
+        record_leak(f"EV-4 leak: a GM-only entry changed {actor.name}'s PDF export", [after[:300]])
 
 
 @ev4_probe("GET", "/api/campaigns/{campaign_id}/analytics", actors=WITH_CO_GM)
 async def probe_campaign_analytics(ev4, actor):
-    await _campaign_route(ev4, actor, "GET", "/analytics", allowed=is_gm_of_a(ev4, actor))
+    allowed = authenticated(actor)
+    r = await _campaign_route(ev4, actor, "GET", "/analytics", allowed=allowed)
+    if r is None:
+        return
+    url = f"{BASE}/{ev4.a.campaign_id}/analytics"
+    if is_gm_of_a(ev4, actor):
+        # A GM's totals count another Member's Private entry.
+        before = r.json()["total_entries"]
+        await _plant_hidden(ev4, actor)
+        after = await actor.get(url)
+        assert after.status_code == 200, after.text
+        assert after.json()["total_entries"] == before + 1, after.json()
+        return
+    await assert_counts_and_ranking_unchanged(actor, url, lambda: _plant_hidden(ev4, actor))
+    await assert_counts_and_ranking_unchanged(actor, url, lambda: _add_gm_only_entry(ev4))
 
 
 # ── Tag categories ─────────────────────────────────────────────────────────

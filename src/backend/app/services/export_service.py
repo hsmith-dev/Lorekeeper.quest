@@ -1,12 +1,14 @@
+"""Campaign export (Markdown, PDF) built from projected models only
+(E0-Access.13): the route passes `project(campaign, ctx)` and
+`project_all(db, entries, ctx)`, so a GM field (Shorthand) is in the export
+exactly when the caller's projection carries it. Never pass ORM rows here."""
 from pathlib import Path
 
 # Imported at module top so missing system libraries (Pango, HarfBuzz,
 # fontconfig) fail at boot, not on the first export.
 import weasyprint
 from jinja2 import Environment, FileSystemLoader
-
-from app.db.models.campaign import Campaign
-from app.db.models.journal import JournalEntry
+from pydantic import BaseModel
 
 TEMPLATES_DIR = Path(__file__).resolve().parents[1] / "templates" / "export"
 
@@ -14,26 +16,34 @@ TEMPLATES_DIR = Path(__file__).resolve().parents[1] / "templates" / "export"
 _env = Environment(loader=FileSystemLoader(str(TEMPLATES_DIR)), autoescape=True)
 
 
-def _entry_date(entry: JournalEntry) -> str:
+def _entry_date(entry: BaseModel) -> str:
     return entry.session_date.isoformat() if entry.session_date else entry.created_at.date().isoformat()
 
 
-def build_campaign_markdown(campaign: Campaign, entries: list[JournalEntry]) -> str:
+def _shorthand(entry: BaseModel) -> str | None:
+    # Only the GM projection (JournalGMResponse) has the field.
+    return getattr(entry, "shorthand", None)
+
+
+def build_campaign_markdown(campaign: BaseModel, entries: list[BaseModel]) -> str:
     lines = [f"# {campaign.name}", "", f"*{campaign.genre.value.title()} campaign*", ""]
     if campaign.description:
         lines += [campaign.description, ""]
     lines.append("---")
     for entry in entries:
-        lines += ["", f"## {_entry_date(entry)}", "", f"*Notes: {entry.shorthand}*", "", entry.narrative]
+        lines += ["", f"## {_entry_date(entry)}", ""]
+        if (shorthand := _shorthand(entry)) is not None:
+            lines += [f"*Notes: {shorthand}*", ""]
+        lines.append(entry.narrative)
     return "\n".join(lines) + "\n"
 
 
-def build_campaign_pdf(campaign: Campaign, entries: list[JournalEntry]) -> bytes:
+def build_campaign_pdf(campaign: BaseModel, entries: list[BaseModel]) -> bytes:
     html = _env.get_template("campaign.html.j2").render(
         campaign=campaign,
         genre_line=f"{campaign.genre.value.title()} campaign",
         entries=[
-            {"date": _entry_date(e), "shorthand": e.shorthand, "narrative": e.narrative}
+            {"date": _entry_date(e), "shorthand": _shorthand(e), "narrative": e.narrative}
             for e in entries
         ],
     )
