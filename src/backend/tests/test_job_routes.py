@@ -481,6 +481,23 @@ async def test_the_reaper_leaves_cancelled_jobs_alone(world):
         conn.close()
 
 
+async def test_the_write_gate_lets_only_a_gm_or_the_starter_write_a_job(world):
+    """`can_write` (E0-Access.6) is the gate cancel and retry pass: a GM any
+    Job of the Campaign, a Player only a persisted Job they started (a
+    transient one, i.e. a create, never: Jobs come only from enqueue)."""
+    from app.access import may_write
+
+    gm, player = await world.ctx(world.owner), await world.ctx(world.player)
+    own = await world.row(await world.job(world.player, status="queued"))
+    others = await world.row(await world.job(world.owner, status="queued"))
+    assert may_write(gm, own) and may_write(gm, others)
+    assert may_write(player, own)
+    assert not may_write(player, others)
+    transient = Job(id=uuid.uuid4(), campaign_id=world.cid, kind="system.noop", queue="interactive",
+                    idempotency_key="k", ctx_kind="player", created_by=world.player.id)
+    assert not may_write(player, transient)
+
+
 # ── Admin counts ───────────────────────────────────────────────────────────
 
 async def test_job_counts_by_status_and_queue(world):

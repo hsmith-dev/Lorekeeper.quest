@@ -5,7 +5,8 @@
     stats = await job_counts(db)                 # admin: counts by status and queue
 
 Both writes need a user's writable ctx (a reduced or anonymous one is
-`not_found()`), and read the Job through `app.access.get_job`: a Player
+`not_found()`), pass the write gate (`app.access.can_write`: a GM, or the
+Player who started the Job), and read the Job through `app.access.get_job`: a Player
 reaches only the Jobs they started, a GM every Job of the Campaign, and a
 hidden id is the one 404. Each commits its own transaction (the row lock is
 held until then). A JobConflict writes nothing and leaves the transaction to
@@ -42,7 +43,7 @@ import sqlalchemy as sa
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.access import get_job
+from app.access import can_write, get_job
 from app.access.context import CampaignContext
 from app.access.policy import not_found
 from app.db.models.job import ACTIVE_STATUSES, Job
@@ -78,6 +79,7 @@ async def cancel_job(db: AsyncSession, ctx: CampaignContext, job_id: Any) -> Job
     JobConflict (nothing written) for any other status."""
     _require_writer(ctx)
     job = await get_job(db, ctx, job_id, for_update=True)
+    can_write(ctx, job)  # the single write gate: a GM, or the Job's starter
     if JobStatus(job.status) != JobStatus.QUEUED:
         raise JobConflict(ONLY_QUEUED)
     job.status = JobStatus.CANCELLED
@@ -94,6 +96,7 @@ async def retry_job(db: AsyncSession, ctx: CampaignContext, job_id: Any) -> uuid
     holds its idempotency key."""
     _require_writer(ctx)
     job = await get_job(db, ctx, job_id, for_update=True)
+    can_write(ctx, job)  # the single write gate: a GM, or the Job's starter
     if JobStatus(job.status) != JobStatus.FAILED:
         raise JobConflict(ONLY_FAILED)
     try:
