@@ -28,11 +28,11 @@ async def _ok(response, status: int = 200):
     return response.json() if response.content else None
 
 
-async def _create(gm, ev4, status: int = 201, **body):
+async def _create(gm, ev4, expect: int = 201, **body):
     body.setdefault("type", "character")
     if body["type"] == "character":
         body.setdefault("kind", "npc")
-    return await _ok(await gm.post(f"{BASE}/", json={"campaign_id": str(ev4.a.campaign_id), **body}), status)
+    return await _ok(await gm.post(f"{BASE}/", json={"campaign_id": str(ev4.a.campaign_id), **body}), expect)
 
 
 async def _history_count(db, entity_id) -> int:
