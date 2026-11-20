@@ -178,6 +178,7 @@ jobs:
       # included, holds no model package (scripts/check_model_packages.py).
       - name: No model packages installed (backend)
         if: ${{ matrix.image == 'backend' }}
+        shell: bash  # -eo pipefail: a failing docker run is not masked by the pipe
         run: |
           docker run --rm --network none --entrypoint pip "lorekeeper-backend:licence-scan" list --format=freeze \
             | python3 scripts/check_model_packages.py --installed -

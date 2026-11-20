@@ -23,7 +23,8 @@ from app.api.routes import admin as admin_routes
 from app.clients.errors import ModelServiceUnavailable
 from app.db.models.campaign import Campaign, Genre
 from app.db.models.journal import JournalEntry
-from app.db.models.source import SourceDocument
+from app.clients.fakes import fake_vector
+from app.db.models.source import SourceChunk, SourceDocument
 from app.services import dedup_service, embedding_service, nlp_service
 from tests.ev4.fixtures import bearer, create_user
 
@@ -135,6 +136,11 @@ async def test_source_upload_with_ml_up_embeds_every_chunk(client, db, gm):
                           files={"file": ("lore.txt", b"The lich sleeps under Karak Dun. " * 40, "text/plain")})
     assert r.status_code == 201, r.text
     assert r.json()["chunk_count"] >= 1
+    chunks = (await db.scalars(sa.select(SourceChunk).where(SourceChunk.source_document_id == uuid.UUID(r.json()["id"]))
+                               .order_by(SourceChunk.chunk_index))).all()
+    assert len(chunks) == r.json()["chunk_count"]
+    for chunk in chunks:
+        assert list(chunk.embedding) == pytest.approx(fake_vector(chunk.content), abs=1e-5)
 
 
 async def test_reindex_with_ml_down_is_503_and_changes_nothing(client, db, gm, ml_down):
@@ -197,6 +203,36 @@ async def test_sidecars_reports_an_unreachable_one_without_failing(client, db, m
     assert ml["reachable"] is False and "unreachable" in ml["error"]
     assert ml["models"] == [] and ml["rss_bytes"] is None
     assert stt["reachable"] is False and "stt sidecar unreachable" in stt["error"]
+
+
+async def test_sidecars_cuts_off_a_stalled_one(client, db, monkeypatch):
+    import asyncio
+
+    class Stalled:
+        async def status(self):
+            await asyncio.sleep(10)
+
+    monkeypatch.setattr(admin_routes, "SIDECAR_STATUS_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(admin_routes, "get_stt_client", lambda: Stalled())
+    r = await client.get("/api/admin/sidecars", headers=bearer(await _admin(db)))
+    assert r.status_code == 200, r.text
+    assert r.json()["ml"]["reachable"] is True
+    stt = r.json()["stt"]
+    assert stt["reachable"] is False and "timed out" in stt["error"]
+
+
+# ── Eval scoring ───────────────────────────────────────────────────────────
+
+async def test_eval_score_semantic_similarity_is_the_cosine_of_the_ml_vectors():
+    from app.services import eval_service
+
+    ref, gen = "The dragon slew the knight.", "A knight fell to the dragon."
+    a, b = fake_vector(ref), fake_vector(gen)
+    expected = sum(x * y for x, y in zip(a, b)) / (
+        sum(x * x for x in a) ** 0.5 * sum(y * y for y in b) ** 0.5)
+    score = await eval_service._score(ref, gen)
+    assert expected != 0
+    assert score["semantic_similarity"] == pytest.approx(expected)
 
 
 # ── Boot ───────────────────────────────────────────────────────────────────

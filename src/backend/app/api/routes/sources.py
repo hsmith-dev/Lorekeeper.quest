@@ -98,7 +98,7 @@ async def upload_source(
     db.add(doc)
     await db.flush()
 
-    for i, (chunk, vector) in enumerate(zip(chunks, vectors)):
+    for i, (chunk, vector) in enumerate(zip(chunks, vectors, strict=True)):
         db.add(SourceChunk(
             source_document_id=doc.id,
             user_id=user.id,

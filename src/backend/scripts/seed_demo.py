@@ -48,6 +48,7 @@ from sqlalchemy import func, select, text  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
 
 import app.db.models  # noqa: E402,F401  (registers every mapper)
+from app.clients.errors import ModelServiceError  # noqa: E402
 from app.db.models.campaign import Campaign, Genre  # noqa: E402
 from app.domain.embedding import EMBEDDING_MODEL  # noqa: E402,F401  (re-exported for the eval report)
 from app.db.models.journal import EMBEDDING_DIM, JournalEntry  # noqa: E402
@@ -232,7 +233,6 @@ async def load_embedder(mode: str = "auto") -> Embedder | None:
         raise SeedError(f"--embeddings must be one of {EMBEDDING_MODES}, got {mode!r}")
     if mode == "skip":
         return None
-    from app.clients.errors import ModelServiceError
     from app.services import embedding_service
 
     try:
@@ -428,6 +428,9 @@ def main(argv: list[str] | None = None) -> int:
         result = asyncio.run(run(args))
     except SeedError as exc:
         print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except ModelServiceError as exc:  # ml answered the probe, then failed mid-run
+        print(f"error: embedding model unavailable: {exc}", file=sys.stderr)
         return 1
     print(result.summary())
     return 0

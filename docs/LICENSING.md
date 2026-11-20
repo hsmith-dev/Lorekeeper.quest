@@ -158,9 +158,9 @@ Obligations that come with shipping these packages:
   example by mirroring the source packages next to each published image tag.
   Owner action before the first published image.
 
-Since E0-Platform.6 the backend image no longer carries `build-essential`,
-`libpq-dev` (gcc, binutils, make, perl and about 100 other packages, mostly
-GPL), the `en_core_web_trf` model or the CPU torch wheels: spaCy and
+Since E0-Platform.6 the backend image no longer carries `build-essential`
+(gcc, binutils, make, perl and about 100 other packages, mostly GPL),
+`libpq-dev`, the `en_core_web_trf` model or the CPU torch wheels: spaCy and
 sentence-transformers left the backend for the `ml` sidecar, every remaining
 requirement ships a binary wheel on amd64 and arm64, and asyncpg needs no
 libpq. Register rows only the backend used were deleted; shared rows lost

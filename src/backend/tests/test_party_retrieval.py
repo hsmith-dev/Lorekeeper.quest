@@ -256,8 +256,12 @@ async def test_create_journal_entry_indexes_party_fields(db, world, monkeypatch)
 
 
 async def test_embedding_failure_leaves_party_embedding_null_and_saves(db, world, monkeypatch):
+    async def broken_many(texts):
+        raise ModelServiceUnavailable("ml sidecar unreachable")
+
     monkeypatch.setattr(journal_service, "extract_tags", _no_tags)
     monkeypatch.setattr(embedding_service, "embed", _broken_embed)
+    monkeypatch.setattr(embedding_service, "embed_many", broken_many)
     entry = await journal_service.create_journal_entry(
         db, world.owner.id, world.a, "notes", uuid.uuid4().hex, None, narrative="Saved anyway.", gm_context=True)
     tsv_ok, _, _, vec = await _party_state(db, entry.id)
@@ -284,6 +288,9 @@ async def test_reindex_route_sets_party_fields(db, world, client):
     tsv_ok, party_hit, gm_hit, vec = await _party_state(db, entry.id)
     assert tsv_ok and not party_hit and gm_hit
     assert _close(list(vec), fake_vector("The tower fell."))
+    gm_vec = await db.scalar(sa.select(JournalEntry.embedding).where(JournalEntry.id == entry.id)
+                             .execution_options(populate_existing=True))
+    assert _close(list(gm_vec), fake_vector("Zorblax did it The tower fell."))
 
 
 # ── Backfill ───────────────────────────────────────────────────────────────

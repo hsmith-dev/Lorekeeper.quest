@@ -2,13 +2,23 @@
 title: 'E0-Platform.6: Web and worker image without models: async client wrappers and lifespan cleanup'
 type: 'refactor'
 created: '2026-11-20'
-status: 'in-progress'
+status: 'in-review'
 baseline_revision: '9b73f0bcdec1f75aec6b389349b9e1fdf893bba1'
 review_loop_iteration: 0
 followup_review_recommended: false
 context: []
 warnings: [oversized]
-deferred: []
+deferred:
+  - summary: >-
+      No CI job runs the ml sidecar's real-model NER/Matcher or embedding-parity tests any more.
+    evidence: |-
+      Backend CI no longer installs spaCy/en_core_web_trf, so src/services/ml/tests/test_nlp.py (skipif
+      no spacy) skips through tests/test_ml_sidecar_suite.py, and test_embed_parity.py needs ML_REAL_MODELS=1.
+      Backend tests cover only the label mapping over canned entities. Owner: E0-QA's dedicated,
+      path-filtered `ml` CI job (named in test_ml_sidecar_suite.py) running the sidecar's own requirements.
+    location: >-
+      src/services/ml/tests/test_nlp.py; src/backend/tests/test_ml_sidecar_suite.py
+    severity: medium
 ---
 
 <intent-contract>
@@ -93,6 +103,45 @@ deferred: []
 ## Spec Change Log
 
 ## Review Triage Log
+
+### 2026-11-20 — Review pass
+- verdicts: 35 findings — high 0, medium 7, low 21, false 3, maybe-false 4
+- findings:
+  - `[low]` `[reject]` (blind) backend/worker do not depends_on ml — by design the AC wants boot healthy without sidecars, and every caller degrades or 503s; `service_started` would not wait for the model load anyway.
+  - `[medium]` `[patch]` (blind) /api/admin/sidecars calls both sidecars sequentially with full timeouts (stt 300 s) — asyncio.gather + 5 s wait_for each.
+  - `[medium]` `[patch]` (blind) journal save makes three sequential ml calls; a hanging ml blocks ~3×30 s — one embed_many for both vectors via party_vector, skip embed when NER found ml unavailable.
+  - `[low]` `[reject]` (blind) seed/backfill embed one text per call — script throughput only; batching restructures both loops.
+  - `[medium]` `[defer]` (blind) no CI runs real-model NER/embeddings — deferred to E0-QA's ml CI job (frontmatter).
+  - `[medium]` `[patch]` (blind) reindex/source success paths do not check stored vectors — grouped with the verification-gap rows below; tests extended.
+  - `[low]` `[patch]` (blind) sources.py plain zip drops chunks on a short override result — zip(strict=True).
+  - `[low]` `[patch]` (blind) NER truncation at MAX_NER_CHARS is silent — warning logged with the original length.
+  - `[low]` `[patch]` (blind) app/clients/ml.py docstring stale — updated.
+  - `[maybe-false]` `[reject]` (blind) license-policy toolchain allowlist entries now dead — the stt image may still need some GCC runtime rows; would only be low; settle with the stt image scan.
+  - `[low]` `[patch]` (blind) numpy<2.0 cap has no stated reason — comment added (pgvector depends on numpy).
+  - `[low]` `[reject]` (blind) RETRIEVAL_EVAL re-run not tracked — tracked under "Needs desktop verification" in the Auto Run Result and the PR.
+  - `[low]` `[reject]` (blind) image-size step has no ceiling — new gate complexity; CI-3's --installed check covers model packages.
+  - `[low]` `[reject]` (blind) test_dockerfile_no_models token list is a subset / "gcc" substring — no false positive on today's Dockerfiles; CI-3 is the authoritative gate.
+  - `[low]` `[reject]` (blind) frontend sidecar card untested, cost_mb not shown — no AdminPage test harness exists; display-only.
+  - `[low]` `[patch]` (blind) LICENSING.md parenthetical misplaced — moved after build-essential.
+  - `[medium]` `[patch]` (edge) admin status stalls — same root cause as the blind admin row.
+  - `[medium]` `[patch]` (edge) journal save hang ~90 s — same root cause as the blind journal row.
+  - `[low]` `[patch]` (edge) NPC extract over 100k chars drops names silently — same root cause as the truncation row (warning).
+  - `[false]` `[reject]` (edge) large reindex holds request for minutes — each 256-text batch has its own 30 s timeout; the old in-process path was slower per entry; not a new failure.
+  - `[low]` `[patch]` (edge) seed: ModelServiceError mid-seed escapes as a traceback — main() maps it to "error: embedding model unavailable", exit 1.
+  - `[low]` `[patch]` (edge) eval_retrieval: same — same fix.
+  - `[false]` `[reject]` (edge) --installed with a missing file raises a traceback — a loud failure of a CI step is correct; nothing passes silently.
+  - `[false]` `[reject]` (edge) editable `-e git+...#egg=torch` lines pass — `pip list --format=freeze` (what CI runs) prints `name==version` for editables, never `-e` lines.
+  - `[low]` `[patch]` (edge) license-check pip-list pipe lacks pipefail — `shell: bash` on the step.
+  - `[low]` `[reject]` (edge) CUDA/nvidia guard removed — no torch left to pull NVIDIA wheels; the image licence scan still fails on unregistered nvidia-* wheels.
+  - `[medium]` `[defer]` (verification-gap) real NER/Matcher unverified in CI — same as the blind defer row.
+  - `[low]` `[patch]` (verification-gap) source upload never checks chunk vectors — test asserts each embedding ≈ fake_vector(content) in chunk order.
+  - `[low]` `[patch]` (verification-gap) reindex never checks GM embedding — test asserts embedding ≈ fake_vector(shorthand + narrative).
+  - `[low]` `[patch]` (verification-gap) eval_service._score never runs in a test — new async test against FakeMLClient.
+  - `[maybe-false]` `[reject]` (intent) boot < 10 s not timed — lifespan does only init_valkey (tested) and an import probe shows no model package; timing listed for desktop verification.
+  - `[maybe-false]` `[reject]` (intent) built-image pip-list check not shown running — it runs in CI's image-licenses (backend) job; settled by that job's result on the PR.
+  - `[maybe-false]` `[reject]` (intent) 14/16 / 5/5 eval not reproduced — needs the desktop stack with ml; listed for desktop verification.
+  - `[low]` `[reject]` (intent) E0-QA workflow/import-linter files edited — the install steps and stale ignore lines had to change once the packages left; the image-size step was requested by the orchestrator for the before/after measurement.
+  - `[low]` `[reject]` (intent) additions beyond the ACs (admin sidecars, 503s, register pruning) — the admin status is in the story's technical notes, the 503s are the error contract for callers that cannot degrade, and the register must match what ships (licence rules).
 
 ## Design Notes
 

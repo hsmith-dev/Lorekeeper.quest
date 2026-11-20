@@ -1,3 +1,4 @@
+import asyncio
 import uuid
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -448,14 +449,30 @@ async def job_stats(request: Request, db: AsyncSession = Depends(get_db)) -> Job
     return JobStatsResponse(**await job_counts(db))
 
 
+SIDECAR_STATUS_TIMEOUT_S = 5
+
+
+async def _status(client) -> tuple[object | None, str | None]:
+    """(status, None) or (None, error); never raises. A stalled sidecar is
+    cut off after SIDECAR_STATUS_TIMEOUT_S instead of its client timeout."""
+    try:
+        return await asyncio.wait_for(client.status(), timeout=SIDECAR_STATUS_TIMEOUT_S), None
+    except asyncio.TimeoutError:
+        return None, f"status timed out after {SIDECAR_STATUS_TIMEOUT_S}s"
+    except Exception as exc:  # noqa: BLE001 -- a status page reports, never fails
+        return None, str(exc) or type(exc).__name__
+
+
 @router.get("/sidecars", response_model=SidecarsResponse)
 @limiter.limit("60/minute", key_func=user_or_ip)
 async def sidecar_status(request: Request) -> SidecarsResponse:
-    """The ml and stt sidecars' /v1/status (models, state, resident memory).
-    Never a 5xx: an unreachable or misbehaving sidecar is reachable=false
-    with the error text."""
-    try:
-        st = await get_ml_client().status()
+    """The ml and stt sidecars' /v1/status (models, state, resident memory),
+    asked in parallel. Never a 5xx: an unreachable, stalled or misbehaving
+    sidecar is reachable=false with the error text."""
+    (st, ml_err), (ss, stt_err) = await asyncio.gather(_status(get_ml_client()), _status(get_stt_client()))
+    if st is None:
+        ml = MLSidecarStatus(reachable=False, error=ml_err)
+    else:
         ml = MLSidecarStatus(
             reachable=True,
             models=[SidecarModelState(**vars(m)) for m in st.models],
@@ -463,10 +480,9 @@ async def sidecar_status(request: Request) -> SidecarsResponse:
             resident_budget_mb=st.resident_budget_mb,
             lazy_resident_mb=st.lazy_resident_mb,
         )
-    except Exception as exc:  # noqa: BLE001 -- a status page reports, never fails
-        ml = MLSidecarStatus(reachable=False, error=str(exc) or type(exc).__name__)
-    try:
-        ss = await get_stt_client().status()
+    if ss is None:
+        stt = STTSidecarStatus(reachable=False, error=stt_err)
+    else:
         stt = STTSidecarStatus(
             reachable=True,
             models=[SidecarModelState(**vars(m)) for m in ss.models],
@@ -474,8 +490,6 @@ async def sidecar_status(request: Request) -> SidecarsResponse:
             compute_type=ss.compute_type,
             device=ss.device,
         )
-    except Exception as exc:  # noqa: BLE001
-        stt = STTSidecarStatus(reachable=False, error=str(exc) or type(exc).__name__)
     return SidecarsResponse(ml=ml, stt=stt)
 
 

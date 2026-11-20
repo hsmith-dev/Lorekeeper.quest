@@ -8,10 +8,13 @@ ModelServiceUnavailable (app/clients/errors.py) for the caller to handle.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 from app.clients.ml import NamedEntity, get_ml_client
 from app.db.models.tag import TagType
+
+logger = logging.getLogger(__name__)
 
 # The sidecar's /v1/ner limit (ml_service/config.py MAX_NER_CHARS); longer
 # text is cut to it rather than rejected with a 422.
@@ -53,4 +56,7 @@ def tags_from_entities(ents: list[NamedEntity]) -> list[ExtractedTag]:
 
 
 async def extract_tags(text: str) -> list[ExtractedTag]:
-    return tags_from_entities(await get_ml_client().ner(text[:MAX_NER_CHARS]))
+    if len(text) > MAX_NER_CHARS:
+        logger.warning("NER text cut from %d to %d chars (the ml sidecar's limit)", len(text), MAX_NER_CHARS)
+        text = text[:MAX_NER_CHARS]
+    return tags_from_entities(await get_ml_client().ner(text))

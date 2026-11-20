@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, text
 from sqlalchemy.orm import selectinload
 
+from app.clients.errors import ModelServiceUnavailable
 from app.db.models.journal import JournalEntry
 from app.db.models.tag import Tag, JournalTag, TagType
 from app.services.ai_service import generate_narrative
@@ -100,11 +101,13 @@ async def create_journal_entry(
 
     # Journal save never blocks on AI: with the ml sidecar down the entry
     # saves with no tags (and NULL vectors, below).
+    ml_down = False
     try:
         extracted: list[ExtractedTag] = await extract_tags(narrative)
     except Exception as exc:  # noqa: BLE001 -- ModelServiceError mostly; never block the save
         logger.warning("Tag extraction skipped, ml sidecar failed: %s", exc)
         extracted = []
+        ml_down = isinstance(exc, ModelServiceUnavailable)
 
     entry = JournalEntry(
         user_id=user_id,
@@ -138,16 +141,22 @@ async def create_journal_entry(
         {"doc": f"{notes} {narrative}", "id": str(entry.id)},
     )
 
-    # Generate and store embedding for RAG retrieval
-    try:
-        entry.embedding = await embedding_service.embed(f"{notes} {narrative}")
-    except Exception as exc:  # noqa: BLE001 -- ModelServiceError mostly; never block the save
-        # Embedding failure must not block journal creation.
-        logger.warning("Journal embedding skipped, ml sidecar failed: %s", exc)
+    # Both vectors in one ml call: the GM one (Shorthand + Narrative, for RAG)
+    # and the Party one (Narrative only, never the Shorthand). A failure, or
+    # the sidecar already found down above, leaves both NULL; it never
+    # blocks the save.
+    party_vector: list[float] | None = None
+    if ml_down:
+        logger.warning("Journal embedding skipped, ml sidecar unavailable")
+    else:
+        try:
+            entry.embedding, party_vector = await embedding_service.embed_many(
+                [f"{notes} {narrative}", narrative])
+        except Exception as exc:  # noqa: BLE001 -- ModelServiceError mostly; never block the save
+            logger.warning("Journal embedding skipped, ml sidecar failed: %s", exc)
 
-    # Party search fields (Narrative only, never the Shorthand), same
-    # transaction; an embedding failure leaves party_embedding NULL.
-    await index_party_fields(db, entry)
+    # Party search fields, same transaction.
+    await index_party_fields(db, entry, party_vector=party_vector, skip_embed=party_vector is None)
 
     await db.commit()
     await store_hash(campaign_id, user_id, entry_hash)

@@ -288,7 +288,8 @@ async def _search(
 # ── Party fields ───────────────────────────────────────────────────────────
 
 async def index_party_fields(
-    db: AsyncSession, entry: JournalEntry, *, party_vector: list[float] | None = None
+    db: AsyncSession, entry: JournalEntry, *, party_vector: list[float] | None = None,
+    skip_embed: bool = False,
 ) -> None:
     """Set `entry`'s Party search fields from its stored Narrative, in the
     caller's transaction (the caller commits): `party_tsv =
@@ -299,7 +300,9 @@ async def index_party_fields(
     Called from every journal write and reindex path (journal_service,
     journals.reindex). E0-Journal moves it into `reindex_entry`.
     `party_vector`, when given, is embed(narrative) already computed by the
-    caller (reindex embeds a whole Campaign in one batch first)."""
+    caller (reindex embeds a whole Campaign in one batch first);
+    `skip_embed` leaves `party_embedding` NULL without calling ml (the
+    caller already knows the sidecar failed)."""
     await db.flush()  # the row exists and the stored narrative is the current one
     await db.execute(
         update(JournalEntry)
@@ -307,7 +310,7 @@ async def index_party_fields(
         .values(party_tsv=func.to_tsvector("english", JournalEntry.narrative))
         .execution_options(synchronize_session=False)
     )
-    if party_vector is not None:
+    if party_vector is not None or skip_embed:
         entry.party_embedding = party_vector
         return
     try:

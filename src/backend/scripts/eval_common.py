@@ -51,6 +51,7 @@ from scripts.seed_demo import EMBEDDING_MODES, SeedError  # noqa: E402
 from sqlalchemy import select  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine  # noqa: E402
 
+from app.clients.errors import ModelServiceError  # noqa: E402
 from app.db.models.campaign import Campaign  # noqa: E402
 from app.db.models.journal import EMBEDDING_DIM, JournalEntry  # noqa: E402
 
@@ -491,6 +492,9 @@ def main(argv: list[str] | None = None) -> int:
         asyncio.run(smoke(args))
     except (SeedError, ReportError) as exc:
         print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except ModelServiceError as exc:  # ml answered the probe, then failed mid-run
+        print(f"error: embedding model unavailable: {exc}", file=sys.stderr)
         return 1
     return 0
 

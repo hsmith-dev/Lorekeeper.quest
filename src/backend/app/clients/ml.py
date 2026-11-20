@@ -16,8 +16,8 @@ The client never retries (see app/clients/errors.py).
 
 NLI and OCR load on their first request in the sidecar, so that request can
 take a few seconds longer. vision_service calls ocr() (E0-QA.9, when
-EasyOCR left the backend); embedding_service / nlp_service move over in
-E0-Platform.6.
+EasyOCR left the backend); embedding_service and nlp_service go through
+embed() and ner() (E0-Platform.6), so the backend loads no model itself.
 """
 
 from __future__ import annotations

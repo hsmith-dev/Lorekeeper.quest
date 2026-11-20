@@ -235,6 +235,9 @@ def main(argv: list[str] | None = None, *, embedding_model=None) -> int:
     except (SeedError, ReportError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
+    except ModelServiceError as exc:  # ml answered the probe, then failed mid-run
+        print(f"error: embedding model unavailable: {exc}", file=sys.stderr)
+        return 1
     return 0
 
 
