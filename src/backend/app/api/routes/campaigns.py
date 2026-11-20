@@ -23,7 +23,8 @@ from app.schemas.share import ShareTokenResponse, ShareTokenCreate, CampaignMemb
 from app.schemas.tag_category import TagCategoryCreate, TagCategoryResponse
 from app.access import (
     GM, MEMBER_VIEW, CampaignContext, audience_ctx, campaign_grants_removed, can_write, check_create, project,
-    project_all, remove_member, require_campaign, revoke_share_token as revoke_grant, role_map_for_request, scoped_get, scoped_select,
+    project_all, remove_member, require_campaign, revoke_share_token as revoke_grant, role_map_for_request,
+    scoped_get, scoped_select,
 )
 from app.api.deps import PARTY_READ, get_current_user, get_user_llm_config
 from app.services.export_service import build_campaign_markdown, build_campaign_pdf
