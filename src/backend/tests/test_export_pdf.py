@@ -178,3 +178,32 @@ async def test_pdf_other_users_campaign_is_404(client, db, promo_code):
     assert r.status_code == 404
     r = await client.get(f"/api/campaigns/{uuid.uuid4()}/export?format=pdf", headers=owner_headers)
     assert r.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_pdf_for_a_player_has_party_narratives_and_no_shorthand(client, db, promo_code):
+    # E0-Access.13: a Player's export is the Party projection of what their
+    # Audience covers: every author's Party entries, no Shorthand, no GM-only.
+    from app.db.models.campaign_member import CampaignMember
+
+    gm_headers, gm_id = await _register(client, promo_code)
+    player_headers, player_id = await _register(client, promo_code)
+    cid = await _campaign(client, gm_headers, name="Shared Marches")
+    db.add(CampaignMember(campaign_id=cid, user_id=player_id))
+    await db.commit()
+    await _entry(db, gm_id, cid, "gmnotesalpha", "The GM wrote of the bridge.", date(2026, 3, 2))
+    db.add(JournalEntry(user_id=gm_id, campaign_id=cid, shorthand="gmnotesbeta", narrative="Hidden vault lore.",
+                        session_date=date(2026, 3, 3), entry_hash=uuid.uuid4().hex, visibility="gm"))
+    db.add(JournalEntry(user_id=player_id, campaign_id=cid, shorthand="playernotes", narrative="The bard sang.",
+                        session_date=date(2026, 3, 4), entry_hash=uuid.uuid4().hex, kind="player"))
+    await db.commit()
+
+    text = "\n".join(page.extract_text() for page in (await _export(client, player_headers, cid)).pages)
+    assert "The GM wrote of the bridge." in text and "The bard sang." in text
+    assert "Hidden vault lore." not in text
+    for s in ("Notes:", "gmnotesalpha", "gmnotesbeta", "playernotes"):
+        assert s not in text, s
+
+    gm_text = "\n".join(page.extract_text() for page in (await _export(client, gm_headers, cid)).pages)
+    for s in ("Hidden vault lore.", "The bard sang.", "Notes: gmnotesalpha", "Notes: playernotes"):
+        assert s in gm_text, s

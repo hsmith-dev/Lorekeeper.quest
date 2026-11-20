@@ -2,18 +2,25 @@
 (E0-Access.4), and every other Campaign route (E0-Access.5).
 
 E0-Access.5 roles: management (PATCH / DELETE the Campaign, Share Links,
-members) is Owner-only; export, analytics and tag-category writes need
-`gm` (Owner or Co-GM); the tag-category list and leave need `player`. A
-caller below the route's Role gets the one 404, byte-identical to a missing
-Campaign, and nothing changes. None of the probe actors owns Campaign A.
+members) is Owner-only; tag-category writes need `gm` (Owner or Co-GM);
+export, analytics (E0-Access.13), the tag-category list and leave need
+`player`. A caller below the route's Role gets the one 404, byte-identical
+to a missing Campaign, and nothing changes. None of the probe actors owns
+Campaign A.
 """
 from __future__ import annotations
+
+import io
+import uuid
 
 import sqlalchemy as sa
 
 from tests.ev4.families import assert_counts_and_ranking_unchanged, assert_hidden_equals_missing, assert_no_canary
-from tests.ev4.probes._support import MISSING, add_category, authenticated, is_gm_of_a, outsider, row_count
+from tests.ev4.probes._support import (
+    MISSING, add_category, add_entry, add_tag, authenticated, is_gm_of_a, outsider, row_count,
+)
 from tests.ev4.registry import DEFAULT_ACTORS, ev4_probe
+from tests.ev4.report import record_leak
 
 WITH_CO_GM = (*DEFAULT_ACTORS, "co_gm")
 BASE = "/api/campaigns"
@@ -135,16 +142,71 @@ async def probe_remove_member(ev4, actor):
     assert await row_count(ev4, CampaignMember, CampaignMember.id == member) == 1
 
 
-# ── GM reads ───────────────────────────────────────────────────────────────
+# ── Export and analytics (E0-Access.13) ────────────────────────────────────
+#
+# Open to every Member of A, over every Member's entries scoped by Role. For
+# a non-GM, A also holds another Player's Private entry and a Shorthand-derived
+# tag on a Party entry (both canaries); adding a GM-only entry with a canary
+# tag must then change nothing the actor gets.
+
+async def _plant_hidden(ev4, actor) -> uuid.UUID:
+    """Another Player's Private entry and a Shorthand-derived tag on a seeded
+    Party entry; returns the Private entry's id."""
+    other = await ev4.actor("player_2" if actor.name != "player_2" else "player")
+    private = await add_entry(ev4, visibility="private", kind="player", author=other.user_id)
+    await add_tag(ev4, ev4.a.ids["journal_entries"][0], source_field="shorthand")
+    return private
+
+
+async def _add_gm_only_entry(ev4) -> None:
+    entry = await add_entry(ev4, visibility="gm")
+    await add_tag(ev4, entry, source_field="narrative")
+
+
+def _pdf_text(content: bytes) -> str:
+    from pypdf import PdfReader
+
+    return "\n".join(page.extract_text() for page in PdfReader(io.BytesIO(content)).pages)
+
 
 @ev4_probe("GET", "/api/campaigns/{campaign_id}/export", actors=WITH_CO_GM)
 async def probe_export_campaign(ev4, actor):
-    await _campaign_route(ev4, actor, "GET", "/export?format=markdown", allowed=is_gm_of_a(ev4, actor))
+    allowed = authenticated(actor)
+    private = await _plant_hidden(ev4, actor) if allowed else None
+    md = await _campaign_route(ev4, actor, "GET", "/export?format=markdown", allowed=allowed)
+    pdf = await _campaign_route(ev4, actor, "GET", "/export?format=pdf", allowed=allowed)
+    if md is None:
+        return
+    assert_no_canary(actor, md.content, label="markdown export")
+    assert_no_canary(actor, _pdf_text(pdf.content), label="PDF export text")
+    if is_gm_of_a(ev4, actor):
+        # A GM's export covers every Member's entries, Private ones included.
+        from app.db.models.journal import JournalEntry
+
+        narrative = (await ev4.db.execute(sa.select(JournalEntry.narrative).where(
+            JournalEntry.id == private))).scalar_one()
+        assert narrative in md.text and "Notes:" in md.text, md.text[:300]
+        return
+    assert "Notes:" not in md.text and "Notes:" not in _pdf_text(pdf.content)
+    url = f"{BASE}/{ev4.a.campaign_id}/export?format=markdown"
+    await assert_counts_and_ranking_unchanged(actor, url, lambda: _add_gm_only_entry(ev4))
+    after = await actor.get(f"{BASE}/{ev4.a.campaign_id}/export?format=pdf")
+    assert after.status_code == 200, after.text
+    assert_no_canary(actor, _pdf_text(after.content), label="PDF export text after a GM-only entry")
+    if _pdf_text(after.content) != _pdf_text(pdf.content):
+        record_leak(f"EV-4 leak: a GM-only entry changed {actor.name}'s PDF export", [_pdf_text(after.content)[:300]])
 
 
 @ev4_probe("GET", "/api/campaigns/{campaign_id}/analytics", actors=WITH_CO_GM)
 async def probe_campaign_analytics(ev4, actor):
-    await _campaign_route(ev4, actor, "GET", "/analytics", allowed=is_gm_of_a(ev4, actor))
+    allowed = authenticated(actor)
+    if allowed:
+        await _plant_hidden(ev4, actor)
+    r = await _campaign_route(ev4, actor, "GET", "/analytics", allowed=allowed)
+    if r is None or is_gm_of_a(ev4, actor):
+        return
+    await assert_counts_and_ranking_unchanged(actor, f"{BASE}/{ev4.a.campaign_id}/analytics",
+                                              lambda: _add_gm_only_entry(ev4))
 
 
 # ── Tag categories ─────────────────────────────────────────────────────────

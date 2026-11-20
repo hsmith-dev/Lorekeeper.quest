@@ -501,7 +501,8 @@ async def test_demotion_mid_stream_closes_the_co_gm_stream(db, client, monkeypat
     # The next request answers per the new grant.
     r = await client.get(f"/api/campaigns/{c.id}/me", headers=bearer(co_gm))
     assert r.status_code == 200 and r.json()["role"] == "player"
-    r = await client.get(f"/api/campaigns/{c.id}/analytics", headers=bearer(co_gm))  # gm-only
+    r = await client.post(f"/api/campaigns/{c.id}/tag-categories", json={"name": "Deities"},
+                          headers=bearer(co_gm))  # gm-only
     assert (r.status_code, r.json()) == (404, NOT_FOUND)
 
 

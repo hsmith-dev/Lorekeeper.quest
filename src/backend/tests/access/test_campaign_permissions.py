@@ -33,10 +33,10 @@ def _request(method: str = "GET", headers: dict | None = None) -> Request:
     return Request({"type": "http", "method": method, "path": "/api/journals/", "headers": raw})
 
 
-async def _entry(db, campaign_id, author, *, visibility="party", shorthand=None, narrative=None):
+async def _entry(db, campaign_id, author, *, visibility="party", shorthand=None, narrative=None, kind="gm"):
     e = JournalEntry(user_id=author, campaign_id=campaign_id, shorthand=shorthand or "s",
                      narrative=narrative or f"Plain {uuid.uuid4().hex}", entry_hash=uuid.uuid4().hex,
-                     session_date=date(2026, 5, 1), visibility=visibility)
+                     session_date=date(2026, 5, 1), visibility=visibility, kind=kind)
     db.add(e)
     await db.flush()
     return e
@@ -202,27 +202,128 @@ async def test_management_is_owner_only(client, db, ev4):
     assert (await client.get(f"/api/campaigns/{a}/members", headers=owner)).status_code == 200
 
 
-async def test_export_and_analytics_need_gm(client, ev4):
+# ── Analytics and export (E0-Access.13) ────────────────────────────────────
+
+@pytest.fixture
+async def authors(ev4, db):
+    """Campaign A with entries by the Owner (the two seeded Party entries),
+    a Co-GM (Party + GM-only), `player` (Party + own Private) and `player_2`
+    (Private). Tags: `shared` on a seeded entry and on player's Party entry
+    (narrative), `sh_only` from a seeded entry's Shorthand, `gm_tag` on the
+    GM-only entry. Returns {name: entry or tag}."""
     a = ev4.a.campaign_id
-    for who, ok in (("gm_owner", True), ("co_gm", True), ("player", False)):
+    co_gm, player, player_2 = [await ev4.actor(n) for n in ("co_gm", "player", "player_2")]
+    seeded = ev4.a.ids["journal_entries"]
+    out = {
+        "co_gm_party": await _entry(db, a, co_gm.user_id, shorthand="cogm party notes",
+                                    narrative="The Co-GM wrote of the long winter."),
+        "co_gm_gm": await _entry(db, a, co_gm.user_id, visibility="gm", shorthand="cogm secret notes",
+                                 narrative=mint_canary("XGMENTRY", a).token),
+        "player_party": await _entry(db, a, player.user_id, kind="player", shorthand="player notes",
+                                     narrative="The bard sang at the harvest fair."),
+        "player_private": await _entry(db, a, player.user_id, kind="player", visibility="private",
+                                       shorthand="player private notes", narrative="My own diary of the fair."),
+        "player_2_private": await _entry(db, a, player_2.user_id, kind="player", visibility="private",
+                                         shorthand="p2 notes", narrative=mint_canary("XP2PRIV", a).token),
+    }
+
+    async def tag(name, *links):
+        t = Tag(name=name, tag_type=TagType.character)
+        db.add(t)
+        await db.flush()
+        db.add_all([JournalTag(journal_id=j, tag_id=t.id, source_field=f) for j, f in links])
+        return t
+
+    sfx = uuid.uuid4().hex[:6]
+    out["shared"] = await tag(f"Barnaby {sfx}", (seeded[0], "narrative"), (out["player_party"].id, "narrative"))
+    out["sh_only"] = await tag(mint_canary("XSHTAG", a).token, (seeded[1], "shorthand"))
+    out["gm_tag"] = await tag(mint_canary("XGMTAG", a).token, (out["co_gm_gm"].id, "narrative"))
+    await db.commit()
+    return out
+
+
+def _counts(tags: list[dict]) -> dict[str, int]:
+    return {t["name"]: t["count"] for t in tags}
+
+
+async def _seeded_narratives(db, ev4) -> list[str]:
+    return [await db.scalar(sa.select(JournalEntry.narrative).where(JournalEntry.id == i))
+            for i in ev4.a.ids["journal_entries"]]
+
+
+async def test_gm_analytics_and_export_cover_every_author(client, db, ev4, authors):
+    a = ev4.a.campaign_id
+    every = [authors[k] for k in ("co_gm_party", "co_gm_gm", "player_party", "player_private", "player_2_private")]
+    for who in ("gm_owner", "co_gm"):
         h = (await ev4.actor(who)).headers
-        for url in (f"/api/campaigns/{a}/export?format=markdown", f"/api/campaigns/{a}/analytics"):
-            r = await client.get(url, headers=h)
-            assert (r.status_code == 200) is ok, (who, url, r.status_code)
-            if not ok:
-                assert r.json() == NOT_FOUND
-    # Preview narrows the GM below `gm`: the one 404.
+        r = await client.get(f"/api/campaigns/{a}/analytics", headers=h)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["total_entries"] == 2 + len(every), (who, body)
+        weeks = {w["week_start"]: w["count"] for w in body["entries_per_week"]}
+        assert weeks == {"2025-12-29": 1, "2026-01-05": 1, "2026-04-27": len(every)}, (who, weeks)
+        tops = _counts(body["top_characters"])
+        assert tops[authors["shared"].name] == 2
+        assert tops[authors["sh_only"].name] == 1 and tops[authors["gm_tag"].name] == 1
+        md = await client.get(f"/api/campaigns/{a}/export?format=markdown", headers=h)
+        assert md.status_code == 200, md.text
+        for narrative in await _seeded_narratives(db, ev4):
+            assert narrative in md.text, who
+        for e in every:
+            assert e.narrative in md.text and f"*Notes: {e.shorthand}*" in md.text, (who, e.narrative)
+
+
+async def test_player_analytics_and_export_are_party_plus_own_private(client, db, ev4, authors):
+    a = ev4.a.campaign_id
+    player = (await ev4.actor("player")).headers
+    body = (await client.get(f"/api/campaigns/{a}/analytics", headers=player)).json()
+    # Seeded x2, Co-GM Party, own Party, own Private.
+    assert body["total_entries"] == 5, body
+    weeks = {w["week_start"]: w["count"] for w in body["entries_per_week"]}
+    assert weeks == {"2025-12-29": 1, "2026-01-05": 1, "2026-04-27": 3}, weeks
+    tops = _counts(body["top_characters"])
+    assert tops == {authors["shared"].name: 2}, tops  # no Shorthand-derived, no GM-only tag
+    md = await client.get(f"/api/campaigns/{a}/export?format=markdown", headers=player)
+    assert md.status_code == 200, md.text
+    for narrative in await _seeded_narratives(db, ev4):
+        assert narrative in md.text
+    for k in ("co_gm_party", "player_party", "player_private"):
+        assert authors[k].narrative in md.text, k
+    for k in ("co_gm_gm", "player_2_private"):
+        assert authors[k].narrative not in md.text, k
+    assert "Notes:" not in md.text and "CANARY-" not in md.text
+    # player_2 sees their own Private entry, not player's.
+    p2 = (await ev4.actor("player_2")).headers
+    md2 = (await client.get(f"/api/campaigns/{a}/export?format=markdown", headers=p2)).text
+    assert authors["player_2_private"].narrative in md2 and authors["player_private"].narrative not in md2
+    # Seeded x2, Co-GM Party, player's Party, own Private.
+    assert (await client.get(f"/api/campaigns/{a}/analytics", headers=p2)).json()["total_entries"] == 5
+
+
+async def test_gm_preview_gets_the_player_view(client, db, ev4, authors):
+    a = ev4.a.campaign_id
     owner = {**(await ev4.actor("gm_owner")).headers, **PREVIEW}
     r = await client.get(f"/api/campaigns/{a}/analytics", headers=owner)
-    assert r.status_code == 404 and r.json() == NOT_FOUND
+    assert r.status_code == 200, r.text
+    # The member preview owns nothing: Party entries only (seeded x2, Co-GM, player).
+    assert r.json()["total_entries"] == 4 and _counts(r.json()["top_characters"]) == {authors["shared"].name: 2}
+    md = await client.get(f"/api/campaigns/{a}/export?format=markdown", headers=owner)
+    assert md.status_code == 200, md.text
+    assert "Notes:" not in md.text and "CANARY-" not in md.text
+    assert authors["player_private"].narrative not in md.text
+    assert authors["co_gm_party"].narrative in md.text
 
 
-async def test_analytics_counts_the_callers_own_entries(client, db, ev4):
+async def test_export_and_analytics_are_the_one_404_for_a_non_member(client, db, ev4):
+    from tests.ev4.fixtures import bearer, create_user
+
     a = ev4.a.campaign_id
-    owner = (await ev4.actor("gm_owner")).headers
-    r = (await client.get(f"/api/campaigns/{a}/analytics", headers=owner)).json()
-    assert r["total_entries"] == len(ev4.a.ids["journal_entries"])
-    assert len(r["entries_per_week"]) >= 1
+    stranger = bearer(await create_user(db, "stranger"))
+    for suffix in ("/export?format=markdown", "/export?format=pdf", "/analytics"):
+        hidden = await client.get(f"/api/campaigns/{a}{suffix}", headers=stranger)
+        missing = await client.get(f"/api/campaigns/{RANDOM}{suffix}", headers=stranger)
+        assert hidden.status_code == missing.status_code == 404, suffix
+        assert hidden.content == missing.content and hidden.json() == NOT_FOUND
 
 
 async def test_autocomplete_with_a_campaign_works_for_a_co_gm(client, ev4):
@@ -355,32 +456,6 @@ async def test_owner_management_success_paths(client, db, ev4):
     if other is not None:
         r = await client.delete(f"/api/campaigns/{a}/share/{other}", headers=owner)
         assert r.status_code == 404 and r.json() == NOT_FOUND
-
-
-async def test_analytics_top_tags_and_own_entries(client, db, ev4):
-    a = ev4.a.campaign_id
-    owner = (await ev4.actor("gm_owner")).headers
-    co_gm = await ev4.actor("co_gm")
-    seeded = ev4.a.ids["journal_entries"]
-    name = f"Barnaby {uuid.uuid4().hex[:6]}"
-    tag = Tag(name=name, tag_type=TagType.character)
-    db.add(tag)
-    await db.flush()
-    db.add_all([JournalTag(journal_id=seeded[0], tag_id=tag.id, source_field="narrative"),
-                JournalTag(journal_id=seeded[1], tag_id=tag.id, source_field="narrative")])
-    await _entry(db, a, co_gm.user_id)
-    await db.commit()
-    r = (await client.get(f"/api/campaigns/{a}/analytics", headers=owner)).json()
-    assert r["total_entries"] == len(seeded)
-    assert {"name": name, "count": 2} in r["top_characters"]
-    # A Co-GM's analytics cover their own entries (E0-Access.13 widens it).
-    r = (await client.get(f"/api/campaigns/{a}/analytics", headers=co_gm.headers)).json()
-    assert r["total_entries"] == 1 and r["top_characters"] == []
-    md = await client.get(f"/api/campaigns/{a}/export?format=markdown", headers=co_gm.headers)
-    assert md.status_code == 200
-    for entry_id in seeded:
-        narrative = await db.scalar(sa.select(JournalEntry.narrative).where(JournalEntry.id == entry_id))
-        assert narrative not in md.text
 
 
 async def test_non_gm_drafts_get_no_gm_context_and_gms_keep_it(client, db, ev4, monkeypatch):
