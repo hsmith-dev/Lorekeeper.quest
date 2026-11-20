@@ -135,3 +135,7 @@ Stories were merged on green GitHub CI while the desktop was offline (owner deci
 - [ ] **Remove leftovers (one is a CPU stress loop):** `docker rm -f deflake-stress deflake-pg deflake-valkey` and `rm -rf ~/lorekeeper-dev/runs/deflake ~/lorekeeper-dev/runs/deflake-plugin ~/lorekeeper-dev/runs/deflake-run.sh ~/lorekeeper-dev/runs/deflake-fail*.txt`
 - [ ] Old `pubsub.py` under the same load (48 busy loops, test capped at 1 CPU), 200 runs → before-under-load failure rate (commands in PR #71 body)
 - [ ] `tests/access/test_grants.py::test_campaign_delete_mid_stream_closes_the_stream` under load, 200 runs (suspected separate cause: grant-watch subscribe racing the delete's publish → falls back to the 30 s poll > 8 s test timeout)
+
+## E0-Jobs.7 — Job routes and the SSE stream (PR #69)
+- [ ] Prod compose: `curl -N -H "Authorization: Bearer <token>" "https://<host>/api/jobs/stream?campaign_id=<id>"` → `event: subscribed` immediately and a `job` frame within 5 s of starting a `system.noop` Job; `nginx -t` passes
+- [ ] With the `worker` stopped: enqueue a Job, cancel it, start the worker → row stays `cancelled`, the Job never runs
