@@ -106,20 +106,24 @@ async def retry_job(db: AsyncSession, ctx: CampaignContext, job_id: Any) -> uuid
     )
     if holder is not None:
         raise JobConflict(KEY_IN_USE)
-    job.status = JobStatus.QUEUED
-    job.queue = kind.queue
-    if ctx.user_id == job.ctx_user_id:
-        job.access_epoch = ctx.access_epoch  # the starter's grant now
-    job.attempts = 0
-    job.progress = job.stage = job.eta_seconds = None
-    job.error_code = job.error_message = None
-    job.result_ref = None
-    job.worker_id = job.heartbeat_at = None
-    job.started_at = job.finished_at = job.next_run_at = None
     try:
         # A concurrent enqueue may take the key between the check and here:
-        # the partial unique index decides, and this write rolls back.
+        # the partial unique index decides. The savepoint opens BEFORE the
+        # row changes (begin_nested flushes pending changes first, so a
+        # change made earlier would fail outside it and break the whole
+        # transaction); a conflict rolls back only the savepoint, writes
+        # nothing and leaves the session usable.
         async with db.begin_nested():
+            job.status = JobStatus.QUEUED
+            job.queue = kind.queue
+            if ctx.user_id == job.ctx_user_id:
+                job.access_epoch = ctx.access_epoch  # the starter's grant now
+            job.attempts = 0
+            job.progress = job.stage = job.eta_seconds = None
+            job.error_code = job.error_message = None
+            job.result_ref = None
+            job.worker_id = job.heartbeat_at = None
+            job.started_at = job.finished_at = job.next_run_at = None
             await db.flush()
     except IntegrityError as exc:
         if "uq_jobs_idempotency_key_active" in str(exc.orig):

@@ -2,15 +2,43 @@
 title: 'E0-Jobs.7: Job routes and the SSE stream'
 type: 'feature'
 created: '2026-11-02'
-status: 'in-review'
+status: 'done'
 baseline_revision: '8466b141fb4db647a3e5aceb4d588cacf01c6979'
 review_loop_iteration: 0
-followup_review_recommended: false
+followup_review_recommended: true
 context:
   - '{project-root}/_bmad-output/planning-artifacts/epics.md'
   - '{project-root}/_bmad-output/planning-artifacts/architecture/architecture-Lorekeeper.quest-2026-10-31/ARCHITECTURE-SPINE.md'
 warnings: ['oversized']
-deferred: []
+deferred:
+  - summary: >-
+      Retry's 409 "The same work is already queued or running" can tell a Player that an active Job they cannot see holds the same idempotency key.
+    evidence: |-
+      retry_job checks for an active holder of the key with a select over every Job (keys are global and content-derived), so a Player retrying their own failed Job learns one bit about a hidden Job. This is the existing global-key design: enqueue() already returns an active holder's id to any starter in the same Campaign. A fix needs per-starter keys or a different dedup rule (E0-Jobs.2's design).
+    location: >-
+      src/backend/app/jobs/control.py retry_job
+    severity: medium
+  - summary: >-
+      queue_position orders by created_at, so a retried Job (keeping its original created_at) reads as ahead of Jobs pushed before it.
+    evidence: |-
+      retry_job keeps created_at, and RQ dispatches in push order. A fix needs a requeue timestamp column (a migration). queue_position is already a lower bound by design.
+    location: >-
+      src/backend/app/access/jobs.py queue_positions
+    severity: low
+  - summary: >-
+      Each job event costs one short DB session and query per connected viewer.
+    evidence: |-
+      job_event_stream opens a session per event per stream (progress is at most 1/s per Job). This is unmeasured: a burst benchmark with many viewers would show whether a per-stream memo of visible job ids is needed (created_by never changes). Same shape as E0-Access.11's deferral.
+    location: >-
+      src/backend/app/access/jobs.py job_event_stream
+    severity: medium (unverified)
+  - summary: >-
+      The admin System tab shows Job counts but no sidecar status next to them.
+    evidence: |-
+      E0-Platform.6 (sidecar /v1/status through admin.py) is not merged; that story adds the status beside this card.
+    location: >-
+      src/frontend/src/pages/AdminPage.tsx JobCountsCard
+    severity: low
 ---
 
 <intent-contract>
@@ -93,3 +121,84 @@ deferred: []
 **Commands:**
 - GitHub CI `backend-tests.yml`, `frontend-ci.yml`, `license-check.yml` -- expected: green.
 - `python -m py_compile` on changed files; `npx tsc --noEmit && npm run build` in `src/frontend` -- expected: success.
+
+## Spec Change Log
+
+## Review Triage Log
+
+### 2026-11-02 — Review pass
+- verdicts: 36 findings — high 0, medium 8, low 19, false 7, maybe-false 2
+- findings:
+  - `medium` `patch` (blind) Retry keeps the stored ctx fields, so a Job that failed permission_changed fails again — patched: when the starter retries their own Job it takes their current access_epoch; ctx_kind and ctx_user_id stay (test added).
+  - `low` `defer` (blind) Retry keeps created_at, so queue_position misorders retried Jobs — needs a requeue column; deferred.
+  - `false` `reject` (blind) Retry ignores dependents — under the enqueue contract (E0-Jobs.2) dependents always run once their dependency reaches any terminal status, so nothing is lost.
+  - `medium` `patch` (blind) The retry savepoint IntegrityError branch is untested — patched: a new test bypasses the pre-check and asserts a 409, the row still failed and nothing pushed.
+  - `low` `reject` (blind) A Player's queue_position goes stale when hidden Jobs finish — it is a lower bound by design, and the client refetches on `subscribed` (E0-Jobs.9); a fix needs new events.
+  - `low` `reject` (blind) queue_position counts backoff Jobs and scans the queue — those Jobs are queued and will run, and a per-Campaign scan is small.
+  - `medium` `patch` (blind) LIST_LIMIT can silently drop queued/running Jobs — patched: active Jobs are never limited, finished ones are capped, and the two are merged newest first (test added).
+  - `low` `patch` (blind) `status=` stays bound to the 24 h window — patched: an explicit status has no window (test added).
+  - `maybe-false` `defer` (blind) Per-event DB queries per stream — needs a burst benchmark; deferred as medium (unverified).
+  - `false` `reject` (blind) The stream probe's GM check differs from is_gm_of_a — is_gm_of_a is exactly `actor.grants.get(cid) == "gm"`.
+  - `low` `reject` (blind) No access_changed test on the job stream — the route uses the shared sse_response watch, which tests/test_sse.py and the events route tests cover; adding one is not a direct correction.
+  - `false` `reject` (blind) The admin card hard-codes the queues — the ck_jobs_queue CHECK allows only the three JobQueue values.
+  - `false` `reject` (blind) The admin text claims a priority order — E0-Jobs.5 enforces interactive > onsave > backfill in the worker.
+  - `low` `reject` (blind) Inconsistent status comparison in the list route — JobStatus is a StrEnum and both forms compare equal; cosmetic.
+  - `low` `reject` (blind) The spec matrix omits shipped 409 and admin cases — the fix would edit this build's spec.
+  - `low` `reject` (blind) The admin-only test accepts 403 or 404 — negligible; require_admin and the EV-4 exemption are unchanged.
+  - `maybe-false` `reject` (blind) test_retry_runs_again_under_jobs_eager relies on the default — conftest runs with JOBS_EAGER=1, and even if true it would only be low.
+  - `low` `reject` (blind) `__all__` ordering and inline type imports — cosmetic.
+  - `medium` `patch` (verification-gap) Retry savepoint branch untested — same group as the blind finding above; patched there.
+  - `low` `patch` (verification-gap) Retry's reset of queue/result_ref/eta/heartbeat is not asserted — patched: the row now starts on another queue with run state set, and the test asserts the reset.
+  - `medium` `defer` (intent) Retry's key-in-use 409 reveals a hidden Job holding the same key — pre-existing global-key design (enqueue already hands out the holder's id); deferred.
+  - `low` `reject` (intent) Stream filtering is proven with hand-made messages — the filter reads only `job_id` from a message, and a real-commit test exists (test_a_real_job_change_reaches_the_starter).
+  - `false` `reject` (intent) queue_position does not match the AC's true position — the invocation intent explicitly requires that it not reveal hidden Jobs ahead.
+  - `medium` `patch` (intent) Reaper safety for cancelled Jobs is untested — patched: a reaper pass leaves two cancelled Jobs untouched, unpushed and unrun.
+  - `false` `reject` (intent) nginx settings are checked in two places — both tests run in CI (EV-4 and test_job_routes).
+  - `low` `defer` (intent) The admin AC is delivered without sidecar status — E0-Platform.6 is not merged; deferred.
+  - `low` `reject` (intent) Retry returns the same id, not a new Job — the AC's `202 {"job_id"}` is met, and a same-row retry keeps the history and the tray key.
+  - `low` `reject` (intent) The client refetch half of the resync contract is untested — E0-Jobs.9 owns lib/sse.ts (excluded by the intent).
+  - `medium` `patch` (edge) A permission_changed retry keeps the old epoch — same group as the first blind finding; patched there.
+  - `false` `reject` (edge) A GM's retry runs under the starter's grant — intended: a GM retry must not raise a Player's Job to GM rights.
+  - `low` `defer` (edge) A retried Job keeps created_at for queue order — same group as the deferred created_at finding.
+  - `low` `reject` (edge) Deferred or blocked queued Jobs count as ahead — they are queued, and queue_position is a lower bound.
+  - `medium` `patch` (edge) LIST_LIMIT drops active Jobs — same group as the blind list-cap finding; patched there.
+  - `low` `reject` (edge) A race between the list and positions queries gives queue_position null — rare and harmless (null means unknown), and the client refetches.
+  - `low` `reject` (edge) Event fields other than result_ref come from the event — the publisher reads the committed row at publish time (app/jobs/events.py).
+  - `low` `defer` (edge) Claim: ordering by created_at versus dispatch order — same group as the deferred created_at finding.
+
+## Auto Run Result
+
+Status: done
+
+**Summary.** Added the Job API (B2 contract):
+- `GET /api/jobs/{id}`
+- `GET /api/jobs/?campaign_id=&status=` with `queue_position`
+- `POST /api/jobs/{id}/retry` and `POST /api/jobs/{id}/cancel`
+- SSE `GET /api/jobs/stream?campaign_id=`: `subscribed` first, then a per-event access filter
+- admin `GET /api/admin/jobs/stats` and a "Background jobs" card on the System tab
+- the nginx streaming location and EV-4 probes
+
+**Files changed.**
+- `src/backend/app/access/jobs.py` — every Job read, result_ref visibility and the result-kind registry, queue_position, the stream filter.
+- `src/backend/app/jobs/control.py` — race-safe cancel, retry (same row; a starter's own retry takes the current epoch), admin counts.
+- `src/backend/app/api/routes/jobs.py`, `app/main.py`, `app/api/routes/admin.py` — routes, limits, mounting.
+- `src/backend/app/schemas/jobs.py` — JobResponse, JobListResponse, JobStatsResponse.
+- `src/backend/app/access/__init__.py` — exports.
+- `nginx/locations.conf` — `location = /api/jobs/stream` (api zone, buffering/cache/gzip off, 1 h timeouts).
+- `src/backend/tests/test_job_routes.py`, `tests/ev4/probes/jobs.py`, `tests/ev4/test_nginx.py`, `tests/ev4/exemptions.yaml` — tests and EV-4.
+- `src/frontend/src/{types/index.ts,services/api.ts,hooks/useAdmin.ts,pages/AdminPage.tsx}` — the admin counts card.
+
+**Review.** 36 findings. Six patch entries were applied: the epoch refresh, the savepoint test and the list cap (each also reported by a second reviewer), plus the status window, the retry-reset asserts and the reaper test. Four items were deferred: the retry key-in-use bit, created_at ordering, per-event queries and the sidecar status. The rest were rejected; each reason is in the triage log. Patched entries by verdict: medium 4, low 2.
+
+**Follow-up review: recommended.** Four medium entries were patched after the review. Two of those patches, the `list_jobs` rewrite (split into active and finished queries) and the starter epoch refresh, were tested in CI but not reviewed again.
+
+**Verification.**
+- GitHub CI on PR #69, first push: all checks green. Backend 2190 passed, 4 skipped; EV-4 probes=91, exemptions=2, pending=46, leaks=0.
+- Review-fix push: see the PR #69 checks.
+- Locally: py_compile on the changed files, scripts/check_scoped_queries.py, `npx tsc --noEmit` and `npm run build`.
+
+**Needs desktop verification.**
+- nginx in front of the app streams `/api/jobs/stream` unbuffered. Run `docker compose -f docker-compose.prod.yml up -d`, then `curl -N -H "Authorization: Bearer <token>" "https://<host>/api/jobs/stream?campaign_id=<id>"`. Expect `event: subscribed` at once and a `job` frame within 5 s of starting a `system.noop` Job; `nginx -t` should pass.
+- A real worker skips a cancelled Job. Stop the `worker` service, enqueue a Job, cancel it, start the worker, and check that the row stays `cancelled` and nothing runs.
+
+**Residual risks.** queue_position is a lower bound (privacy first). Retry's key-in-use 409 can reveal one bit about a hidden Job (deferred).
