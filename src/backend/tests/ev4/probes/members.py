@@ -167,7 +167,10 @@ async def probe_demotion_closes_the_events_stream(ev4, actor):
                                      .execution_options(populate_existing=True))).scalar_one()
     assert archived is not None
     player_now = dataclasses.replace(actor, grants={**actor.grants, a: "player"})
-    await assert_hidden_equals_missing(player_now, f"{BASE}/{a}/analytics", f"{BASE}/{MISSING}/analytics")
+    # Analytics is open to Players (E0-Access.13), so the GM-only check is a tag-category write.
+    await assert_hidden_equals_missing(player_now, f"{BASE}/{a}/tag-categories",
+                                       f"{BASE}/{MISSING}/tag-categories", method="POST",
+                                       json={"name": "demoted-probe"})
 
 
 @ev4_probe("DELETE", "/api/campaigns/{campaign_id}/members/{member_id}", actors=WITH_CO_GM)

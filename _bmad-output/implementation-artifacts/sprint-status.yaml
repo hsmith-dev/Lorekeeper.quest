@@ -107,7 +107,7 @@ development_status:
   4-10-grant-changes-bump-access_epoch-and-close-open-streams: done
   4-11-campaign-events-route-and-usecampaignevents: done
   4-12-members-api-and-roles-in-sharing-members: done
-  4-13-analytics-and-export-cover-every-member-scoped-by-role: backlog
+  4-13-analytics-and-export-cover-every-member-scoped-by-role: done
   4-14-optional-pending-owner-decision-od-1-legacy-npcs-and-quests: backlog  # OPTIONAL, pending owner decision OD-1
   epic-4-retrospective: optional
 
