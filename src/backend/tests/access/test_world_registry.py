@@ -299,3 +299,92 @@ def test_register_writer(monkeypatch):
     monkeypatch.setitem(REGISTRY, SessionPlan, reg.stored())
     with pytest.raises(TypeError):
         reg.register_writer(SessionPlan, "not callable")
+
+
+# ── E0-WorldCore.5: hidden aliases, write-time history audience ────────────
+
+def test_alias_and_change_registrations():
+    assert REGISTRY[EntityAlias].as_parent_field == "aliases"
+    assert REGISTRY[EntityAlias].floor == "visibility_floor"
+    assert REGISTRY[EntityChange].floor == "write_visibility"
+
+
+@pytest.mark.parametrize("aliases, expected", [(None, PUBLIC), ("party", PUBLIC), ("gm", GM_AUDIENCE),
+                                               ("private", owner(AUTHOR)), ("bogus", GM_AUDIENCE)])
+def test_alias_follows_the_entitys_aliases_field(aliases, expected):
+    fv = {} if aliases is None else {"aliases": aliases}
+    alias = EntityAlias(campaign_id=CID, alias="Al", normalized_alias="al")
+    assert audience_of(alias, parents=[entity("party", fv)]) == expected
+    # Another field hidden changes nothing for the alias.
+    assert audience_of(alias, parents=[entity("party", {"description": "gm"})]) == PUBLIC
+
+
+def test_alias_field_rule_needs_the_entity_row():
+    alias = EntityAlias(campaign_id=CID, alias="Al", normalized_alias="al")
+    with pytest.raises(ValueError):
+        audience_of(alias, parents=[PUBLIC])
+
+
+@pytest.mark.parametrize("write, expected", [(None, PUBLIC), ("party", PUBLIC), ("gm", GM_AUDIENCE),
+                                             ("private", GM_AUDIENCE)])
+def test_write_visibility_is_a_floor_on_history(write, expected):
+    change = EntityChange(campaign_id=CID, op="update_field", field="name", write_visibility=write)
+    assert audience_of(change, parents=[entity("party")]) == expected
+    # floor=False (world_service's write-time computation) leaves the floor out.
+    assert audience_of(change, parents=[entity("party")], floor=False) == PUBLIC
+    # The floor never widens: a GM-only Entity's row stays GM.
+    assert audience_of(change, parents=[entity("gm")]) == GM_AUDIENCE
+
+
+def test_alias_history_is_hidden_with_the_aliases_field():
+    change = EntityChange(campaign_id=CID, op="add_alias", field="aliases", write_visibility="party")
+    assert audience_of(change, parents=[entity("party")]) == PUBLIC
+    assert audience_of(change, parents=[entity("party", {"aliases": "gm"})]) == GM_AUDIENCE
+
+
+def test_as_parent_field_is_validated():
+    with pytest.raises(ValueError):
+        reg.derived([reg.parent(Entity, "entity_id")], as_parent_field="attributes.region")
+    with pytest.raises(ValueError):
+        reg.derived([reg.reached_through(EntityAlias, "entity_id")], as_parent_field="aliases")
+
+
+def test_party_projection_hides_aliases_extra():
+    npc = entity("party", {"aliases": "gm"})
+    extra = {"aliases": [{"id": str(uuid.uuid4()), "campaign_id": str(CID), "entity_id": str(npc.id),
+                          "alias": "Al"}]}
+    assert project(npc, PLAYER_CTX, extra=extra).aliases == []
+    assert len(project(npc, GM_CTX, extra={"aliases": [
+        {**extra["aliases"][0], "normalized_alias": "al", "visibility_floor": None}]}).aliases) == 1
+
+
+def test_party_projection_drops_entity_refs_it_cannot_see():
+    loc_id, other_id = uuid.uuid4(), uuid.uuid4()
+    quest = entity("party", type_="quest", status="active",
+                   attributes={"location_entity_id": str(loc_id), "giver_entity_id": str(other_id), "reward": "Gold"})
+    # No set: nothing counts as visible (fail closed).
+    assert project(quest, PLAYER_CTX).attributes == {"reward": "Gold"}
+    body = project(quest, PLAYER_CTX, visible_entity_ids=frozenset({other_id}))
+    assert body.attributes == {"giver_entity_id": str(other_id), "reward": "Gold"}
+    assert project(quest, GM_CTX).attributes["location_entity_id"] == str(loc_id)
+
+
+def test_history_of_an_entity_ref_nulls_ids_it_cannot_see():
+    seen, hidden = uuid.uuid4(), uuid.uuid4()
+    quest = entity("party", type_="quest", status="active")
+    change = EntityChange(id=uuid.uuid4(), campaign_id=CID, entity_id=quest.id, op="update_field",
+                          field="attributes.location_entity_id", old_value=str(seen), new_value=str(hidden),
+                          created_at=NOW, write_visibility="gm")
+    body = project(change, PLAYER_CTX, parent=quest, visible_entity_ids=frozenset({seen}))
+    assert (body.old_value, body.new_value) == (str(seen), None)
+    assert str(hidden) not in body.model_dump_json()
+    nested = EntityChange(id=uuid.uuid4(), campaign_id=CID, entity_id=quest.id, op="source_deleted",
+                          field="attributes.giver_entity_id",
+                          new_value={"current_value": str(hidden), "flagged": 1}, created_at=NOW)
+    assert project(nested, PLAYER_CTX, parent=quest).new_value == {"current_value": None, "flagged": 1}
+    gm = project(change, GM_CTX, parent=quest)
+    assert gm.new_value == str(hidden)
+    # Other fields keep their values (a name is not an id).
+    plain = EntityChange(id=uuid.uuid4(), campaign_id=CID, entity_id=quest.id, op="update_field",
+                         field="attributes.reward", new_value=str(hidden), created_at=NOW)
+    assert project(plain, PLAYER_CTX, parent=quest).new_value == str(hidden)

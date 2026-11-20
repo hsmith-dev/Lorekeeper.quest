@@ -29,7 +29,12 @@ app/core/sse.py's close watch (app.core may not import app.access), so every
 registry's `gm_when` (deleted or merged Entities are GM only). E0-Access.11 adds
 Campaign events (`campaign_event_stream`, `deliverable`, `stream_ctx`,
 `register_event_domain`, `event_domains`, `BROADCAST_DOMAINS`): who receives
-which `campaign:{id}:events` invalidation.
+which `campaign:{id}:events` invalidation. E0-WorldCore.5 adds the registry's
+`as_parent_field` (an alias row follows its Entity's `aliases` field) and
+`audience_of(..., floor=False)`, the `entity_changes.write_visibility` floor,
+the ENTITY_REF redaction in `project` (`visible_entity_ids`), resolvers that
+take the row's ctx (`register_resolver(..., with_ctx=True)`) and Visibility
+kinds with non-column hideable fields (`register_visibility_kind(..., fields=)`).
 """
 from app.access.audience import (
     ALWAYS_GM_FIELDS, GM_AUDIENCE, MEMBERS, PUBLIC, AnyOf, Audience, AudienceLevel, covers, ctx_audience,

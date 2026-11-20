@@ -26,7 +26,9 @@ answer as a missing row. An `always_gm` model, an always-GM field
   * None (or the Visibility column's name) sets the stored column;
   * "visibility_floor" sets that column, on a model that has one;
   * on a model with `field_visibility`, any other column sets
-    `field_visibility[field]` (a new dict, so JSONB change tracking sees it);
+    `field_visibility[field]` (a new dict, so JSONB change tracking sees it),
+    and so does a name the kind lists in `fields=` though it is no column
+    (an Entity's `aliases`, which hides its alias rows, E0-WorldCore.5);
   * anything else is 422 `no_field_visibility` (`unknown_field` for a
     name that is not a column of a model with field visibility).
 
@@ -116,24 +118,36 @@ class VisibilityKind:
     model: type
     where: Any = None              # an SQL predicate narrowing which rows are this kind
     options: tuple[Any, ...] = ()  # loader options the projection needs
+    fields: tuple[str, ...] = ()   # hideable names that are not columns (entity: aliases)
 
 
 _KINDS: dict[str, VisibilityKind] = {}
 
 
 def register_visibility_kind(kind: str, model: type, *, where: Any = None,
-                             options: Sequence[Any] = ()) -> VisibilityKind:
+                             options: Sequence[Any] = (), fields: Sequence[str] = ()) -> VisibilityKind:
     """Make `kind` a target of `set_visibility` and of the bulk route: refs
     of this kind name `model.id`, narrowed by `where`. `model` must be
     registered and Campaign-scoped. An `always_gm` model may be registered
-    (its refs then answer 422 `always_gm`). Registering a different model
-    for a kind that has one raises ValueError; the same one is a no-op."""
+    (its refs then answer 422 `always_gm`). `fields` are field-level names
+    that are not columns (a model with `field_visibility` only). Registering
+    a different model for a kind that has one raises ValueError; the same
+    one is a no-op."""
     if not isinstance(kind, str) or not kind:
         raise ValueError("register_visibility_kind: kind must be a non-empty string")
     registration(model)  # UnregisteredModel for an unregistered model
     if scope_column(model) is None or not hasattr(model, "id"):
         raise ValueError(f"register_visibility_kind: {model.__name__} needs a Campaign scope and an `id` column")
-    entry = VisibilityKind(kind, model, where, tuple(options))
+    fields = tuple(fields)
+    if fields:
+        reg = registration(model)
+        if not isinstance(reg, Stored) or not reg.field_visibility:
+            raise ValueError(f"register_visibility_kind: {model.__name__} has no field_visibility for fields=")
+        bad = [f for f in fields if not isinstance(f, str) or not f or "." in f
+               or f in ALWAYS_GM_FIELDS or f in reg.gm_fields or f in sa.inspect(model).columns]
+        if bad:
+            raise ValueError(f"register_visibility_kind: fields= takes non-column field names, got {bad}")
+    entry = VisibilityKind(kind, model, where, tuple(options), fields)
     existing = _KINDS.get(kind)
     if existing is not None:
         if existing.model is model:
@@ -247,7 +261,7 @@ def _target(ref: RecordRef) -> tuple[VisibilityKind, Stored, str]:
         raise always_gm_error()
     if not isinstance(reg, Stored) or reg.column is None:
         not_found()
-    return entry, reg, field_path(sa.inspect(entry.model).columns.keys(), reg, ref.field)
+    return entry, reg, field_path([*sa.inspect(entry.model).columns.keys(), *entry.fields], reg, ref.field)
 
 
 def _select(entry: VisibilityKind, ctx: CampaignContext, row_id: uuid.UUID) -> sa.Select:

@@ -6,11 +6,14 @@ and the only place a `ResolvedSource` is built.
     cited = await resolve_sources(db, refs, ctx)     # ResolvedSource for each of them
 
 Each `SourceKind` gets one resolver, `register_resolver(kind, fn, model=,
-where=)`: `model` is the registered model whose rows the refs name (its
-`id`), `where` an optional SQL predicate narrowing which rows are that kind
-(journal: `kind = 'gm'`), and `fn(row, ref)` returns `(title, quote)` for a
-row that has already passed the visibility check here. A resolver never
-decides visibility, so it can never hand back a row ctx cannot see.
+where=, with_ctx=False)`: `model` is the registered model whose rows the refs
+name (its `id`), `where` an optional SQL predicate narrowing which rows are
+that kind (journal: `kind = 'gm'`), and `fn(row, ref)` returns `(title,
+quote)` for a row that has already passed the visibility check here. With
+`with_ctx=True` it is called `fn(row, ref, row_ctx)`, the ctx the row was
+checked with, so it can build its quote through `access.project`
+(world_service's `entity_field`). A resolver never decides visibility, so it
+can never hand back a row ctx cannot see.
 
 A ref is visible to a ctx when, in order:
 
@@ -22,7 +25,11 @@ A ref is visible to a ctx when, in order:
      whole record (`field=None`); for anyone else never an always-GM field or
      one of the model's `gm_fields`, never `field=None` on a model that has
      any (the whole record includes them), and never a field hidden by the
-     row's `field_visibility`. An unknown field is dropped for everyone.
+     row's `field_visibility`. On a model with `field_visibility` a dotted
+     field `head.rest` (an Entity's `attributes.region`) names a part of the
+     column `head`: the GM-field rules apply to `head`, and both the full
+     name and `head` must be visible there. An unknown field is dropped for
+     everyone.
 
 `ctx` is a `CampaignContext` or a `RoleMap` (a campaign-less chat: each row
 is checked with the Role the map gives in the row's own Campaign). Results
@@ -68,6 +75,7 @@ class Resolver:
     fn: ResolverFn
     model: type
     where: Any = None
+    with_ctx: bool = False
 
 
 _RESOLVERS: dict[SourceKind, Resolver] = {}
@@ -82,9 +90,10 @@ def _kind(kind: SourceKind | str) -> SourceKind:
 
 
 def register_resolver(kind: SourceKind | str, fn: ResolverFn, *, model: type | None = None,
-                      where: Any = None) -> ResolverFn:
-    """Register `fn(row, ref) -> (title, quote)` for refs of `kind`. `model`
-    (default: `SOURCE_KIND_MODELS[kind]`) is the registered, Campaign-scoped
+                      where: Any = None, with_ctx: bool = False) -> ResolverFn:
+    """Register `fn(row, ref) -> (title, quote)` for refs of `kind`
+    (`fn(row, ref, row_ctx)` with `with_ctx=True`). `model` (default:
+    `SOURCE_KIND_MODELS[kind]`) is the registered, Campaign-scoped
     model whose `id` a ref of this kind names; `where` an optional SQL
     predicate on it. Registering a different resolver for a kind that has
     one raises ValueError; re-registering the same one is a no-op."""
@@ -97,10 +106,10 @@ def register_resolver(kind: SourceKind | str, fn: ResolverFn, *, model: type | N
         raise ValueError(f"register_resolver: {model.__name__} needs a Campaign scope and an `id` column")
     existing = _RESOLVERS.get(key)
     if existing is not None:
-        if existing.fn is fn and existing.model is model:
+        if existing.fn is fn and existing.model is model and existing.with_ctx == bool(with_ctx):
             return fn
         raise ValueError(f"register_resolver: {key.value!r} already has a resolver ({existing.fn.__qualname__})")
-    _RESOLVERS[key] = Resolver(key, fn, model, where)
+    _RESOLVERS[key] = Resolver(key, fn, model, where, bool(with_ctx))
     return fn
 
 
@@ -138,23 +147,31 @@ def _row_ctx(scope: Scope, row: Any) -> CampaignContext | None:
 
 def field_visible(model: type, row: Any, field: str | None, ctx: CampaignContext) -> bool:
     """True when `ctx` may see `field` of `row` (a row it may already see);
-    `field=None` is the whole record."""
-    if field is not None and field not in sa.inspect(model).columns:
-        return False  # unknown field: fail closed
+    `field=None` is the whole record. On a model with `field_visibility`,
+    `head.rest` is a part of the column `head` (module docstring)."""
+    reg = registration(model)
+    per_field = reg.field_visibility if isinstance(reg, Stored) else None
+    columns = sa.inspect(model).columns
+    head = field.split(".", 1)[0] if field is not None else None
+    if field is not None and field not in columns:
+        # A dotted part of a column, on a model with field-level Visibility only.
+        if not (per_field and "." in field and head in columns and field.split(".", 1)[1]):
+            return False  # unknown field: fail closed
     if ctx.role == GM:
         return True
-    reg = registration(model)
     hidden = set(ALWAYS_GM_FIELDS) | set(gm_fields(model))
-    per_field = reg.field_visibility if isinstance(reg, Stored) else None
     if field is None:
         # The whole record includes every GM field, and every field-level
         # Visibility: only a model with neither is whole-record visible.
-        return not (hidden & set(sa.inspect(model).columns.keys())) and per_field is None
-    if field in hidden:
+        return not (hidden & set(columns.keys())) and per_field is None
+    if field in hidden or head in hidden or (per_field and head == per_field):
         return False
     if per_field:
-        vis = (getattr(row, per_field, None) or {}).get(field)
-        if vis is not None:
+        per = getattr(row, per_field, None) or {}
+        for name in {field, head}:
+            vis = per.get(name) if isinstance(per, Mapping) else None
+            if vis is None:
+                continue
             kind = getattr(row, reg.kind_field) if reg.kind_field else None
             owner_id = getattr(row, reg.owner_field) if reg.owner_field else None
             try:
@@ -213,8 +230,9 @@ async def resolve_sources(db: AsyncSession, refs: Iterable[SourceRef], ctx: Scop
     returns nothing drops its ref (fail closed)."""
     out: list[ResolvedSource] = []
     for ref, row in await _visible_rows(db, refs, ctx):
+        res = _RESOLVERS[ref.kind]
         try:
-            got = _RESOLVERS[ref.kind].fn(row, ref)
+            got = res.fn(row, ref, _row_ctx(ctx, row)) if res.with_ctx else res.fn(row, ref)
             if inspect.isawaitable(got):
                 got = await got
             if not got:

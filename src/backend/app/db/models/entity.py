@@ -1,6 +1,7 @@
 """The World Model (F3-world, E0-WorldCore.2; AD-9, AD-10, AD-12, AD-19).
 
-Seven tables, created by revision 03c0b504f1d1 (the models never emit DDL):
+Seven tables, created by revision 03c0b504f1d1 (the models never emit DDL;
+0f1c3b194a4b adds `entity_changes.write_visibility`):
 
   entities              one row per Character, Location, Faction, Item or Quest
   entity_aliases        other names of an Entity
@@ -18,7 +19,9 @@ declare. Closed sets are text columns with CHECKs from app/domain/enums.py
 (AD-9); `status` is checked per type by app.domain.entity_types.
 
 Writes go through world_service.apply_change (E0-WorldCore.3); Visibility
-writes through app.access.set_visibility. The relationships here are
+writes through app.access.set_visibility. Each history row records the
+audience it was written for (`write_visibility`, E0-WorldCore.5), which the
+access registry applies as a floor. The relationships here are
 view-only loaders (for app.access.audience_of).
 """
 import uuid
@@ -252,5 +255,11 @@ class EntityChange(Base):
     reverted_change_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("entity_changes.id", ondelete="SET NULL"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    # Who could read the row's field when it was written (E0-WorldCore.5): `party`
+    # only when the Party could see it both just before and just after the change,
+    # else `gm` (fail closed; every row before 0f1c3b194a4b is `gm`). A registry
+    # floor: a row hidden at write time stays hidden after publication.
+    write_visibility: Mapped[Visibility] = mapped_column(
+        VISIBILITY_ENUM, nullable=False, default=Visibility.GM, server_default=Visibility.GM.value)
 
     entity: Mapped[Entity] = _to_entity("EntityChange", "entity_id")

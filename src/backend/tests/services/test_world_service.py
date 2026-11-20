@@ -1205,3 +1205,90 @@ async def test_a_source_deleted_row_hides_its_entry_from_a_player(db, ev4, gm):
     assert str(journal_id) not in repr(seen)
     gm_view = {r["id"]: r for r in await _projected_history(db, gm, entity.id)}
     assert gm_view[str(row.id)]["new_value"]["journal_id"] == str(journal_id)
+
+
+# ── E0-WorldCore.5: write_visibility (the audience a row was written for) ──
+
+async def _write_vis(db, change_id) -> str:
+    return str((await _get(db, EntityChange, change_id)).write_visibility)
+
+
+async def test_write_visibility_per_op(db, ev4, gm):
+    """party only when the Party could see the row's field just before and just after."""
+    secret = await _create(db, gm, name="Secret", description="Hidden")
+    created = (await _changes(db, secret.id))[0]
+    edit_gm_only = await apply_change(db, gm, UpdateField(entity_id=secret.id, field="description", value="Edited"))
+    entity = await _create(db, gm, name="Mira", description="Tall")
+    await set_visibility(db, gm, RecordRef(kind="entity", id=entity.id), "party")
+    await set_visibility(db, gm, RecordRef(kind="entity", id=entity.id, field="description"), "gm")
+    publish, hide = [r for r in await _changes(db, entity.id) if r.op == "update_field"]
+    visible_edit = await apply_change(db, gm, UpdateField(entity_id=entity.id, field="name", value="Mira Vale"))
+    hidden_edit = await apply_change(db, gm, UpdateField(entity_id=entity.id, field="description", value="Taller"))
+    status = await apply_change(db, gm, SetStatus(entity_id=entity.id, status="deceased"))
+    alias = await apply_change(db, gm, AddAlias(entity_id=entity.id, alias="The Vale"))
+    await db.commit()
+    assert (publish.field, hide.field) == ("visibility", "field_visibility.description")
+    assert {name: await _write_vis(db, row.id) for name, row in {
+        "create": created, "edit of a GM-only Entity": edit_gm_only, "publish": publish, "hide": hide,
+        "visible edit": visible_edit, "hidden edit": hidden_edit, "status": status, "alias": alias,
+    }.items()} == {
+        "create": "gm", "edit of a GM-only Entity": "gm", "publish": "gm", "hide": "gm",
+        "visible edit": "party", "hidden edit": "gm", "status": "party", "alias": "party",
+    }
+    # Un-hiding the field does not bring the hidden-time row back.
+    await set_visibility(db, gm, RecordRef(kind="entity", id=entity.id, field="description"), "party")
+    await db.commit()
+    player = await _player(ev4, db)
+    seen = {r["id"] for r in await _projected_history(db, player, entity.id)}
+    assert str(visible_edit.id) in seen and str(status.id) in seen
+    assert not {str(hidden_edit.id), str(publish.id), str(hide.id)} & seen
+    assert str(hidden_edit.id) in {r["id"] for r in await _projected_history(db, gm, entity.id)}
+
+
+async def test_write_visibility_of_a_revert_follows_the_rule(db, ev4, gm):
+    """A pre-publish change reverted after publication: the revert row is written now, on a visible field."""
+    entity = await _create(db, gm, name="Before")
+    early = await apply_change(db, gm, UpdateField(entity_id=entity.id, field="description", value="Draft"))
+    await set_visibility(db, gm, RecordRef(kind="entity", id=entity.id), "party")
+    undo = await revert_change(db, gm, early.id)
+    await db.commit()
+    assert (await _write_vis(db, early.id), await _write_vis(db, undo.id)) == ("gm", "party")
+    player = await _player(ev4, db)
+    seen = {r["id"] for r in await _projected_history(db, player, entity.id)}
+    assert str(undo.id) in seen and str(early.id) not in seen
+
+
+async def test_write_visibility_is_gm_when_the_entity_is_private(db, ev4, gm):
+    """Owner-level before or after is not the Party: gm."""
+    entity = await _create(db, gm, name="Mine")
+    await set_visibility(db, gm, RecordRef(kind="entity", id=entity.id), "private")
+    edit = await apply_change(db, gm, UpdateField(entity_id=entity.id, field="name", value="Still mine"))
+    await db.commit()
+    assert await _write_vis(db, edit.id) == "gm"
+
+
+async def test_hidden_aliases_hide_alias_rows_and_alias_history(db, ev4, gm):
+    entity = await _create(db, gm, name="Aldric")
+    await set_visibility(db, gm, RecordRef(kind="entity", id=entity.id), "party")
+    shown = await apply_change(db, gm, AddAlias(entity_id=entity.id, alias="Brother Al"))
+    await set_visibility(db, gm, RecordRef(kind="entity", id=entity.id, field="aliases"), "gm")
+    hidden = await apply_change(db, gm, AddAlias(entity_id=entity.id, alias="The Grey"))
+    await db.commit()
+    assert "aliases" in ws.HIDEABLE_FIELDS
+    assert (await _get(db, Entity, entity.id)).field_visibility == {"aliases": "gm"}
+    assert await _write_vis(db, hidden.id) == "gm"
+    player = await _player(ev4, db)
+    assert (await db.execute(ws.scoped_select(EntityAlias, player).where(
+        EntityAlias.entity_id == entity.id))).scalars().all() == []
+    history = await _projected_history(db, player, entity.id)
+    assert not {str(shown.id), str(hidden.id)} & {r["id"] for r in history}
+    gm_aliases = (await db.execute(ws.scoped_select(EntityAlias, gm).where(
+        EntityAlias.entity_id == entity.id))).scalars().all()
+    assert {a.alias for a in gm_aliases} == {"Brother Al", "The Grey"}
+    # Shown again: the alias rows come back, the hidden-time history row does not.
+    await set_visibility(db, gm, RecordRef(kind="entity", id=entity.id, field="aliases"), "party")
+    await db.commit()
+    assert len((await db.execute(ws.scoped_select(EntityAlias, player).where(
+        EntityAlias.entity_id == entity.id))).scalars().all()) == 2
+    seen = {r["id"] for r in await _projected_history(db, player, entity.id)}
+    assert str(shown.id) in seen and str(hidden.id) not in seen

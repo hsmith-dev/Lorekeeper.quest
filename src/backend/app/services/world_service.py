@@ -32,6 +32,17 @@ error writes nothing: `CanonChangeError(code)` with code `not_found`
 `quest_steps`); relationship, Mention, create, delete, merge and canon-note
 rows use NULL, which is always GM; `field_visibility.<key>` rows are GM.
 
+**History `write_visibility`** (E0-WorldCore.5, owner decision round 4) is
+the audience the row was written for, a registry floor on `entity_changes`.
+After the op runs, each row it wrote is `party` only when its Entity was
+loaded before the change and exists after it, and the row's field rule
+(`audience_of(row, parents=[state], floor=False)`) is neither GM- nor
+Owner-level for both the state just before and the state just after the
+change; otherwise `gm` (fail closed). So a publish row (GM before) is `gm`,
+an edit of a Party Entity's visible `name` is `party`, and an edit made
+while `description` was hidden stays `gm` after it is un-hidden. A create
+is `gm` (there is no before).
+
 **Idempotent** (no new row; the earlier change is returned): re-adding an
 alias or a Mention, confirming a confirmed Mention, ending an ended
 Relationship (when no earlier row of that op made the state, e.g. it came
@@ -45,7 +56,10 @@ payload (the same new value, note or target row).
 Quest's status rows hold `{status, completed_at}`.
 
 **Visibility.** `apply_change` never takes a Visibility value from a
-CanonChange. `access.set_visibility` reaches it through the registry writer
+CanonChange. `HIDEABLE_FIELDS` are what `field_visibility.<key>` may hide:
+`status`, `description`, `attributes` (the whole column) and `aliases`,
+which also hides every alias row (the registry's `as_parent_field`) and the
+alias history. `access.set_visibility` reaches it through the registry writer
 registered below (kinds `entity` and `entity_relationship`), with a private
 token: an Entity change is one `update_field` row (`visibility` or
 `field_visibility.<key>`), an edge change one `update_relationship` row. A
@@ -80,6 +94,7 @@ the one `merge` row is on the survivor.
 """
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from dataclasses import dataclass, field as dc_field
@@ -93,9 +108,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.access import (
-    GM, CampaignContext, SystemReason, VisibilityError, mark_dependents_stale, not_found, register_visibility_kind,
-    register_writer, registration, scoped_select,
+    GM, AudienceLevel, CampaignContext, SystemReason, VisibilityError, audience_of, mark_dependents_stale, not_found,
+    project, register_resolver, register_visibility_kind, register_writer, registration, scoped_select,
 )
+from app.access.sources import QUOTE_MAX
 from app.core.hooks import HookEvent, emit
 from app.db.models.entity import (
     Entity, EntityAlias, EntityChange, EntityMention, EntityRelationship, QuestStep, RelationshipType,
@@ -110,7 +126,7 @@ from app.schemas.entities import (
     ConfirmMention, CreateEntity, DeleteEntity, EndRelationship, Merge, RemoveAlias, RemoveMention, Revert,
     SetKind, SetStatus, SourceDeleted, UpdateField, UpdateQuestStep, UpdateRelationship, parse_canon_change,
 )
-from app.schemas.sources import RecordRef
+from app.schemas.sources import RecordRef, SourceKind, SourceRef
 from app.services.world_matching import NameCandidate, NameMatch, candidates, match_names
 
 try:  # E0-Access.6's single write gate, once it is merged.
@@ -124,7 +140,7 @@ STALE_KIND = "entity_field"  # derived_sources.ref_kind of an Entity's fields
 DOMAIN = "entities"  # the campaign-events domain canon_changed publishes
 
 # Fields a set_visibility call may hide on an Entity (field_visibility.<key>).
-HIDEABLE_FIELDS = frozenset({"status", "description", "attributes"})
+HIDEABLE_FIELDS = frozenset({"status", "description", "attributes", "aliases"})
 # Status and kind have their own ops; every other field-based row is update_field.
 _FIELD_OPS = frozenset({Op.UPDATE_FIELD, Op.SET_STATUS, Op.SET_KIND})
 _NOT_REVERTIBLE = frozenset({Op.MERGE, Op.MIGRATED, Op.SOURCE_DELETED, Op.CANON_NOTE})
@@ -239,6 +255,16 @@ class _Run:
     refs: list[uuid.UUID] = dc_field(default_factory=list)
     stale: list[uuid.UUID] = dc_field(default_factory=list)
     written: bool = False
+    # For write_visibility: each Entity as first loaded (a detached copy), the
+    # live Entities after the op, and the history rows this run wrote.
+    before: dict[uuid.UUID, Entity] = dc_field(default_factory=dict)
+    after: dict[uuid.UUID, Entity] = dc_field(default_factory=dict)
+    rows: list[EntityChange] = dc_field(default_factory=list)
+
+    def loaded(self, entity: Entity) -> None:
+        if entity.id not in self.before:
+            self.before[entity.id] = _visibility_copy(entity)
+        self.after[entity.id] = entity
 
     def ref(self, *ids: uuid.UUID) -> None:
         for i in ids:
@@ -280,11 +306,39 @@ class _Run:
             reverted_change_id=reverted,
             # The clock, not now() (the transaction's start): changes of one transaction keep their order.
             created_at=_now(),
+            # GM until apply_change stamps it (_stamp_write_visibility).
+            write_visibility=Visibility.GM.value,
         )
         self.add(row)
+        self.rows.append(row)
         self.written = True
         self.ref(entity_id)
         return row
+
+
+# ── Write-time visibility (E0-WorldCore.5) ─────────────────────────────────
+
+def _visibility_copy(entity: Entity) -> Entity:
+    """A detached copy of what an Entity's history-row Audience reads (never added to a session)."""
+    return Entity(id=entity.id, campaign_id=entity.campaign_id, type=entity.type,
+                  visibility=entity.visibility, field_visibility=dict(entity.field_visibility or {}),
+                  created_by_user_id=entity.created_by_user_id, deleted_at=entity.deleted_at,
+                  merged_into_id=entity.merged_into_id)
+
+
+def _party_could_see(row: EntityChange, state: Entity) -> bool:
+    aud = audience_of(row, parents=[state], floor=False)
+    return aud.level not in (AudienceLevel.GM, AudienceLevel.OWNER)
+
+
+def _stamp_write_visibility(run: _Run) -> None:
+    """Each row this run wrote: `party` iff the Party could see its field both
+    just before and just after the change, else `gm` (module docstring)."""
+    for row in run.rows:
+        before, after = run.before.get(row.entity_id), run.after.get(row.entity_id)
+        party = (before is not None and after is not None
+                 and _party_could_see(row, before) and _party_could_see(row, after))
+        row.write_visibility = (Visibility.PARTY if party else Visibility.GM).value
 
 
 # ── Lookups (all through scoped_select) ────────────────────────────────────
@@ -293,6 +347,7 @@ async def _entity(run: _Run, entity_id: Any, *, allow_deleted: bool = False, all
     row = await run.first(scoped_select(Entity, run.ctx).where(Entity.id == entity_id).with_for_update())
     if row is None:
         raise CanonChangeError("not_found", "No such Entity")
+    run.loaded(row)
     if row.merged_into_id is not None and not allow_merged:
         raise CanonChangeError("merged", "This Entity was merged into another")
     if row.deleted_at is not None and not allow_deleted:
@@ -498,6 +553,7 @@ async def _create_entity(run: _Run, c: CreateEntity) -> EntityChange:
         kind=kind.value if kind is not None else None, name=c.name, description=c.description, status=status,
         attributes=attrs, gm_notes=c.gm_notes, created_by_user_id=run.ctx.user_id,
     ))
+    run.after[entity.id] = entity  # no `before`: a create row is GM
     await run.db.flush()
     return run.history(entity.id, Op.CREATE_ENTITY, None, None, _snapshot(entity))
 
@@ -1191,6 +1247,7 @@ async def apply_change(db: AsyncSession, ctx: CampaignContext, change: Any, *, _
                     result = plan
             else:
                 result = await _HANDLERS[op](run, change)
+            _stamp_write_visibility(run)
             await db.flush()
             if run.stale:
                 await mark_dependents_stale(db, [RecordRef(kind=STALE_KIND, id=i) for i in run.stale])
@@ -1208,16 +1265,55 @@ async def revert_change(db: AsyncSession, ctx: CampaignContext, change_id: uuid.
     return await apply_change(db, ctx, Revert(change_id=change_id, force=force))
 
 
+# ── The entity_field source resolver ───────────────────────────────────────
+
+def _field_label(entity: Entity, name: str) -> str:
+    if name.startswith(ATTRIBUTES_PREFIX):
+        key = name[len(ATTRIBUTES_PREFIX):]
+        try:
+            return et.attribute(entity.type, key).label
+        except ValueError:
+            return key.replace("_", " ").capitalize()
+    return name.replace("_", " ").capitalize()
+
+
+def _quote_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+
+
+def resolve_entity_field(entity: Entity, ref: SourceRef, ctx: CampaignContext) -> tuple[str, str]:
+    """`SourceRef(kind="entity_field", id=<Entity>, field=...)` as `("<name> · <label>",
+    quote)`. `access.resolve_sources` has already checked that ctx may see the
+    Entity and the field; the quote is the field's value as `access.project`
+    renders it for ctx (a hidden field as unset, an ENTITY_REF ctx may not see
+    dropped), truncated to QUOTE_MAX. `field=None` (the whole record, GM only)
+    quotes the description."""
+    body = project(entity, ctx).model_dump(mode="json")
+    name = ref.field
+    if name is None:
+        return entity.name, _quote_text(body.get("description"))[:QUOTE_MAX]
+    if name.startswith(ATTRIBUTES_PREFIX):
+        value = (body.get("attributes") or {}).get(name[len(ATTRIBUTES_PREFIX):])
+    else:
+        value = body.get(name)
+    return f"{entity.name} · {_field_label(entity, name)}", _quote_text(value)[:QUOTE_MAX]
+
+
 # ── Registrations ──────────────────────────────────────────────────────────
 
 register_writer(Entity, _visibility_writer)
 register_writer(EntityRelationship, _visibility_writer)
-register_visibility_kind("entity", Entity)
+register_visibility_kind("entity", Entity, fields=("aliases",))
 register_visibility_kind("entity_relationship", EntityRelationship, options=(
     selectinload(EntityRelationship.source_entity), selectinload(EntityRelationship.target_entity)))
+register_resolver(SourceKind.ENTITY_FIELD, resolve_entity_field, model=Entity, with_ctx=True)
 
 
 __all__ = [
     "CanonChangeError", "DOMAIN", "HIDEABLE_FIELDS", "NAME_PREFIXES", "NameCandidate", "NameMatch", "STALE_KIND",
-    "apply_change", "candidates", "match_names", "normalize_name", "revert_change",
+    "apply_change", "candidates", "match_names", "normalize_name", "resolve_entity_field", "revert_change",
 ]
