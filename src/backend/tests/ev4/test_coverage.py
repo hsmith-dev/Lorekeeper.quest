@@ -158,6 +158,11 @@ def test_every_route_is_probed_exempted_or_pending():
     assert not errors, "EV-4 coverage:\n" + "\n".join(f"  - {e}" for e in errors)
 
 
+def test_pending_baseline_is_empty():
+    """E0-QA.13 emptied the baseline: every route is probed or exempted."""
+    assert load_pending() == [], "pending_baseline.txt must stay empty (E0-QA.13)"
+
+
 def test_route_enumeration_covers_the_whole_app():
     keys = _keys()
     assert "GET /api/health" in keys

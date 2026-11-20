@@ -17,6 +17,7 @@ from app.schemas.feedback import (
     FeedbackAdminResponse,
     FeedbackContextResponse,
 )
+from app.access import NotFound, ctx_for
 from app.api.deps import get_current_user, require_admin
 
 router = APIRouter()
@@ -28,14 +29,22 @@ async def submit_feedback(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> FeedbackResponse:
-    # Not gated through get_campaign_with_access — feedback about a campaign
-    # you can no longer reach (removed as a collaborator, etc.) should still
-    # be submittable, and campaign_id here is just a research pointer for
-    # the admin inbox, not something the submitter needs read access to via
-    # this endpoint.
+    # Feedback stays submittable whatever campaign_id says, but the pointer
+    # (which lets the admin inbox pull that Campaign's content) is kept only
+    # for a Campaign the submitter can reach now (Owner or any Member, via
+    # the access layer). A Campaign they cannot reach is dropped exactly like
+    # one that does not exist (EV-4, E0-QA.13): before this, a hidden id
+    # answered 201 while a missing one failed the foreign key (a 500), so the
+    # endpoint told anyone which Campaign ids exist.
+    campaign_id = body.campaign_id
+    if campaign_id is not None:
+        try:
+            await ctx_for(db, user, campaign_id)
+        except NotFound:
+            campaign_id = None
     feedback = Feedback(
         user_id=user.id,
-        campaign_id=body.campaign_id,
+        campaign_id=campaign_id,
         category=body.category,
         message=body.message.strip(),
     )

@@ -8,48 +8,6 @@
 # tests/ev4/probes/<feature>.py or a reasoned exemption in exemptions.yaml.
 #
 # Format: METHOD PATH (the route template exactly as FastAPI registers it)
-
-DELETE /api/admin/promo-codes/{promo_id}
-DELETE /api/admin/users/{user_id}
-DELETE /api/settings/evaluations/{evaluation_id}
-GET /api/admin/config
-GET /api/admin/logs
-GET /api/admin/models
-GET /api/admin/promo-codes
-GET /api/admin/support-bundle
-GET /api/admin/users
-GET /api/auth/me
-GET /api/billing/status
-GET /api/feedback/
-GET /api/feedback/{feedback_id}/context
-GET /api/health
-GET /api/settings/
-GET /api/settings/evaluations
-GET /api/settings/model-status
-PATCH /api/admin/promo-codes/{promo_id}
-PATCH /api/admin/users/{user_id}/access
-POST /api/admin/models/install
-POST /api/admin/promo-codes
-POST /api/admin/users/{user_id}/demote
-POST /api/admin/users/{user_id}/message
-POST /api/admin/users/{user_id}/promote
-POST /api/admin/users/{user_id}/suspend
-POST /api/admin/users/{user_id}/unsuspend
-POST /api/auth/forgot-password
-POST /api/auth/login
-POST /api/auth/register
-POST /api/auth/reset-password
-POST /api/auth/tutorial-complete
-POST /api/billing/checkout
-POST /api/billing/portal
-POST /api/billing/redeem-promo
-POST /api/billing/webhook
-POST /api/feedback/
-POST /api/ingest/discord
-POST /api/ingest/image
-POST /api/ingest/voice
-POST /api/settings/evaluate
-POST /api/settings/test
-PUT /api/admin/config
-PUT /api/auth/me/avatar
-PUT /api/settings/
+#
+# Empty since E0-QA.13: every route is probed or exempted
+# (tests/ev4/test_coverage.py::test_pending_baseline_is_empty).
