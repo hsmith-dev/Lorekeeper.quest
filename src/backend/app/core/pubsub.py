@@ -185,17 +185,23 @@ async def _run_trail(key: str, trail: _Trail) -> None:
             ttl_ms = await asyncio.wait_for(client.pttl(key), PUBLISH_TIMEOUT_S)
             if ttl_ms is not None and ttl_ms > 0:
                 await asyncio.sleep(ttl_ms / 1000)
-            # PTTL is whole milliseconds and a sleep is not exact: the key can
-            # outlive the sleep by a little. Wait out that remainder (a short
-            # TTL, the same window ending), never a new window another
-            # process took (a TTL near the full window).
+            # PTTL is whole milliseconds rounded down, and Valkey keeps a key
+            # through its last millisecond (it expires once now > deadline):
+            # PTTL 0 is a live key. So the window can outlive the sleep by a
+            # little and refuse the acquire. On a refusal, a short remainder
+            # (0..TRAIL_SETTLE_MS, or the key just gone) is the same window
+            # ending: wait it out and try again. A TTL near the full window is
+            # a new window another process took: its publish is newer, drop.
             for _ in range(TRAIL_SETTLE_STEPS):
-                ttl_ms = await asyncio.wait_for(client.pttl(key), PUBLISH_TIMEOUT_S)
-                if ttl_ms is None or ttl_ms <= 0 or ttl_ms > TRAIL_SETTLE_MS:
+                if await _acquire(client, key, trail.window_s):
                     break
-                await asyncio.sleep(ttl_ms / 1000 + 0.001)
-            if not await _acquire(client, key, trail.window_s):
-                return  # another process's newer publish holds the window
+                ttl_ms = await asyncio.wait_for(client.pttl(key), PUBLISH_TIMEOUT_S)
+                if ttl_ms is not None and ttl_ms > TRAIL_SETTLE_MS:
+                    return  # another process's newer publish holds the window
+                await asyncio.sleep(max(ttl_ms or 0, 0) / 1000 + 0.001)
+            else:
+                logger.warning(json.dumps({"event": "pubsub_trail_dropped", "channel": trail.channel}))
+                return
         except asyncio.CancelledError:
             raise
         except Exception:
