@@ -10,9 +10,9 @@ context: []
 warnings: ['oversized']
 deferred:
   - summary: >-
-      PDF export (WeasyPrint, CPU-bound) is now open to every Member with no rate limit, entry cap or cache.
+      PDF export (WeasyPrint, CPU-bound) is now open to every Member with no entry cap, render timeout or cache (per-user rate limits added in the coordinator follow-up).
     evidence: |-
-      Unverified cost: the route moved from gm to player. Measure render time for a large Campaign; E8 Chronicle replaces this export and should own throttling.
+      The story defines no cap, and a silent cap would truncate the export. Measure render time for a large Campaign; E8 Chronicle replaces this export and should own paging or streaming.
     location: >-
       src/backend/app/api/routes/campaigns.py export_campaign
     severity: medium (unverified)
@@ -187,3 +187,9 @@ Status: done
   - Desktop was unreachable, so CI was the gate.
 - **Residual risks:** PDF render cost now applies to every Member (deferred). Unpaid Players still hit the PR #61 account gate on these routes (owner question).
 - **Needs desktop verification:** none beyond CI. Optional: `pytest tests/test_export_pdf.py tests/ev4 -q` in `lorekeeper-backend-test` against real WeasyPrint fonts.
+
+### Coordinator follow-up: rate limits
+- Added per-user slowapi limits keyed by `user_or_ip` (E0-Platform.8): PDF export 5/minute, Markdown export 10/minute (separate buckets via `_export_key`), analytics 30/minute.
+- A denied caller fails in `require_campaign` before the limiter runs. So a hidden Campaign answers 404, never 429, even past the limit.
+- New test: `test_export_and_analytics_are_rate_limited_per_user`. It covers PDF, Markdown and analytics, and checks the 429 for the same user, that other users are unaffected, that the two formats have separate buckets, and the 404 (not 429) for a non-member.
+- PDF entry cap: deferred. The story defines none, and a silent cap would truncate the export.

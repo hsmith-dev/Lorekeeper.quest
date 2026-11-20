@@ -27,6 +27,7 @@ from app.access import (
     scoped_get, scoped_select,
 )
 from app.api.deps import PARTY_READ, get_current_user, get_user_llm_config
+from app.core.limiter import limiter, user_or_ip
 from app.services.export_service import build_campaign_markdown, build_campaign_pdf
 from app.services.chat_service import generate_campaign_concept
 from app.services.llm_provider import LLMConfig
@@ -146,8 +147,28 @@ async def update_campaign(
     return campaign
 
 
+# Per-user rate limits (user_or_ip, E0-Platform.8): any Member may now export
+# or read analytics, and a PDF is a CPU-bound WeasyPrint render. PDF and
+# Markdown have separate buckets. A denied caller (the one 404) never reaches
+# the limiter, so a 429 never tells a hidden Campaign from a missing one.
+EXPORT_PDF_RATE = "5/minute"
+EXPORT_MARKDOWN_RATE = "10/minute"
+ANALYTICS_RATE = "30/minute"
+
+
+def _export_key(request: Request) -> str:
+    fmt = "markdown" if request.query_params.get("format") == "markdown" else "pdf"
+    return f"{user_or_ip(request)}|export:{fmt}"
+
+
+def _export_rate(key: str) -> str:
+    return EXPORT_MARKDOWN_RATE if key.endswith("|export:markdown") else EXPORT_PDF_RATE
+
+
 @router.get("/{campaign_id}/export")
+@limiter.limit(_export_rate, key_func=_export_key)
 async def export_campaign(
+    request: Request,
     format: str = Query("pdf", pattern="^(pdf|markdown)$"),
     ctx: CampaignContext = Depends(_player),
     db: AsyncSession = Depends(get_db),
@@ -194,7 +215,9 @@ async def export_campaign(
 
 
 @router.get("/{campaign_id}/analytics", response_model=CampaignAnalytics)
+@limiter.limit(ANALYTICS_RATE, key_func=user_or_ip)
 async def get_campaign_analytics(
+    request: Request,
     ctx: CampaignContext = Depends(_player),
     db: AsyncSession = Depends(get_db),
 ) -> CampaignAnalytics:

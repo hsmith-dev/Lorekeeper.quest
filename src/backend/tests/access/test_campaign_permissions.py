@@ -327,6 +327,39 @@ async def test_export_and_analytics_are_the_one_404_for_a_non_member(client, db,
         assert hidden.content == missing.content and hidden.json() == NOT_FOUND
 
 
+@pytest.mark.parametrize("suffix,rate", [
+    ("/export?format=pdf", "EXPORT_PDF_RATE"),
+    ("/export?format=markdown", "EXPORT_MARKDOWN_RATE"),
+    ("/analytics", "ANALYTICS_RATE"),
+])
+async def test_export_and_analytics_are_rate_limited_per_user(client, db, ev4, suffix, rate):
+    from app.api.routes import campaigns as campaign_routes
+    from tests.ev4.fixtures import bearer, create_user
+
+    a = ev4.a.campaign_id
+    limit = int(getattr(campaign_routes, rate).split("/")[0])
+    player, player_2 = await ev4.actor("player"), await ev4.actor("player_2")
+    url = f"/api/campaigns/{a}{suffix}"
+    for i in range(limit):
+        r = await client.get(url, headers=player.headers)
+        assert r.status_code == 200, (i, r.text)
+    assert (await client.get(url, headers=player.headers)).status_code == 429
+    # Another user's bucket is untouched.
+    assert (await client.get(url, headers=player_2.headers)).status_code == 200
+    # The two export formats have separate buckets.
+    if suffix.startswith("/export"):
+        other = "/export?format=markdown" if suffix.endswith("pdf") else "/export?format=pdf"
+        assert (await client.get(f"/api/campaigns/{a}{other}", headers=player.headers)).status_code == 200
+    # A denied caller never reaches the limiter: past the limit, a hidden
+    # Campaign still answers exactly like a missing one (404, not 429).
+    stranger = bearer(await create_user(db, "stranger"))
+    for _ in range(limit + 1):
+        hidden = await client.get(url, headers=stranger)
+        missing = await client.get(f"/api/campaigns/{RANDOM}{suffix}", headers=stranger)
+        assert hidden.status_code == missing.status_code == 404
+        assert hidden.content == missing.content
+
+
 async def test_autocomplete_with_a_campaign_works_for_a_co_gm(client, ev4):
     from tests.ev4.probes.retrieval import use_fake_llm
 
