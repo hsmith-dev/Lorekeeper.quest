@@ -151,6 +151,8 @@ def register_visibility_kind(kind: str, model: type, *, where: Any = None,
     existing = _KINDS.get(kind)
     if existing is not None:
         if existing.model is model:
+            if existing.fields != fields:
+                raise ValueError(f"register_visibility_kind: {kind!r} already has fields {list(existing.fields)}")
             return existing
         raise ValueError(f"register_visibility_kind: {kind!r} is already {existing.model.__name__}")
     _KINDS[kind] = entry

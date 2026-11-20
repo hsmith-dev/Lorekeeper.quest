@@ -10,9 +10,10 @@ where=, with_ctx=False)`: `model` is the registered model whose rows the refs
 name (its `id`), `where` an optional SQL predicate narrowing which rows are
 that kind (journal: `kind = 'gm'`), and `fn(row, ref)` returns `(title,
 quote)` for a row that has already passed the visibility check here. With
-`with_ctx=True` it is called `fn(row, ref, row_ctx)`, the ctx the row was
-checked with, so it can build its quote through `access.project`
-(world_service's `entity_field`). A resolver never decides visibility, so it
+`with_ctx=True` it is called `fn(row, ref, row_ctx, db)`, the ctx the row was
+checked with and the session, so it can build its quote through
+`access.project` (world_service's `entity_field`). A resolver returning None
+drops its ref. A resolver never decides visibility, so it
 can never hand back a row ctx cannot see.
 
 A ref is visible to a ctx when, in order:
@@ -92,7 +93,7 @@ def _kind(kind: SourceKind | str) -> SourceKind:
 def register_resolver(kind: SourceKind | str, fn: ResolverFn, *, model: type | None = None,
                       where: Any = None, with_ctx: bool = False) -> ResolverFn:
     """Register `fn(row, ref) -> (title, quote)` for refs of `kind`
-    (`fn(row, ref, row_ctx)` with `with_ctx=True`). `model` (default:
+    (`fn(row, ref, row_ctx, db)` with `with_ctx=True`). `model` (default:
     `SOURCE_KIND_MODELS[kind]`) is the registered, Campaign-scoped
     model whose `id` a ref of this kind names; `where` an optional SQL
     predicate on it. Registering a different resolver for a kind that has
@@ -232,7 +233,7 @@ async def resolve_sources(db: AsyncSession, refs: Iterable[SourceRef], ctx: Scop
     for ref, row in await _visible_rows(db, refs, ctx):
         res = _RESOLVERS[ref.kind]
         try:
-            got = res.fn(row, ref, _row_ctx(ctx, row)) if res.with_ctx else res.fn(row, ref)
+            got = res.fn(row, ref, _row_ctx(ctx, row), db) if res.with_ctx else res.fn(row, ref)
             if inspect.isawaitable(got):
                 got = await got
             if not got:

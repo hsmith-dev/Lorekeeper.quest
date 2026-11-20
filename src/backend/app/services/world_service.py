@@ -111,6 +111,7 @@ from app.access import (
     GM, AudienceLevel, CampaignContext, SystemReason, VisibilityError, audience_of, mark_dependents_stale, not_found,
     project, register_resolver, register_visibility_kind, register_writer, registration, scoped_select,
 )
+from app.access.projection import entity_ref_ids
 from app.access.sources import QUOTE_MAX
 from app.core.hooks import HookEvent, emit
 from app.db.models.entity import (
@@ -1285,19 +1286,31 @@ def _quote_text(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
 
 
-def resolve_entity_field(entity: Entity, ref: SourceRef, ctx: CampaignContext) -> tuple[str, str]:
+async def resolve_entity_field(entity: Entity, ref: SourceRef, ctx: CampaignContext,
+                               db: AsyncSession) -> tuple[str, str] | None:
     """`SourceRef(kind="entity_field", id=<Entity>, field=...)` as `("<name> · <label>",
     quote)`. `access.resolve_sources` has already checked that ctx may see the
     Entity and the field; the quote is the field's value as `access.project`
-    renders it for ctx (a hidden field as unset, an ENTITY_REF ctx may not see
-    dropped), truncated to QUOTE_MAX. `field=None` (the whole record, GM only)
-    quotes the description."""
-    body = project(entity, ctx).model_dump(mode="json")
+    renders it for ctx (a hidden field as unset), truncated to QUOTE_MAX. None
+    (the ref is dropped) for an `attributes.<key>` the Entity's type does not
+    define, and for an ENTITY_REF attribute naming an Entity ctx may not see.
+    `field=None` (the whole record, GM only) quotes the description."""
     name = ref.field
+    key = name[len(ATTRIBUTES_PREFIX):] if name is not None and name.startswith(ATTRIBUTES_PREFIX) else None
+    if key is not None and key not in et.attribute_keys(entity.type):
+        return None
+    ids = entity_ref_ids(entity)
+    visible = frozenset((await db.execute(scoped_select(Entity, ctx).where(Entity.id.in_(sorted(ids)))
+                                          .with_only_columns(Entity.id))).scalars().all()) if ids else frozenset()
+    body = project(entity, ctx, visible_entity_ids=visible).model_dump(mode="json")
     if name is None:
         return entity.name, _quote_text(body.get("description"))[:QUOTE_MAX]
-    if name.startswith(ATTRIBUTES_PREFIX):
-        value = (body.get("attributes") or {}).get(name[len(ATTRIBUTES_PREFIX):])
+    if key is not None:
+        attrs = body.get("attributes") or {}
+        if (et.attribute(entity.type, key).value_kind is et.ValueKind.ENTITY_REF
+                and (entity.attributes or {}).get(key) is not None and key not in attrs):
+            return None  # a reference ctx may not see: no citation at all
+        value = attrs.get(key)
     else:
         value = body.get(name)
     return f"{entity.name} · {_field_label(entity, name)}", _quote_text(value)[:QUOTE_MAX]

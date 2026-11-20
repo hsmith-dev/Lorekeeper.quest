@@ -190,6 +190,14 @@ async def probe_list_entities(ev4, actor):
     hidden = await actor.get(f"{url}&status=deceased")
     assert_no_canary(actor, hidden)
     assert hidden.json()["total"] == 0, hidden.text
+    unknown = await actor.get(f"{url}&status=unknown")
+    assert_no_canary(actor, unknown)
+    assert _ids(unknown) == {str(w.party), str(w.hidden_status)} and unknown.json()["total"] == 2, unknown.text
+    # The stored Visibility is not a Player's filter (the Party schema has none): ignored.
+    for value in ("gm", "party", "private"):
+        filtered = await actor.get(f"{url}&visibility={value}")
+        assert_no_canary(actor, filtered)
+        assert filtered.content == r.content, (value, filtered.text)
     await assert_counts_and_ranking_unchanged(
         actor, [url, f"{url}&q=Mira", f"{url}&type=character", f"{url}&status=unknown"],
         lambda: _gm_only_write(ev4, w))

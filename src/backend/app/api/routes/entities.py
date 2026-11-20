@@ -28,7 +28,8 @@ Canon errors: `superseded`, `deleted`, `merged` are 409 and `invalid`,
 `invalid_status`, `not_revertible` 422, each `{"detail", "code"}`;
 `not_found` is the uniform 404. A duplicate create (the same
 `normalize_name` as a live Entity of the type that ctx can see) is
-`409 {"detail", "existing_id"}`. Any error rolls the session back.
+`409 {"detail", "code": "duplicate", "existing_id"}`. The `visibility`
+filter applies for a GM only (a non-GM's is ignored). Any error rolls the session back.
 
 Filters on the list are applied to what the viewer sees: `status` matches the
 rendered status (a hidden status reads as the type's default), so a filter
@@ -156,7 +157,7 @@ async def list_entities(
     stmt = scoped_select(Entity, ctx).where(Entity.deleted_at.is_(None), Entity.merged_into_id.is_(None))
     if entity_type is not None:
         stmt = stmt.where(Entity.type == entity_type.value)
-    if visibility is not None:
+    if visibility is not None and ctx.role == GM:  # ignored otherwise: the Party schema has no Visibility
         stmt = stmt.where(Entity.visibility == visibility.value)
     if q is None and (status is None or ctx.role == GM):
         if status is not None:
@@ -199,7 +200,7 @@ async def create_entity(
     existing = next((e for e in live if normalize_name(e.name) == key), None)
     if existing is not None:
         return JSONResponse(status_code=409, content={"detail": "An Entity with this name exists",
-                                                      "existing_id": str(existing.id)})
+                                                      "code": "duplicate", "existing_id": str(existing.id)})
     change = {"op": "create_entity", **body.model_dump(exclude={"campaign_id"}, mode="json")}
 
     async def work():

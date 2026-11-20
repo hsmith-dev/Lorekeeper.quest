@@ -549,6 +549,8 @@ class EntityPatch(_Body):
         for name in ("name", "status", "kind", "attributes"):
             if name in given and getattr(self, name) is None:
                 raise ValueError(f"{name} cannot be null")
+        if "attributes" in given and not self.attributes:
+            raise ValueError("attributes needs at least one key")
         return self
 
 

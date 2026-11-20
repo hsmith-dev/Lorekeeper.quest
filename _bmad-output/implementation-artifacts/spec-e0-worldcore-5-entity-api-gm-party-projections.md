@@ -2,7 +2,7 @@
 title: 'E0-WorldCore.5: Entity API with GM and Party projections'
 type: 'feature'
 created: '2026-11-20'
-status: 'in-progress'
+status: 'in-review'
 baseline_revision: '0d71955bfb4845679b134717f820267a0d79656d'
 review_loop_iteration: 0
 followup_review_recommended: false

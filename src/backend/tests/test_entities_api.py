@@ -61,7 +61,8 @@ async def test_create_refuses_a_duplicate_name_of_the_same_type(ev4, db):
         r = await gm.post(f"{BASE}/", json={"campaign_id": str(ev4.a.campaign_id), "type": "character",
                                             "kind": "npc", "name": name})
         assert r.status_code == 409, r.text
-        assert r.json() == {"detail": "An Entity with this name exists", "existing_id": first["id"]}
+        assert r.json() == {"detail": "An Entity with this name exists", "code": "duplicate",
+                            "existing_id": first["id"]}
     # Another type, a deleted Entity and another Campaign's Entity do not count.
     await _create(gm, ev4, type="location", name="Aldric")
     gone = await _create(gm, ev4, name="Pip")
@@ -145,7 +146,7 @@ async def test_patch_applies_every_field_in_one_transaction(ev4, db):
     assert await _history_count(db, entity["id"]) == rows
     again = await _ok(await gm.get(f"{BASE}/{entity['id']}"))
     assert (again["name"], again["description"]) == ("Ring the bell", "Loud")
-    for bad in ({}, {"visibility": "party"}, {"field_visibility": {"status": "gm"}}, {"name": None}):
+    for bad in ({}, {"visibility": "party"}, {"field_visibility": {"status": "gm"}}, {"name": None}, {"attributes": {}}):
         assert (await gm.patch(f"{BASE}/{entity['id']}", json=bad)).status_code == 422
 
 
@@ -280,12 +281,11 @@ async def test_entity_field_resolver(ev4, db):
     from app.schemas.sources import RecordRef
 
     secret_place = await create(type="location", name="Vault")
-    harbor = await create(type="location", name="Harbor")
     mira = await create(type="character", kind="npc", name="Mira", description="A sailor " + "x" * 300,
                         status="alive", attributes={"pronouns": "she/her"})
     item = await create(type="item", name="Bell", attributes={"location_entity_id": str(secret_place),
                                                               "holder_entity_id": str(mira)})
-    for entity_id in (harbor, mira, item):
+    for entity_id in (mira, item):
         await set_visibility(db, gm_ctx, RecordRef(kind="entity", id=entity_id), "party")
     await set_visibility(db, gm_ctx, RecordRef(kind="entity", id=mira, field="status"), "gm")
     await db.commit()
@@ -295,24 +295,70 @@ async def test_entity_field_resolver(ev4, db):
 
     refs = [ref(mira, "description"), ref(mira, "attributes.pronouns"), ref(mira, "status"),
             ref(mira, "gm_notes"), ref(item, "attributes.location_entity_id"), ref(secret_place, "name"),
-            ref(item, "attributes")]
+            ref(item, "attributes"), ref(item, "attributes.holder_entity_id"), ref(mira, "attributes.nope"),
+            ref(mira, "field_visibility.status")]
     shown = {(c.ref.id, c.ref.field): c for c in await resolve_sources(db, refs, player)}
-    assert set(shown) == {(mira, "description"), (mira, "attributes.pronouns"),
-                          (item, "attributes.location_entity_id"), (item, "attributes")}
+    assert set(shown) == {(mira, "description"), (mira, "attributes.pronouns"), (item, "attributes"),
+                          (item, "attributes.holder_entity_id")}
     desc = shown[(mira, "description")]
     assert desc.title == "Mira · Description" and desc.quote.startswith("A sailor") and len(desc.quote) == 200
     assert (shown[(mira, "attributes.pronouns")].title, shown[(mira, "attributes.pronouns")].quote) == (
         "Mira · Pronouns", "she/her")
-    # An ENTITY_REF to an Entity the Player may not see is never quoted.
-    assert shown[(item, "attributes.location_entity_id")].title == "Bell · Location"
-    assert shown[(item, "attributes.location_entity_id")].quote == ""
+    # A reference the Player may see is quoted; a hidden one gives no citation at all.
+    holder = shown[(item, "attributes.holder_entity_id")]
+    assert (holder.title, holder.quote) == ("Bell · Held by", str(mira))
     assert str(secret_place) not in shown[(item, "attributes")].quote
     gm = {(c.ref.id, c.ref.field): c for c in await resolve_sources(db, refs, gm_ctx)}
-    assert set(gm) == {(r.id, r.field) for r in refs}
+    # An unknown attribute key is dropped for everyone.
+    assert set(gm) == {(r.id, r.field) for r in refs} - {(mira, "attributes.nope")}
     assert gm[(mira, "status")].quote == "alive" and gm[(mira, "status")].title == "Mira · Status"
     assert gm[(item, "attributes.location_entity_id")].quote == str(secret_place)
     assert gm[(item, "attributes")].title == "Bell · Attributes"
 
+
+async def test_entity_field_resolver_with_attributes_hidden(ev4, db):
+    from app.access import set_visibility
+    from app.schemas.sources import RecordRef
+
+    gm_ctx = await ctx_for(db, ev4.a.owner_id, ev4.a.campaign_id)
+    player = await ctx_for(db, (await ev4.actor("player")).user_id, ev4.a.campaign_id)
+    mira = (await apply_change(db, gm_ctx, {"op": "create_entity", "type": "character", "kind": "npc",
+                                            "name": "Mira", "attributes": {"pronouns": "she/her"}})).entity_id
+    await set_visibility(db, gm_ctx, RecordRef(kind="entity", id=mira), "party")
+    await set_visibility(db, gm_ctx, RecordRef(kind="entity", id=mira, field="attributes"), "gm")
+    await db.commit()
+    refs = [SourceRef(kind=SourceKind.ENTITY_FIELD, id=mira, field="attributes.pronouns"),
+            SourceRef(kind=SourceKind.ENTITY_FIELD, id=mira, field="field_visibility.status")]
+    assert await resolve_sources(db, refs, player) == []
+    gm = await resolve_sources(db, refs[:1], gm_ctx)
+    assert [(c.title, c.quote) for c in gm] == [("Mira · Pronouns", "she/her")]
+
+
+async def test_mention_count_counts_confirmed_mentions_the_viewer_sees(ev4, db):
+    from app.access import set_visibility
+    from app.db.models.journal import JournalEntry
+    from app.schemas.sources import RecordRef
+
+    gm = await ev4.actor("gm_owner")
+    player = await ev4.actor("player")
+    gm_ctx = await ctx_for(db, ev4.a.owner_id, ev4.a.campaign_id)
+    party_entry = ev4.a.ids["journal_entries"][0]  # the seed's Party entry
+    hidden_entry = JournalEntry(id=uuid.uuid4(), user_id=ev4.a.owner_id, campaign_id=ev4.a.campaign_id,
+                                shorthand="s", narrative="Mira in the vault.", entry_hash=uuid.uuid4().hex,
+                                kind="gm", visibility="gm")
+    db.add(hidden_entry)
+    await db.flush()
+    mira = (await apply_change(db, gm_ctx, {"op": "create_entity", "type": "character", "kind": "npc",
+                                            "name": "Mira"})).entity_id
+    await set_visibility(db, gm_ctx, RecordRef(kind="entity", id=mira), "party")
+    for journal_id, confirmed, span in ((party_entry, True, 0), (party_entry, False, 10), (hidden_entry.id, True, 0)):
+        await apply_change(db, gm_ctx, {"op": "add_mention", "entity_id": mira, "journal_id": journal_id,
+                                        "confirmed": confirmed, "span_start": span, "span_end": span + 4})
+    await db.commit()
+    assert (await _ok(await gm.get(f"{BASE}/{mira}")))["mention_count"] == 2
+    assert (await _ok(await player.get(f"{BASE}/{mira}")))["mention_count"] == 1
+    listed = await _ok(await player.get(f"{BASE}/?campaign_id={ev4.a.campaign_id}"))
+    assert [i["mention_count"] for i in listed["items"] if i["id"] == str(mira)] == [1]
 
 # ── Wiring: 13 routes, each in nginx's /api/entities/ location (zone api) ───
 
