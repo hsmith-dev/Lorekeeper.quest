@@ -340,11 +340,13 @@ async def test_owner_management_success_paths(client, db, ev4):
 
     leaver, stayer = await ev4.actor("player"), await ev4.actor("player_2")
     members = (await client.get(f"/api/campaigns/{a}/members", headers=owner)).json()
-    assert {m["user_id"] for m in members} == {str(leaver.user_id), str(stayer.user_id)}
+    # E0-Access.12: the Owner row comes first (member_id null), then the Members.
+    assert (members[0]["member_id"], members[0]["role"]) == (None, "owner")
+    assert {m["user_id"] for m in members[1:]} == {str(leaver.user_id), str(stayer.user_id)}
     mine = await _entry(db, a, leaver.user_id)
     theirs = await _entry(db, a, stayer.user_id)
     await db.commit()
-    member_id = next(m["id"] for m in members if m["user_id"] == str(leaver.user_id))
+    member_id = next(m["member_id"] for m in members if m["user_id"] == str(leaver.user_id))
     r = await client.delete(f"/api/campaigns/{a}/members/{member_id}?delete_entries=true", headers=owner)
     assert r.status_code == 204, r.text
     assert await db.scalar(sa.select(sa.func.count()).where(CampaignMember.id == uuid.UUID(member_id))) == 0

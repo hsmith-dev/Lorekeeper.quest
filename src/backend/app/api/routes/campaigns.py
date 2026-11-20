@@ -19,7 +19,8 @@ from app.schemas.campaign import (
     CampaignConceptRequest, CampaignConceptResponse,
 )
 from app.db.models.campaign_member import CampaignMember
-from app.schemas.share import ShareTokenResponse, ShareTokenCreate, CampaignMemberResponse
+from app.domain.enums import CampaignRole
+from app.schemas.share import ShareTokenResponse, ShareTokenCreate
 from app.schemas.tag_category import TagCategoryCreate, TagCategoryResponse
 from app.access import (
     CampaignContext, campaign_grants_removed, can_write, check_create, project, project_all, remove_member,
@@ -37,7 +38,8 @@ router = APIRouter()
 # through require_campaign. Management (PATCH / DELETE the Campaign, Share
 # Links, members) is Owner-only; authoring and GM reads (export, analytics,
 # tag-category writes) need `gm` (Owner or Co-GM); Party reads need `player`.
-# Every denial is the one 404 {"detail": "Not found"}. E0-Access.6: every
+# Every denial is the one 404 {"detail": "Not found"}. The Members list,
+# Role change and removal live in members.py (E0-Access.12). E0-Access.6: every
 # write calls can_write on the row it writes (leave removes the caller's own
 # grant, not a Campaign row, and needs only `player`).
 #
@@ -254,6 +256,10 @@ async def create_share_token(
         created_by_user_id=ctx.user_id,
         token=secrets.token_urlsafe(24),
         kind=body.kind,
+        # E0-Access.12: a collaborate link grants its Role (the schema
+        # defaults it to player); a read-only link grants none.
+        role=CampaignRole(body.role) if body.role else None,
+        expires_at=body.expires_at,
     )
     can_write(ctx, token)
     db.add(token)
@@ -275,62 +281,12 @@ async def revoke_share_token(
     await db.commit()
 
 
-@router.get("/{campaign_id}/members", response_model=list[CampaignMemberResponse])
-async def list_campaign_members(
-    ctx: CampaignContext = Depends(_owner),
-    db: AsyncSession = Depends(get_db),
-) -> list[CampaignMemberResponse]:
-    result = await db.execute(
-        scoped_select(CampaignMember, ctx)
-        .add_columns(User)
-        .join(User, CampaignMember.user_id == User.id)
-        .order_by(CampaignMember.created_at, CampaignMember.id)
-    )
-    return [
-        CampaignMemberResponse(
-            id=member.id, user_id=member.user_id,
-            display_name=member_user.display_name, email=member_user.email,
-            created_at=member.created_at,
-        )
-        for member, member_user in result.all()
-    ]
-
-
-@router.delete("/{campaign_id}/members/{member_id}", status_code=204)
-async def remove_campaign_member(
-    member_id: uuid.UUID,
-    delete_entries: bool = Query(
-        False,
-        description=(
-            "False (default): revoke this member's access; their journal "
-            "entries stay in the campaign, visible to the DM and remaining "
-            "members. True: also permanently delete every entry they wrote "
-            "in this campaign."
-        ),
-    ),
-    ctx: CampaignContext = Depends(_owner),
-    db: AsyncSession = Depends(get_db),
-) -> None:
-    member = await scoped_get(db, CampaignMember, ctx, member_id)
-    can_write(ctx, member)
-    if delete_entries:
-        entries_result = await db.execute(
-            scoped_select(JournalEntry, ctx).where(JournalEntry.user_id == member.user_id)
-        )
-        for entry in entries_result.scalars().all():
-            can_write(ctx, entry)
-            await db.delete(entry)
-    # E0-Access.10: the grant is gone; open streams close on the publish.
-    await remove_member(db, member)
-    await db.commit()
-
-
 @router.post("/{campaign_id}/leave", status_code=204)
 async def leave_campaign(
     ctx: CampaignContext = Depends(_player),
     db: AsyncSession = Depends(get_db),
 ) -> None:
-    """Self-service counterpart to remove_campaign_member above — a
+    """Self-service counterpart to remove_campaign_member (members.py) — a
     collaborator removing themselves rather than the owner removing them.
     Always keeps the leaving member's existing entries (same default as an
     owner-initiated removal); there's no self-service "and delete my entries

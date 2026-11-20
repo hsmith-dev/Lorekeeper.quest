@@ -50,6 +50,7 @@ from sqlalchemy.util.concurrency import await_only, in_greenlet
 from app.access.context import CampaignContext, _resolve
 from app.access.policy import ANON
 from app.db.models.campaign_member import CampaignMember
+from app.db.models.chat import ChatSession
 from app.db.models.share_token import CampaignShareToken
 from app.domain.enums import CampaignRole
 
@@ -170,13 +171,33 @@ def _after_commit(session: Session) -> None:
 # The callers authorize (the routes load the row with their ctx); these do
 # the write, the epoch bump and the queued publish. None of them commits.
 
+async def _archive_chats(db: AsyncSession, member: CampaignMember) -> None:
+    """Archive every unarchived chat session the Member has in their
+    Campaign (NPC chats included): a Co-GM's chats hold GM context."""
+    await db.execute(
+        sa.update(ChatSession)
+        .where(ChatSession.user_id == member.user_id, ChatSession.campaign_id == member.campaign_id,
+               ChatSession.archived_at.is_(None))
+        .values(archived_at=sa.func.now())
+        .execution_options(synchronize_session=False)
+    )
+
+
 async def change_member_role(db: AsyncSession, member: CampaignMember, role: CampaignRole | str) -> bool:
     """Set the Member's stored Role. A real change bumps `access_epoch` and
     queues the publish; the same Role changes nothing. Returns whether it
-    changed. An unknown role is ValueError."""
+    changed. An unknown role is ValueError.
+
+    A demotion from co_gm to player (E0-Access.12) also archives every
+    unarchived chat session the Member has in this Campaign (NPC chats
+    included): they were held with GM context a Player may not keep. This is
+    the single Role mutator, so every demotion path archives."""
     new = CampaignRole(role)
-    if CampaignRole(member.role) == new:
+    old = CampaignRole(member.role)
+    if old == new:
         return False
+    if old is CampaignRole.CO_GM and new is CampaignRole.PLAYER:
+        await _archive_chats(db, member)
     member.role = new
     member.access_epoch = (member.access_epoch or 0) + 1
     await db.flush()
@@ -186,7 +207,11 @@ async def change_member_role(db: AsyncSession, member: CampaignMember, role: Cam
 
 async def remove_member(db: AsyncSession, member: CampaignMember) -> None:
     """Delete the Member's grant (the watch treats a missing grant as
-    changed) and queue the publish."""
+    changed) and queue the publish. A removed Co-GM's chat sessions in the
+    Campaign are archived first, so rejoining as a Player never brings back
+    their GM-context chats."""
+    if CampaignRole(member.role) is CampaignRole.CO_GM:
+        await _archive_chats(db, member)
     campaign_id, grant_id = member.campaign_id, member.id
     await db.delete(member)
     await db.flush()
