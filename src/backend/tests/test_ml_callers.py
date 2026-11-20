@@ -166,6 +166,34 @@ async def test_npc_extract_with_ml_down_is_503(client, db, gm, ml_down):
     assert r.json() == {"detail": "NER model unavailable"}
 
 
+async def test_npc_extract_sends_at_most_the_cap_newest_first(client, db, gm, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    from app.api.routes import npcs as npc_routes
+    from app.clients.fakes import FakeMLClient
+
+    owner, cid = gm
+    now = datetime.now(timezone.utc)
+    # Three ~9k-char entries; the newest two fit under the 20k cap.
+    for i, name in enumerate(["Oldest", "Middle", "Newest"]):
+        db.add(JournalEntry(user_id=owner.id, campaign_id=cid, shorthand=name, narrative=f"{name} " + "x " * 4500,
+                            entry_hash=uuid.uuid4().hex, created_at=now - timedelta(minutes=10 - i)))
+    await db.commit()
+    seen: list[str] = []
+
+    class Recording(FakeMLClient):
+        async def ner(self, text):
+            seen.append(text)
+            return await super().ner(text)
+
+    monkeypatch.setattr(nlp_service, "get_ml_client", lambda: Recording())
+    r = await client.post(f"/api/npcs/extract?campaign_id={cid}", headers=bearer(owner))
+    assert r.status_code == 200, r.text
+    (sent,) = seen
+    assert len(sent) <= npc_routes.NPC_EXTRACT_MAX_CHARS
+    assert sent.startswith("Newest") and "Middle" in sent and "Oldest" not in sent
+
+
 # ── Admin sidecars ─────────────────────────────────────────────────────────
 
 async def _admin(db):
@@ -219,6 +247,21 @@ async def test_sidecars_cuts_off_a_stalled_one(client, db, monkeypatch):
     assert r.json()["ml"]["reachable"] is True
     stt = r.json()["stt"]
     assert stt["reachable"] is False and "timed out" in stt["error"]
+
+
+async def test_sidecars_reports_a_malformed_status_without_failing(client, db, monkeypatch):
+    from app.clients.ml import MLStatus, ModelState
+
+    class Malformed:
+        async def status(self):
+            return MLStatus(models=[ModelState(name="m", kind="ner", state=123)], rss_bytes=1)
+
+    monkeypatch.setattr(admin_routes, "get_ml_client", lambda: Malformed())
+    r = await client.get("/api/admin/sidecars", headers=bearer(await _admin(db)))
+    assert r.status_code == 200, r.text
+    ml = r.json()["ml"]
+    assert ml["reachable"] is False and ml["error"]
+    assert r.json()["stt"]["reachable"] is True
 
 
 # ── Eval scoring ───────────────────────────────────────────────────────────

@@ -32,6 +32,12 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+# NPC extract reads at most this much of the newest entries: en_core_web_trf
+# on a CPU-only box gets through roughly this in well under ML_NER_TIMEOUT_S,
+# and the sidecar keeps working on (and holding its NER lock for) a request
+# the client has given up on, so a smaller batch beats a timeout.
+NPC_EXTRACT_MAX_CHARS = 20_000
+
 # NPCs are always_gm until F3-world (Decision B1-D4): a Player (or a GM in
 # member preview) lists none and gets the one 404 for every item route and
 # for a create. Bodies go through access.project (response_model=None:
@@ -205,7 +211,17 @@ async def extract_npcs_from_journals(
     if not rows:
         return NpcExtractResponse(suggestions=[])
 
-    combined = " ".join(f"{r.shorthand} {r.narrative}" for r in rows)
+    # Newest first (the query order), stopping before the cap; at least the
+    # newest entry, cut to the cap.
+    parts: list[str] = []
+    used = 0
+    for r in rows:
+        part = f"{r.shorthand} {r.narrative}"
+        if parts and used + len(part) + 1 > NPC_EXTRACT_MAX_CHARS:
+            break
+        parts.append(part)
+        used += len(part) + 1
+    combined = " ".join(parts)[:NPC_EXTRACT_MAX_CHARS]
     try:
         tags = await extract_tags(combined)
     except ModelServiceError as exc:

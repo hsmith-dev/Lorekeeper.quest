@@ -186,3 +186,13 @@ Status: done. Draft PR #76 (branch `story/e0-platform-6-slim-backend-image`), co
 - RETRIEVAL_EVAL re-measure against the ml sidecar on the 12-entry seed (the docs/RETRIEVAL_EVAL.md "Reproducing" commands with `--embeddings require`). Expected hybrid@0.65 14/16 hit@3 and 5/5 gate-holds; if it differs, update the doc from the real run.
 - Tag parity: save the demo narratives and compare tags with main's in-process spaCy 3.7 output (ml runs spaCy 3.8.18 / en_core_web_trf 3.8.0).
 - arm64 build of `src/backend/Dockerfile.prod` with no compiler: `docker buildx build --platform linux/arm64 -f src/backend/Dockerfile.prod src/backend`.
+- NPC extract timing on a long campaign (15 entries over 20k chars) against the real ml sidecar on CPU: `time curl -s -X POST -H "Authorization: Bearer $TOKEN" "https://<host>/api/npcs/extract?campaign_id=<uuid>"`. It should finish well under ML_NER_TIMEOUT_S=120. Also watch `docker stats ml` for NER lock contention with a concurrent journal save.
+
+### Coordinator follow-up (2026-11-20)
+- `/api/admin/sidecars`: the response models are now built inside `_status()`'s try. A malformed status, such as a non-string model `state`, comes back as `reachable:false` with the error, not a 500. Tested.
+- `Pillow==13.0.0` is pinned directly. `auth.py` imports PIL, and it was otherwise only a weasyprint dependency. The register row (pillow 13.0.0, MIT-CMU, images [backend, ml]) matches.
+- NER timeout and extract cap. I chose both:
+  - New `ml_ner_timeout_s=120` (`ML_NER_TIMEOUT_S`). `MLClient.ner` uses it; every other call keeps `ml_timeout_s=30`.
+  - NPC extract now sends at most `NPC_EXTRACT_MAX_CHARS=20_000`: the newest entries first, stopping before the cap, with the newest one cut to the cap if needed. Before, it sent up to 100k chars.
+  - Reason: en_core_web_trf on CPU is slow, and the sidecar keeps holding its NER lock for a request the client abandoned (the existing ml lock-queue deferral from E0-Platform.5), so a smaller batch is safer than only a longer timeout. Journal save keeps the 100k `MAX_NER_CHARS` cut, since one narrative is short.
+  - Tested: the extract cap and newest-first order, and that ner uses its own timeout.

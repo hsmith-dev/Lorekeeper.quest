@@ -104,19 +104,24 @@ class MLClient:
     """HTTP client. Opens a short-lived httpx.AsyncClient per call, so one
     instance is safe to share across event loops and workers."""
 
-    def __init__(self, base_url: str, timeout_s: float, transport: httpx.AsyncBaseTransport | None = None):
+    def __init__(self, base_url: str, timeout_s: float, transport: httpx.AsyncBaseTransport | None = None,
+                 ner_timeout_s: float | None = None):
         self.base_url = base_url.rstrip("/")
         self.timeout_s = timeout_s
+        # /v1/ner gets its own (longer) timeout: transformer NER on CPU is slow.
+        self.ner_timeout_s = timeout_s if ner_timeout_s is None else ner_timeout_s
         self._transport = transport
 
-    async def _request(self, method: str, path: str, json: Any = None, files: Any = None) -> Any:
+    async def _request(self, method: str, path: str, json: Any = None, files: Any = None,
+                       timeout_s: float | None = None) -> Any:
+        timeout = self.timeout_s if timeout_s is None else timeout_s
         try:
             async with httpx.AsyncClient(
-                base_url=self.base_url, timeout=self.timeout_s, transport=self._transport
+                base_url=self.base_url, timeout=timeout, transport=self._transport
             ) as http:
                 resp = await http.request(method, path, json=json, files=files)
         except httpx.TimeoutException as exc:
-            raise ModelServiceUnavailable(f"ml sidecar timed out after {self.timeout_s}s on {path}") from exc
+            raise ModelServiceUnavailable(f"ml sidecar timed out after {timeout}s on {path}") from exc
         except httpx.TransportError as exc:
             raise ModelServiceUnavailable(f"ml sidecar unreachable at {self.base_url}: {exc!r}") from exc
         except httpx.HTTPError as exc:  # DecodingError, TooManyRedirects, ...: still typed
@@ -164,7 +169,7 @@ class MLClient:
         return vectors
 
     async def ner(self, text: str) -> list[NamedEntity]:
-        body = await self._request("POST", "/v1/ner", {"text": text})
+        body = await self._request("POST", "/v1/ner", {"text": text}, timeout_s=self.ner_timeout_s)
         try:
             return [NamedEntity(text=str(e["text"]), label=str(e["label"]),
                                 start=int(e["start"]), end=int(e["end"]))
@@ -233,18 +238,18 @@ def _opt_int(value: Any) -> int | None:
     return None if value is None else int(value)
 
 
-_clients: dict[tuple[str, float], MLClient] = {}
+_clients: dict[tuple[str, float, float], MLClient] = {}
 
 
 def get_ml_client(settings: Settings | None = None) -> MLClientProtocol:
     """The process's ML client: FakeMLClient under ENVIRONMENT=test, else
-    an MLClient for settings.ml_url / settings.ml_timeout_s."""
+    an MLClient for settings.ml_url / ml_timeout_s / ml_ner_timeout_s."""
     s = settings or get_settings()
     if s.environment == "test":
         from app.clients.fakes import FakeMLClient
 
         return FakeMLClient()
-    key = (s.ml_url, float(s.ml_timeout_s))
+    key = (s.ml_url, float(s.ml_timeout_s), float(s.ml_ner_timeout_s))
     if key not in _clients:
-        _clients[key] = MLClient(s.ml_url, s.ml_timeout_s)
+        _clients[key] = MLClient(s.ml_url, s.ml_timeout_s, ner_timeout_s=s.ml_ner_timeout_s)
     return _clients[key]

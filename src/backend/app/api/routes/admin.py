@@ -452,15 +452,21 @@ async def job_stats(request: Request, db: AsyncSession = Depends(get_db)) -> Job
 SIDECAR_STATUS_TIMEOUT_S = 5
 
 
-async def _status(client) -> tuple[object | None, str | None]:
-    """(status, None) or (None, error); never raises. A stalled sidecar is
-    cut off after SIDECAR_STATUS_TIMEOUT_S instead of its client timeout."""
+async def _status(client, build, down):
+    """build(status) or down(error); never raises. A stalled sidecar is cut
+    off after SIDECAR_STATUS_TIMEOUT_S instead of its client timeout, and a
+    malformed status (e.g. a non-string model state) is reported, not a 500."""
     try:
-        return await asyncio.wait_for(client.status(), timeout=SIDECAR_STATUS_TIMEOUT_S), None
+        st = await asyncio.wait_for(client.status(), timeout=SIDECAR_STATUS_TIMEOUT_S)
+        return build(st)
     except asyncio.TimeoutError:
-        return None, f"status timed out after {SIDECAR_STATUS_TIMEOUT_S}s"
+        return down(f"status timed out after {SIDECAR_STATUS_TIMEOUT_S}s")
     except Exception as exc:  # noqa: BLE001 -- a status page reports, never fails
-        return None, str(exc) or type(exc).__name__
+        return down(str(exc) or type(exc).__name__)
+
+
+def _models(states) -> list[SidecarModelState]:
+    return [SidecarModelState(**vars(m)) for m in states]
 
 
 @router.get("/sidecars", response_model=SidecarsResponse)
@@ -469,27 +475,24 @@ async def sidecar_status(request: Request) -> SidecarsResponse:
     """The ml and stt sidecars' /v1/status (models, state, resident memory),
     asked in parallel. Never a 5xx: an unreachable, stalled or misbehaving
     sidecar is reachable=false with the error text."""
-    (st, ml_err), (ss, stt_err) = await asyncio.gather(_status(get_ml_client()), _status(get_stt_client()))
-    if st is None:
-        ml = MLSidecarStatus(reachable=False, error=ml_err)
-    else:
-        ml = MLSidecarStatus(
-            reachable=True,
-            models=[SidecarModelState(**vars(m)) for m in st.models],
-            rss_bytes=st.rss_bytes,
-            resident_budget_mb=st.resident_budget_mb,
-            lazy_resident_mb=st.lazy_resident_mb,
-        )
-    if ss is None:
-        stt = STTSidecarStatus(reachable=False, error=stt_err)
-    else:
-        stt = STTSidecarStatus(
-            reachable=True,
-            models=[SidecarModelState(**vars(m)) for m in ss.models],
-            rss_bytes=ss.rss_bytes,
-            compute_type=ss.compute_type,
-            device=ss.device,
-        )
+    ml, stt = await asyncio.gather(
+        _status(
+            get_ml_client(),
+            lambda st: MLSidecarStatus(
+                reachable=True, models=_models(st.models), rss_bytes=st.rss_bytes,
+                resident_budget_mb=st.resident_budget_mb, lazy_resident_mb=st.lazy_resident_mb,
+            ),
+            lambda err: MLSidecarStatus(reachable=False, error=err),
+        ),
+        _status(
+            get_stt_client(),
+            lambda ss: STTSidecarStatus(
+                reachable=True, models=_models(ss.models), rss_bytes=ss.rss_bytes,
+                compute_type=ss.compute_type, device=ss.device,
+            ),
+            lambda err: STTSidecarStatus(reachable=False, error=err),
+        ),
+    )
     return SidecarsResponse(ml=ml, stt=stt)
 
 

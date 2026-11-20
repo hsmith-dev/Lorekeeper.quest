@@ -541,3 +541,28 @@ async def test_embedding_service_over_the_client_and_override():
     finally:
         embedding_service.use_client(None)
     assert await embedding_service.embed("alpha") == fake_vector("alpha")
+
+
+# ── NER timeout (E0-Platform.6 review) ───────────────────────────────────────
+
+async def test_ner_uses_its_own_longer_timeout():
+    seen = {}
+
+    def handler(req: httpx.Request):
+        seen[req.url.path] = req.extensions["timeout"]["read"]
+        if req.url.path == "/v1/ner":
+            return httpx.Response(200, json={"ents": []})
+        return httpx.Response(200, json={"model": EMBEDDING_MODEL, "dim": EMBEDDING_DIM, "vectors": [_vec(0)]})
+
+    client = MLClient("http://ml:8000", 5.0, transport=httpx.MockTransport(handler), ner_timeout_s=120.0)
+    await client.ner("Borin")
+    await client.embed(["a"])
+    assert seen == {"/v1/ner": 120.0, "/v1/embed": 5.0}
+
+
+def test_get_ml_client_passes_the_ner_timeout():
+    from app.clients import ml as ml_mod
+
+    c = ml_mod.get_ml_client(_settings(environment="development", ml_url="http://ml.t:1",
+                                       ml_timeout_s=7, ml_ner_timeout_s=99))
+    assert isinstance(c, MLClient) and c.timeout_s == 7 and c.ner_timeout_s == 99

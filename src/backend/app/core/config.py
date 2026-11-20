@@ -134,6 +134,9 @@ class Settings(BaseSettings):
     # ENVIRONMENT=test get_ml_client() returns a deterministic fake instead.
     ml_url: str = "http://ml:8000"
     ml_timeout_s: float = 30.0
+    # /v1/ner read timeout: en_core_web_trf on CPU takes far longer per call
+    # than an embedding (NPC extract sends up to NPC_EXTRACT_MAX_CHARS).
+    ml_ner_timeout_s: float = 120.0
 
     # ── stt sidecar (src/services/stt) ──────────────────────────────────────
     # faster-whisper speech-to-text, also only on the `models` network. Read
