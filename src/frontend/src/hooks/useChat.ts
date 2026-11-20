@@ -1,5 +1,8 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import type { AxiosError } from "axios";
+import { openSse, type Connect } from "../lib/sse";
+import { campaignRoleKey } from "./useCampaignRole";
 import type { ChatMessage, JournalSource, ResolvedSource, RetrievalDebug } from "../types";
 import { sendChatMessage, getChatSession } from "../services/api";
 
@@ -21,20 +24,101 @@ function extractError(err: unknown): string {
   return "Something went wrong.";
 }
 
-/** Parse one SSE frame ("event: x\ndata: {...}") into {event, data}. */
-function parseSseFrame(frame: string): { event: string; data: unknown } | null {
-  let event = "message";
-  let dataLine: string | null = null;
-  for (const line of frame.split("\n")) {
-    if (line.startsWith("event:")) event = line.slice(6).trim();
-    else if (line.startsWith("data:")) dataLine = line.slice(5).trim();
-  }
-  if (dataLine === null) return null;
+/** The chat stream's URL (same base as services/api.ts). */
+export const CHAT_STREAM_PATH = `${import.meta.env.VITE_API_URL ?? ""}/api/chat/stream`;
+
+/** The server's uniform "no access" detail (a revoked grant mid-stream). */
+const NOT_FOUND_DETAIL = "Not found";
+
+// A promotion ends the stream too, so this must not claim access was lost.
+export const REVOKED_MESSAGE = "Your access to this campaign changed, so this reply was stopped. Send your message again.";
+
+/** The grant changed mid-turn: the server dropped the turn. Never retried. */
+class ChatRevoked extends Error {}
+/** The hook unmounted (or the turn was cancelled): nothing to fall back to. */
+class ChatAborted extends Error {}
+
+/** The `meta` event: known before the first token. */
+export interface ChatStreamMeta {
+  session_id: string;
+  sources: JournalSource[];
+  grounded: boolean;
+  retrieval: RetrievalDebug | null;
+  citations?: ResolvedSource[];
+}
+
+/** How one streaming chat turn ended. Only "fallback" retries via the blocking POST. */
+export type ChatTurnResult =
+  | { kind: "ok"; sessionId: string }
+  | { kind: "revoked" }
+  | { kind: "aborted" }
+  | { kind: "fallback"; reason: string };
+
+export interface StreamChatTurnOptions {
+  signal: AbortSignal;
+  onMeta: (meta: ChatStreamMeta) => void;
+  /** The reply so far (all deltas joined). */
+  onDelta: (text: string) => void;
+  /** The full reply from `done`, when the server sent one. */
+  onDone: (reply: string) => void;
+  connect?: Connect;
+  headers?: () => Record<string, string> | null;
+}
+
+/**
+ * Stream one chat turn (lib/sse.ts, one-shot: a POST is never replayed) and
+ * classify how it ended: ok, revoked (`error {"detail":"Not found"}`: the
+ * grant changed), aborted (unmount), or fallback (anything else: a status, a
+ * network error, a model error, no token, no metadata or no reply).
+ */
+export async function streamChatTurn(
+  url: string,
+  body: unknown,
+  { signal, onMeta, onDelta, onDone, connect, headers }: StreamChatTurnOptions,
+): Promise<ChatTurnResult> {
+  let sessionId = "";
+  let acc = "";
+  let reason: string;
   try {
-    return { event, data: JSON.parse(dataLine) };
-  } catch {
-    return null;
+    reason = await openSse(url, {
+      method: "POST",
+      body,
+      signal,
+      reconnect: false,
+      // No pings on the chat stream, and the first token can take over
+      // 45 s on CPU: no idle watchdog.
+      idleMs: null,
+      connect,
+      headers,
+      onEvent: (parsed) => {
+        if (parsed.event === "meta") {
+          const meta = parsed.data as ChatStreamMeta;
+          sessionId = meta.session_id;
+          onMeta(meta);
+        } else if (parsed.event === "delta") {
+          acc += (parsed.data as { text: string }).text;
+          onDelta(acc);
+        } else if (parsed.event === "error") {
+          const detail = (parsed.data as { detail?: string } | null)?.detail;
+          // Thrown out of openSse: the reader is cancelled, the turn ends.
+          if (detail === NOT_FOUND_DETAIL) throw new ChatRevoked(detail);
+          throw new Error(detail || "AI model unavailable.");
+        } else if (parsed.event === "done") {
+          const full = (parsed.data as { reply?: string }).reply;
+          if (full) onDone(full);
+        }
+      },
+    });
+  } catch (err) {
+    if (signal.aborted) return { kind: "aborted" };
+    if (err instanceof ChatRevoked) return { kind: "revoked" };
+    return { kind: "fallback", reason: err instanceof Error ? err.message : "stream failed" };
   }
+  if (reason === "aborted") return { kind: "aborted" };
+  if (reason !== "ended") return { kind: "fallback", reason: `stream unavailable (${reason})` };
+  if (!sessionId) return { kind: "fallback", reason: "stream ended before metadata arrived" };
+  if (!acc.trim()) return { kind: "fallback", reason: "stream ended with no reply" };
+  return { kind: "ok", sessionId };
 }
 
 /** Replace the last assistant message via an updater. */
@@ -58,80 +142,57 @@ export function useChat() {
   const [isStreaming, setIsStreaming] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  /** Streaming send over SSE. Returns the new session id, or throws to let
-   *  the caller fall back to the blocking endpoint. */
+  const queryClient = useQueryClient();
+  // The in-flight streaming turn; aborted on unmount so the server sees the
+  // disconnect and frees the LLM slot.
+  const streamRef = useRef<AbortController | null>(null);
+  useEffect(() => () => streamRef.current?.abort(), []);
+
+  /** Streaming send over SSE (lib/sse.ts, one-shot: a POST is never replayed).
+   *  Returns the new session id, or throws to let the caller fall back to the
+   *  blocking endpoint (ChatRevoked and ChatAborted never fall back). */
   const sendStreaming = useCallback(
     async (text: string, campaignId?: string, currentSessionId?: string | null): Promise<string> => {
-      const token = localStorage.getItem("lk_token");
-      const resp = await fetch("/api/chat/stream", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        },
-        body: JSON.stringify({
-          message: text,
-          campaign_id: campaignId,
-          session_id: currentSessionId ?? undefined,
-        }),
-      });
-      if (!resp.ok || !resp.body) throw new Error(`stream unavailable (${resp.status})`);
-
-      const reader = resp.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      let newSessionId = "";
-      let acc = "";
-
-      // eslint-disable-next-line no-constant-condition
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        let sep: number;
-        while ((sep = buffer.indexOf("\n\n")) !== -1) {
-          const frame = buffer.slice(0, sep);
-          buffer = buffer.slice(sep + 2);
-          const parsed = parseSseFrame(frame);
-          if (!parsed) continue;
-
-          if (parsed.event === "meta") {
-            const meta = parsed.data as {
-              session_id: string;
-              sources: JournalSource[];
-              grounded: boolean;
-              retrieval: RetrievalDebug | null;
-              citations?: ResolvedSource[];
-            };
-            newSessionId = meta.session_id;
-            // Sources and the retrieval trace are known before the first
-            // token — attach them to an initially-empty assistant message.
-            setMessages((prev) => [
-              ...prev,
-              {
-                role: "assistant",
-                content: "",
-                sources: meta.sources ?? [],
-                grounded: meta.grounded,
-                retrieval: meta.retrieval,
-                citations: meta.citations ?? [],
-              },
-            ]);
-            setIsStreaming(true);
-          } else if (parsed.event === "delta") {
-            acc += (parsed.data as { text: string }).text;
-            patchLastAssistant(setMessages, { content: acc });
-          } else if (parsed.event === "error") {
-            throw new Error((parsed.data as { detail?: string }).detail || "AI model unavailable.");
-          } else if (parsed.event === "done") {
-            const full = (parsed.data as { reply?: string }).reply;
-            if (full) patchLastAssistant(setMessages, { content: full });
-          }
-        }
+      streamRef.current?.abort();
+      const controller = new AbortController();
+      streamRef.current = controller;
+      try {
+        const result = await streamChatTurn(
+          CHAT_STREAM_PATH,
+          {
+            message: text,
+            campaign_id: campaignId,
+            session_id: currentSessionId ?? undefined,
+          },
+          {
+            signal: controller.signal,
+            onMeta: (meta) => {
+              // Sources and the retrieval trace are known before the first
+              // token — attach them to an initially-empty assistant message.
+              setMessages((prev) => [
+                ...prev,
+                {
+                  role: "assistant",
+                  content: "",
+                  sources: meta.sources ?? [],
+                  grounded: meta.grounded,
+                  retrieval: meta.retrieval,
+                  citations: meta.citations ?? [],
+                },
+              ]);
+              setIsStreaming(true);
+            },
+            onDelta: (content) => patchLastAssistant(setMessages, { content }),
+            onDone: (content) => patchLastAssistant(setMessages, { content }),
+          },
+        );
+        if (result.kind === "ok") return result.sessionId;
+        if (result.kind === "aborted") throw new ChatAborted("aborted");
+        if (result.kind === "revoked") throw new ChatRevoked(NOT_FOUND_DETAIL);
+        throw new Error(result.reason);
+      } finally {
+        if (streamRef.current === controller) streamRef.current = null;
       }
-      if (!newSessionId) throw new Error("stream ended before metadata arrived");
-      if (!acc.trim()) throw new Error("stream ended with no reply");
-      return newSessionId;
     },
     []
   );
@@ -150,14 +211,24 @@ export function useChat() {
         const sid = await sendStreaming(text, campaignId, sessionId);
         setSessionId(sid);
         return sid;
-      } catch {
-        // Drop any partial assistant message the stream created, then retry
-        // via the blocking endpoint.
+      } catch (err) {
+        // The hook unmounted mid-stream: the fetch is aborted, nothing to show.
+        if (err instanceof ChatAborted) return;
+        const revoked = err instanceof ChatRevoked;
+        // Drop any partial assistant message the stream created (and, when the
+        // grant was revoked, the user turn the server did not keep), then retry
+        // via the blocking endpoint unless revoked.
         setMessages((prev) => {
           const next = [...prev];
           if (next.length && next[next.length - 1].role === "assistant") next.pop();
+          if (revoked && next.length && next[next.length - 1].role === "user") next.pop();
           return next;
         });
+        if (revoked) {
+          setError(REVOKED_MESSAGE);
+          if (campaignId) void queryClient.invalidateQueries({ queryKey: campaignRoleKey(campaignId) });
+          return;
+        }
       } finally {
         setIsStreaming(false);
         setIsLoading(false);
@@ -190,7 +261,7 @@ export function useChat() {
         setIsLoading(false);
       }
     },
-    [sessionId, isLoading, sendStreaming]
+    [sessionId, isLoading, sendStreaming, queryClient]
   );
 
   const loadSession = useCallback(async (id: string) => {

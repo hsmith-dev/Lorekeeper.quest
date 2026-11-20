@@ -16,8 +16,9 @@ api.interceptors.request.use((config) => {
   // The server may only narrow its answer with it, and ignores it outside GM
   // campaign routes, so sending it on every request is safe. The hiding itself
   // is server-side (AD-13); until E0-Access honours the header nothing enters
-  // preview. Direct fetch() calls (e.g. useChat.ts streaming, lib/sse.ts,
-  // AdminPage.tsx model install) bypass axios and are not covered yet.
+  // preview. Streams bypass axios: lib/sse.ts (the only SSE client: chat,
+  // Campaign events, Jobs) adds the same bearer and preview headers itself.
+  // AdminPage.tsx's model-install progress fetch is not covered yet.
   for (const [name, value] of Object.entries(previewHeaders())) config.headers.set(name, value);
   return config;
 });
@@ -478,3 +479,6 @@ export const getSupportBundle = () =>
 
 // Admin — background Job counts by status and queue (E0-Jobs.7)
 export const getAdminJobStats = () => api.get<import("../types").AdminJobStats>("/api/admin/jobs/stats");
+
+// Jobs (E0-Jobs.7 routes; the stream is hooks/useJobStream.ts over lib/sse.ts).
+export * from "./api/jobs";

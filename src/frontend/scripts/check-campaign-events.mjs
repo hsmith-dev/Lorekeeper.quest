@@ -3,9 +3,10 @@
 // frame parser and splitter, which query keys each event refetches (the
 // resync on `subscribed`, broadcast `visibility`/`role`, domain aliases), the
 // reconnect policy (backoff, one immediate reconnect after access_changed,
-// stop on 401/404) and the whole loop over a fake transport with a real
-// QueryClient. Plus source guards: fetch with a bearer header, never
-// EventSource or `?token=`.
+// stop on 401/404, re-exported from lib/sse.ts) and the whole loop over a fake
+// transport with a real QueryClient. The fetch transport itself (watchdog,
+// body cancel, chunked reads) is checked in check-sse.mjs. Plus source guards:
+// the hook reads no stream itself, never EventSource or `?token=`.
 // No test runner and no new dependency: node:test + node:assert and the
 // esbuild that Vite already installs (same harness as check-campaign-switcher).
 //
@@ -91,7 +92,6 @@ function seeded() {
   return qc;
 }
 const invalidated = (qc, key) => qc.getQueryState(key)?.isInvalidated === true;
-const tick = () => new Promise((r) => setTimeout(r, 0));
 
 beforeEach(() => {
   localStorage.clear();
@@ -305,50 +305,6 @@ describe("the loop over a fake transport", () => {
     assert.ok(!invalidated(qc, ["entities", OTHER]) && !invalidated(qc, ["campaignRole", OTHER]));
   });
 
-  test("the idle watchdog ends a silent (half-open) stream as an error", async () => {
-    const realFetch = globalThis.fetch;
-    globalThis.fetch = async (_url, init) => {
-      const body = new ReadableStream({
-        start(c) {
-          c.enqueue(new TextEncoder().encode(frame("subscribed", {})));
-          init.signal.addEventListener("abort", () => c.error(new Error("aborted")));
-        },
-      });
-      return new Response(body, { status: 200 });
-    };
-    try {
-      const got = [];
-      const open = ev.createFetchStream(50);
-      const result = await open("/x", {}, new AbortController().signal, (f) => got.push(f.event));
-      assert.deepEqual(result, { kind: "error" });
-      assert.deepEqual(got, ["subscribed"]);
-    } finally {
-      globalThis.fetch = realFetch;
-    }
-  });
-
-  test("a non-ok answer's body is cancelled", async () => {
-    const realFetch = globalThis.fetch;
-    let cancelled = false;
-    globalThis.fetch = async () =>
-      new Response(
-        new ReadableStream({
-          cancel() {
-            cancelled = true;
-          },
-        }),
-        { status: 503 },
-      );
-    try {
-      const result = await ev.openFetchStream("/x", {}, new AbortController().signal, () => {});
-      assert.deepEqual(result, { kind: "status", status: 503 });
-      await tick();
-      assert.ok(cancelled);
-    } finally {
-      globalThis.fetch = realFetch;
-    }
-  });
-
   test("no token: never connects", async () => {
     let opened = false;
     const reason = await ev.runCampaignEvents({
@@ -364,37 +320,20 @@ describe("the loop over a fake transport", () => {
     assert.equal(opened, false);
   });
 
-  test("openFetchStream reads a real ReadableStream body chunk by chunk", async () => {
-    const chunks = [frame("subscribed", {}).slice(0, 5), frame("subscribed", {}).slice(5) + frame("ping", {})];
-    const realFetch = globalThis.fetch;
-    let seen;
-    globalThis.fetch = async (url, init) => {
-      seen = { url, init };
-      const body = new ReadableStream({
-        start(c) {
-          for (const ch of chunks) c.enqueue(new TextEncoder().encode(ch));
-          c.close();
-        },
-      });
-      return new Response(body, { status: 200, headers: { "Content-Type": "text/event-stream" } });
-    };
-    try {
-      const got = [];
-      const result = await ev.openFetchStream("/x", { Authorization: "Bearer t" }, new AbortController().signal, (f) =>
-        got.push(f.event),
-      );
-      assert.deepEqual(result, { kind: "ended" });
-      assert.deepEqual(got, ["subscribed", "ping"]);
-      assert.equal(seen.init.headers.Authorization, "Bearer t");
-      globalThis.fetch = async () => new Response("nope", { status: 404 });
-      assert.deepEqual(await ev.openFetchStream("/x", {}, new AbortController().signal, () => {}), {
-        kind: "status",
-        status: 404,
-      });
-    } finally {
-      globalThis.fetch = realFetch;
-    }
-    await tick();
+  test("a 401 also invalidates the role and the Campaign, then stops", async () => {
+    localStorage.setItem("lk_token", "tok-401");
+    const qc = seeded();
+    const stops = [];
+    const reason = await ev.runCampaignEvents({
+      campaignId: CID,
+      queryClient: qc,
+      signal: new AbortController().signal,
+      open: async () => ({ kind: "status", status: 401 }),
+      onStop: (r) => stops.push(r),
+    });
+    assert.equal(reason, "401");
+    assert.deepEqual(stops, ["401"]);
+    assert.ok(invalidated(qc, ["campaignRole", CID]) && invalidated(qc, ["entities", CID]));
   });
 });
 
@@ -403,6 +342,10 @@ describe("source guards", () => {
   test("no EventSource and no token in the URL", () => {
     assert.ok(!/new\s+EventSource|EventSource\(/.test(source));
     assert.ok(!/[?&]token=/.test(source));
+  });
+  test("the transport is lib/sse.ts (no fetch reader in the hook)", () => {
+    assert.ok(/from "\.\.\/lib\/sse"/.test(source));
+    assert.ok(!/getReader\(|\bfetch\(/.test(source));
   });
   test("the shell mounts the subscriber once", () => {
     const app = readFileSync(join(srcDir, "App.tsx"), "utf8");

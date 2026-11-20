@@ -1,7 +1,8 @@
 import { useEffect, useSyncExternalStore } from "react";
 import { useQueryClient, type QueryClient, type QueryKey } from "@tanstack/react-query";
 
-import { getPreviewCampaignId, previewHeaders, subscribePreview } from "../lib/preview";
+import { getPreviewCampaignId, subscribePreview } from "../lib/preview";
+import { openSse, type Connect, type SseFrame } from "../lib/sse";
 import { campaignRoleKey } from "./useCampaignRole";
 import { useCurrentCampaign } from "./useCurrentCampaign";
 
@@ -20,12 +21,13 @@ import { useCurrentCampaign } from "./useCurrentCampaign";
 //
 // Reconnects: backoff 1 s doubling to 30 s with jitter, reset by `subscribed`.
 // After `access_changed` it reconnects once at once (a promotion fires it
-// too). It stops on 401 and 404 (no account, or no longer a Member).
+// too). It stops on 401 and 404 (no account, or no longer a Member), and
+// then refetches the role and the Campaign's queries.
 //
-// Transport: fetch + ReadableStream with the bearer header (no EventSource,
-// never a token in the URL), behind `openFetchStream`. E0-Jobs.9's lib/sse.ts replaces
-// that one function. The server filters every event for the caller; nothing
-// here decides what a user may see.
+// Transport: lib/sse.ts `openSse` (E0-Jobs.9): fetch + ReadableStream with the
+// bearer header (no EventSource, never a token in the URL), the 45 s idle
+// watchdog and the reconnect policy above. The server filters every event for
+// the caller; nothing here decides what a user may see.
 
 // The same base URL as services/api.ts (empty: same origin).
 const API_BASE: string = import.meta.env.VITE_API_URL ?? "";
@@ -33,53 +35,19 @@ const API_BASE: string = import.meta.env.VITE_API_URL ?? "";
 export const EVENTS_PATH = (campaignId: string) =>
   `${API_BASE}/api/campaigns/${encodeURIComponent(campaignId)}/events`;
 
-export const BACKOFF_BASE_MS = 1_000;
-export const BACKOFF_MAX_MS = 30_000;
-
-// ─── Frames ──────────────────────────────────────────────────────────────────
-
-export interface SseFrame {
-  event: string;
-  data: unknown;
-}
-
-/** Parse one SSE frame ("event: x\ndata: {...}"); multi-line data is joined with "\n". */
-export function parseSseFrame(frame: string): SseFrame | null {
-  let event = "message";
-  const data: string[] = [];
-  for (const raw of frame.split(/\r\n|\r|\n/)) {
-    if (raw === "" || raw.startsWith(":")) continue;
-    const colon = raw.indexOf(":");
-    const field = colon === -1 ? raw : raw.slice(0, colon);
-    let value = colon === -1 ? "" : raw.slice(colon + 1);
-    if (value.startsWith(" ")) value = value.slice(1);
-    if (field === "event") event = value;
-    else if (field === "data") data.push(value);
-  }
-  if (data.length === 0) return null;
-  try {
-    return { event, data: JSON.parse(data.join("\n")) };
-  } catch {
-    return null;
-  }
-}
-
-/** A stateful splitter: feed decoded text chunks, get whole frames back. */
-export function createFrameSplitter(): (chunk: string) => SseFrame[] {
-  let buffer = "";
-  return (chunk: string) => {
-    buffer += chunk;
-    const frames: SseFrame[] = [];
-    for (;;) {
-      const match = /\r\n\r\n|\n\n|\r\r/.exec(buffer);
-      if (!match) break;
-      const frame = parseSseFrame(buffer.slice(0, match.index));
-      buffer = buffer.slice(match.index + match[0].length);
-      if (frame) frames.push(frame);
-    }
-    return frames;
-  };
-}
+// The parser, the reconnect policy and the transport live in lib/sse.ts;
+// re-exported for existing callers and checks.
+export {
+  BACKOFF_BASE_MS,
+  BACKOFF_MAX_MS,
+  IDLE_TIMEOUT_MS,
+  backoffMs,
+  createFrameSplitter,
+  nextStep,
+  parseSseFrame,
+  sseHeaders as streamHeaders,
+} from "../lib/sse";
+export type { ReconnectDecision, ReconnectState, SseFrame, StreamOutcome } from "../lib/sse";
 
 // ─── What to refetch ─────────────────────────────────────────────────────────
 
@@ -172,140 +140,14 @@ export function applyFrame(
   return "invalidate";
 }
 
-// ─── Reconnect policy ────────────────────────────────────────────────────────
-
-/** How one connection ended. */
-export type StreamOutcome =
-  | { kind: "status"; status: number } // the server answered without a stream
-  | { kind: "ended"; accessChanged: boolean; subscribed: boolean } // a stream that ran, then ended
-  | { kind: "error" } // network failure
-  | { kind: "aborted" };
-
-export interface ReconnectState {
-  /** Failed attempts since the last `subscribed`. */
-  attempt: number;
-  /** An `access_changed` reconnect was just used and no stream has subscribed since. */
-  accessRetryUsed: boolean;
-}
-
-export type ReconnectDecision = { action: "stop"; reason: string } | { action: "reconnect"; delayMs: number };
-
-export function backoffMs(attempt: number, random: () => number = Math.random): number {
-  const ceiling = Math.min(BACKOFF_MAX_MS, BACKOFF_BASE_MS * 2 ** Math.max(0, attempt));
-  return Math.round(ceiling * (0.5 + random() / 2));
-}
-
-/** Decide what follows `outcome`, updating `state` in place. */
-export function nextStep(
-  outcome: StreamOutcome,
-  state: ReconnectState,
-  random: () => number = Math.random,
-): ReconnectDecision {
-  if (outcome.kind === "aborted") return { action: "stop", reason: "aborted" };
-  if (outcome.kind === "status" && (outcome.status === 401 || outcome.status === 404)) {
-    return { action: "stop", reason: String(outcome.status) };
-  }
-  if (outcome.kind === "ended" && outcome.subscribed) {
-    state.attempt = 0;
-    state.accessRetryUsed = false;
-  }
-  if (outcome.kind === "ended" && outcome.accessChanged && !state.accessRetryUsed) {
-    state.accessRetryUsed = true;
-    return { action: "reconnect", delayMs: 0 };
-  }
-  const delayMs = backoffMs(state.attempt, random);
-  state.attempt += 1;
-  return { action: "reconnect", delayMs };
-}
-
-// ─── Transport (E0-Jobs.9 replaces openFetchStream with lib/sse.ts) ──────────
-
-export type OpenStream = (
-  url: string,
-  headers: Record<string, string>,
-  signal: AbortSignal,
-  onFrame: (frame: SseFrame) => void,
-) => Promise<{ kind: "status"; status: number } | { kind: "ended" } | { kind: "error" } | { kind: "aborted" }>;
-
-/** No frame (pings included, every 15 s) for this long: the connection is dead. */
-export const IDLE_TIMEOUT_MS = 45_000;
-
-/** A fetch transport whose idle watchdog fires after `idleMs` without a chunk. */
-export const createFetchStream = (idleMs: number = IDLE_TIMEOUT_MS): OpenStream => async (url, headers, signal, onFrame) => {
-  // Our own controller: aborted by the caller's signal or by the idle watchdog
-  // (a half-open connection never errors on its own).
-  if (signal.aborted) return { kind: "aborted" };
-  const local = new AbortController();
-  const forward = () => local.abort();
-  signal.addEventListener("abort", forward);
-  let idle: ReturnType<typeof setTimeout> | undefined;
-  const arm = () => {
-    if (idle !== undefined) clearTimeout(idle);
-    idle = setTimeout(() => local.abort(), idleMs);
-  };
-  const outcome = (fallback: "ended" | "error"): { kind: "ended" } | { kind: "error" } | { kind: "aborted" } => {
-    if (signal.aborted) return { kind: "aborted" };
-    if (local.signal.aborted) return { kind: "error" };
-    return { kind: fallback };
-  };
-  try {
-    let resp: Response;
-    arm();
-    try {
-      resp = await fetch(url, {
-        headers: { Accept: "text/event-stream", ...headers },
-        signal: local.signal,
-        cache: "no-store",
-      });
-    } catch {
-      return outcome("error");
-    }
-    if (!resp.ok || !resp.body) {
-      void resp.body?.cancel().catch(() => undefined);
-      return { kind: "status", status: resp.status };
-    }
-    const reader = resp.body.getReader();
-    const decoder = new TextDecoder();
-    const split = createFrameSplitter();
-    try {
-      for (;;) {
-        arm();
-        const { done, value } = await reader.read();
-        if (done) break;
-        for (const frame of split(decoder.decode(value, { stream: true }))) onFrame(frame);
-      }
-    } catch {
-      return outcome("error");
-    } finally {
-      void reader.cancel().catch(() => undefined);
-    }
-    return outcome("ended");
-  } finally {
-    if (idle !== undefined) clearTimeout(idle);
-    signal.removeEventListener("abort", forward);
-  }
-};
-
-export const openFetchStream: OpenStream = createFetchStream();
-
-// ─── The loop ────────────────────────────────────────────────────────────────
-
-export function streamHeaders(): Record<string, string> | null {
-  let token: string | null = null;
-  try {
-    token = localStorage.getItem("lk_token");
-  } catch {
-    token = null;
-  }
-  if (!token) return null;
-  return { Authorization: `Bearer ${token}`, ...previewHeaders() };
-}
+// ─── The loop (lib/sse.ts) ───────────────────────────────────────────────────
 
 export interface RunOptions {
   campaignId: string;
   queryClient: QueryClient;
   signal: AbortSignal;
-  open?: OpenStream;
+  /** One connection (default lib/sse.ts `connectSse`); a seam for checks. */
+  open?: Connect;
   headers?: () => Record<string, string> | null;
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
   random?: () => number;
@@ -313,62 +155,33 @@ export interface RunOptions {
   onStop?: (reason: string) => void;
 }
 
-const abortableSleep = (ms: number, signal: AbortSignal) =>
-  new Promise<void>((resolve) => {
-    if (signal.aborted) return resolve();
-    const timer = setTimeout(done, ms);
-    function done() {
-      clearTimeout(timer);
-      signal.removeEventListener("abort", done);
-      resolve();
-    }
-    signal.addEventListener("abort", done);
-  });
-
-/** Connect, apply frames, reconnect per `nextStep`, until stopped or aborted. */
-export async function runCampaignEvents({
+/** Connect, apply frames, reconnect per lib/sse.ts `nextStep`, until stopped or aborted. */
+export function runCampaignEvents({
   campaignId,
   queryClient,
   signal,
-  open = openFetchStream,
-  headers = streamHeaders,
-  sleep = abortableSleep,
-  random = Math.random,
+  open,
+  headers,
+  sleep,
+  random,
   onStop,
 }: RunOptions): Promise<string> {
-  const state: ReconnectState = { attempt: 0, accessRetryUsed: false };
-  for (;;) {
-    if (signal.aborted) return "aborted";
-    const hdrs = headers();
-    if (!hdrs) {
-      onStop?.("no_token");
-      return "no_token";
-    }
-    let subscribed = false;
-    let accessChanged = false;
-    const result = await open(EVENTS_PATH(campaignId), hdrs, signal, (frame) => {
-      const kind = applyFrame(queryClient, campaignId, frame);
-      if (kind === "subscribed") {
-        subscribed = true;
-        state.attempt = 0;
-        state.accessRetryUsed = false;
-      } else if (kind === "access_changed") {
-        accessChanged = true;
+  return openSse(EVENTS_PATH(campaignId), {
+    signal,
+    connect: open,
+    headers,
+    sleep,
+    random,
+    onEvent: (frame) => void applyFrame(queryClient, campaignId, frame),
+    onStop: (reason) => {
+      if (reason === "401" || reason === "404") {
+        // No account, or no longer a Member: let the screens notice (role and Campaign data).
+        void queryClient.invalidateQueries({ queryKey: campaignRoleQueryKey(campaignId) });
+        refetchCampaign(queryClient, campaignId);
       }
-    });
-    const outcome: StreamOutcome = result.kind === "ended" ? { kind: "ended", accessChanged, subscribed } : result;
-    if (outcome.kind === "status" && outcome.status === 404) {
-      // No longer a Member: let the screens notice (role and Campaign data).
-      void queryClient.invalidateQueries({ queryKey: campaignRoleQueryKey(campaignId) });
-      refetchCampaign(queryClient, campaignId);
-    }
-    const step = nextStep(outcome, state, random);
-    if (step.action === "stop") {
-      if (step.reason !== "aborted") onStop?.(step.reason);
-      return step.reason;
-    }
-    if (step.delayMs > 0) await sleep(step.delayMs, signal);
-  }
+      onStop?.(reason);
+    },
+  });
 }
 
 // ─── React ───────────────────────────────────────────────────────────────────

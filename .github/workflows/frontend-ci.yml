@@ -48,6 +48,8 @@ jobs:
         run: node scripts/check-campaign-switcher.mjs
       - name: Campaign events stream (useCampaignEvents) checks
         run: node scripts/check-campaign-events.mjs
+      - name: SSE client (lib/sse.ts), chat migration and Job stream checks
+        run: node scripts/check-sse.mjs
       - name: Route registry, nav sets, redirects, not-found and route announcer checks
         run: node scripts/check-routes.mjs
       - name: Keyboard shortcut registry and help overlay checks
