@@ -97,6 +97,7 @@ one another.
 | NFR-6: Narration of a 300-word recap | ≤ 2 min | ≤ 30 s | pending (E5) | pending (E5) | — | — | — | — | E5 |
 | NFR-6: Chronicle export, 100 entries | ≤ 3 min | n/a | pending (E8) | n/a | — | — | — | — | E8 |
 | NFR-6: Portal page load (warm) | ≤ 2 s | ≤ 2 s | pending (E7) | pending (E7) | — | — | — | — | E7 |
+| FR-14: match_names on a 500-word Narrative (300 Entities, 600 aliases) | ≤ 200 ms | n/a | 13.3 ms (median, range 12.9-14.8 ms; test runner image) | n/a | — | 7 | 2026-11-02 | AMD Ryzen 9 9900X 12-Core Processor, 60 GB host | E0-WorldCore |
 | NFR-2: Stack memory: idle | ≤ 14.5 GB container-limit sum | ≤ 14.5 GB container-limit sum | pending (E0-Platform) | pending (E0-Platform) | — | — | — | — | E0-Platform |
 | NFR-2: Stack memory: one heavy Job | ≤ 14.5 GB container-limit sum | ≤ 14.5 GB container-limit sum | pending (E0-Platform) | pending (E0-Platform) | — | — | — | — | E0-Platform |
 | NFR-2: Stack memory: Live Session (speech-to-text + Rolling Recap) | ≤ 14.5 GB container-limit sum | ≤ 14.5 GB container-limit sum | pending (E0-Platform, E4) | pending (E0-Platform, E4) | — | — | — | — | E0-Platform, E4 |

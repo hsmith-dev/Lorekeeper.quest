@@ -690,6 +690,7 @@ entries:
   - {name: "python-jose", kind: python, version: "3.3.0", license: "MIT", source_url: "https://pypi.org/project/python-jose/", editions: [agpl, commercial], images: [backend], notes: ""}
   - {name: "python-multipart", kind: python, version: "0.0.12", license: "Apache-2.0", source_url: "https://pypi.org/project/python-multipart/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
   - {name: "PyYAML", kind: python, version: "6.0.3", license: "MIT", source_url: "https://pypi.org/project/PyYAML/", editions: [agpl, commercial], images: [backend, ml], notes: ""}
+  - {name: "rapidfuzz", kind: python, version: "3.14.6", license: "MIT", source_url: "https://pypi.org/project/rapidfuzz/", editions: [agpl, commercial], images: [backend], notes: "Fuzzy Entity name candidates, world_service.candidates (E0-WorldCore.4)."}
   - {name: "rapidocr", kind: python, version: "3.10.0", license: "Apache-2.0", source_url: "https://pypi.org/project/rapidocr/", editions: [agpl, commercial], images: [ml], notes: "OCR in the ml sidecar's /v1/ocr, replacing easyocr (E0-QA.9). Its optional `rtl` extra would pull python-bidi (LGPL-3.0); we never install it."}
   - {name: "redis", kind: python, version: "5.1.0", license: "MIT", source_url: "https://pypi.org/project/redis/", editions: [agpl, commercial], images: [backend], notes: ""}
   - {name: "regex", kind: python, version: "2026.9.29", license: "Apache-2.0 AND CNRI-Python", source_url: "https://pypi.org/project/regex/", editions: [agpl, commercial], images: [backend, ml], notes: ""}

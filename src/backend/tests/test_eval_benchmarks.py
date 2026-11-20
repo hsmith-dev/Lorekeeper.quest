@@ -52,12 +52,13 @@ def _stats(median, lo, hi, n=5) -> dict:
 
 # ── I/O matrix ──────────────────────────────────────────────────────────────
 
-def test_blank_store_renders_12_pending_rows(tmp_path):
+def test_blank_store_renders_13_pending_rows(tmp_path):
     store = load_store(tmp_path / "missing.json")
     assert store == {"format": 1, "rows": {}, "spikes": []}
     rows = _by_id(render(store)[eval_benchmarks.NFR_REGION])
-    assert len(rows) == 12
+    assert len(rows) == 13
     assert sum(r.group == "NFR-6" for r in ROWS) == 9 and sum(r.group == "NFR-2" for r in ROWS) == 3
+    assert [r.id for r in ROWS if r.group == "FR-14"] == ["match_names"]
     for r in ROWS:
         cells = rows[r.id]
         assert cells["Measured CPU"] == f"pending ({r.owner})"
@@ -230,7 +231,7 @@ def test_committed_doc_matches_committed_store():
         assert doc.count(f"<!-- {name} -->") == 1 and doc.count(f"<!-- /{name} -->") == 1, name
         assert eval_common._region_re(name).search(doc).group(2) == f"\n{body}\n", (
             f"docs/BENCHMARKS.md region {name} is stale: run python scripts/eval_benchmarks.py")
-    assert len(_nfr_rows(render(store)[eval_benchmarks.NFR_REGION])) == 12
+    assert len(_nfr_rows(render(store)[eval_benchmarks.NFR_REGION])) == 13
 
 
 def test_write_regions_keeps_prose_and_requires_every_marker(tmp_path):
