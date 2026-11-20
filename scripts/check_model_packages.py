@@ -15,8 +15,8 @@ onnxruntime or any TTS package. This scans what that image installs:
 Names are compared in PEP 503 normalized form, so `Sentence_Transformers` and
 `sentence-transformers` are the same package.
 
-Today's image still carries five of them; they are listed, with a reason, in
-scripts/model_packages_baseline.txt. That baseline only shrinks:
+Since E0-Platform.6 the image carries none, so scripts/model_packages_baseline.txt
+is empty. The mechanism stays, and the baseline only shrinks:
   * a forbidden package not in the baseline fails (fix: move the model into a
     sidecar and call it through app/clients);
   * a baseline entry nothing installs any more fails (fix: remove it from the

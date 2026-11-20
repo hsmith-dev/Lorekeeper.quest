@@ -33,16 +33,15 @@ INN_QUESTION = "What happened at the Drowsy Dragon with the innkeeper?"
 
 @contextmanager
 def fake_embeddings():
-    """embedding_service.embed -> app.clients.fakes.fake_vector for the block."""
-    from app.clients.fakes import fake_vector
+    """embedding_service on app.clients.fakes.FakeMLClient (fake_vector) for the block."""
+    from app.clients.fakes import FakeMLClient
     from app.services import embedding_service
 
-    real = embedding_service.embed
-    embedding_service.embed = fake_vector
+    embedding_service.use_client(FakeMLClient())
     try:
         yield
     finally:
-        embedding_service.embed = real
+        embedding_service.use_client(None)
 
 
 async def _index(db, entry) -> None:
@@ -54,7 +53,7 @@ async def _index(db, entry) -> None:
     await db.flush()
     await db.execute(sa.text("UPDATE journal_entries SET narrative_tsv = to_tsvector('english', :doc) WHERE id = :id"),
                      {"doc": doc, "id": str(entry.id)})
-    entry.embedding = embedding_service.embed(doc)
+    entry.embedding = await embedding_service.embed(doc)
     await index_party_fields(db, entry)
 
 

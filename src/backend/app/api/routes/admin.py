@@ -26,8 +26,14 @@ from app.schemas.admin import (
     ModelLibraryResponse,
     ModelInstallRequest,
     LogsResponse,
+    MLSidecarStatus,
+    STTSidecarStatus,
+    SidecarModelState,
+    SidecarsResponse,
 )
 from app.api.deps import require_admin
+from app.clients.ml import get_ml_client
+from app.clients.stt import get_stt_client
 from app.core.limiter import limiter, user_or_ip
 from app.jobs.control import job_counts
 from app.schemas.jobs import JobStatsResponse
@@ -440,6 +446,37 @@ async def job_stats(request: Request, db: AsyncSession = Depends(get_db)) -> Job
     """Job counts by status and by queue, across every Campaign (counts
     only: no kind, payload or Campaign data)."""
     return JobStatsResponse(**await job_counts(db))
+
+
+@router.get("/sidecars", response_model=SidecarsResponse)
+@limiter.limit("60/minute", key_func=user_or_ip)
+async def sidecar_status(request: Request) -> SidecarsResponse:
+    """The ml and stt sidecars' /v1/status (models, state, resident memory).
+    Never a 5xx: an unreachable or misbehaving sidecar is reachable=false
+    with the error text."""
+    try:
+        st = await get_ml_client().status()
+        ml = MLSidecarStatus(
+            reachable=True,
+            models=[SidecarModelState(**vars(m)) for m in st.models],
+            rss_bytes=st.rss_bytes,
+            resident_budget_mb=st.resident_budget_mb,
+            lazy_resident_mb=st.lazy_resident_mb,
+        )
+    except Exception as exc:  # noqa: BLE001 -- a status page reports, never fails
+        ml = MLSidecarStatus(reachable=False, error=str(exc) or type(exc).__name__)
+    try:
+        ss = await get_stt_client().status()
+        stt = STTSidecarStatus(
+            reachable=True,
+            models=[SidecarModelState(**vars(m)) for m in ss.models],
+            rss_bytes=ss.rss_bytes,
+            compute_type=ss.compute_type,
+            device=ss.device,
+        )
+    except Exception as exc:  # noqa: BLE001
+        stt = STTSidecarStatus(reachable=False, error=str(exc) or type(exc).__name__)
+    return SidecarsResponse(ml=ml, stt=stt)
 
 
 @router.get("/support-bundle")

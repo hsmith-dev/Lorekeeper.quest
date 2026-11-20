@@ -446,9 +446,98 @@ def _literal(path: Path, name: str):
     return ast.literal_eval(node.value)
 
 
-@pytest.mark.skipif(not SIDECAR_MODELS.exists(), reason="src/services/ml not in this checkout")
-@pytest.mark.parametrize("name", ["ITEM_PATTERNS", "QUEST_PATTERNS"])
-def test_sidecar_matcher_patterns_match_nlp_service(name):
-    """The sidecar copies these verbatim; tags would drift if either side changed alone."""
-    nlp_service = BACKEND / "app" / "services" / "nlp_service.py"
-    assert _literal(SIDECAR_MODELS, name) == _literal(nlp_service, name)
+# ── nlp_service / embedding_service over the client (E0-Platform.6) ───────
+
+class _StubNer:
+    """An ml client whose /v1/ner returns fixed entities, in sidecar order."""
+
+    def __init__(self, ents: list[NamedEntity]):
+        self.ents = ents
+        self.texts: list[str] = []
+
+    async def ner(self, text: str) -> list[NamedEntity]:
+        self.texts.append(text)
+        return self.ents
+
+
+def _ent(text: str, label: str) -> NamedEntity:
+    return NamedEntity(text, label, 0, len(text))
+
+
+async def test_extract_tags_maps_labels_dedupes_and_keeps_sidecar_order(monkeypatch):
+    from app.db.models.tag import TagType
+    from app.services import nlp_service
+
+    stub = _StubNer([
+        _ent("aldric", "PERSON"), _ent("Waterdeep", "GPE"), _ent("the Underdark", "LOC"),
+        _ent("Yawning Portal", "FAC"), _ent("Zhentarim", "ORG"), _ent("Tuesday", "DATE"),
+        _ent("ALDRIC", "PERSON"),            # dupe of (aldric, character)
+        _ent("Aldric", "ORG"),               # same name, other type: kept
+        _ent("ring of fire", "ITEM"), _ent("find the lich", "QUEST"),
+    ])
+    monkeypatch.setattr(nlp_service, "get_ml_client", lambda: stub)
+    tags = await nlp_service.extract_tags("some text")
+    assert [(t.name, t.tag_type) for t in tags] == [
+        ("Aldric", TagType.character), ("Waterdeep", TagType.location),
+        ("The Underdark", TagType.location), ("Yawning Portal", TagType.location),
+        ("Zhentarim", TagType.faction), ("Aldric", TagType.faction),
+        ("Ring Of Fire", TagType.item), ("Find The Lich", TagType.quest),
+    ]
+    assert stub.texts == ["some text"]
+
+
+async def test_extract_tags_cuts_text_to_the_sidecar_limit(monkeypatch):
+    from app.services import nlp_service
+
+    stub = _StubNer([])
+    monkeypatch.setattr(nlp_service, "get_ml_client", lambda: stub)
+    await nlp_service.extract_tags("x" * (nlp_service.MAX_NER_CHARS + 50))
+    assert len(stub.texts[0]) == nlp_service.MAX_NER_CHARS
+
+
+@pytest.mark.skipif(not SIDECAR_CONFIG.exists(), reason="src/services/ml not in this checkout")
+def test_ner_limit_matches_the_sidecar():
+    from app.services import nlp_service
+
+    assert _literal(SIDECAR_CONFIG, "MAX_NER_CHARS") == nlp_service.MAX_NER_CHARS
+
+
+async def test_extract_tags_over_the_fake_client():
+    from app.db.models.tag import TagType
+    from app.services import nlp_service
+
+    tags = await nlp_service.extract_tags("Borin Stonebeard travelled toward Waterdeep with the ring of fire.")
+    assert ("Borin Stonebeard", TagType.character) in [(t.name, t.tag_type) for t in tags]
+    assert ("Waterdeep", TagType.location) in [(t.name, t.tag_type) for t in tags]
+    assert ("Ring Of Fire", TagType.item) in [(t.name, t.tag_type) for t in tags]
+
+
+async def test_extract_tags_raises_when_ml_is_down(monkeypatch):
+    from app.services import nlp_service
+
+    class Down:
+        async def ner(self, text):
+            raise ModelServiceUnavailable("ml sidecar unreachable")
+
+    monkeypatch.setattr(nlp_service, "get_ml_client", lambda: Down())
+    with pytest.raises(ModelServiceUnavailable):
+        await nlp_service.extract_tags("Aldric")
+
+
+async def test_embedding_service_over_the_client_and_override():
+    from app.services import embedding_service
+
+    assert await embedding_service.embed("alpha") == fake_vector("alpha")
+    assert await embedding_service.embed_many(["a", "b"]) == [fake_vector("a"), fake_vector("b")]
+    assert await embedding_service.embed_many([]) == []
+
+    class Const:
+        async def embed(self, texts):
+            return [[1.0] + [0.0] * (EMBEDDING_DIM - 1) for _ in texts]
+
+    embedding_service.use_client(Const())
+    try:
+        assert (await embedding_service.embed("alpha"))[0] == 1.0
+    finally:
+        embedding_service.use_client(None)
+    assert await embedding_service.embed("alpha") == fake_vector("alpha")

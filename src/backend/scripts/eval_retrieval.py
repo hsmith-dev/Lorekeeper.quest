@@ -46,12 +46,13 @@ _BACKEND_DIR = Path(__file__).resolve().parents[1]
 if str(_BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(_BACKEND_DIR))
 
-from scripts import eval_common  # noqa: E402  (first: sets HF_HUB_OFFLINE)
+from scripts import eval_common  # noqa: E402
 from scripts.eval_common import Failure, ReportError, SeedError  # noqa: E402
 
 from sqlalchemy import select  # noqa: E402
 
 from app.access import ctx_for  # noqa: E402
+from app.clients.errors import ModelServiceError  # noqa: E402
 from app.db.models.campaign import Campaign  # noqa: E402
 from app.db.models.journal import JournalEntry  # noqa: E402
 from app.services import embedding_service  # noqa: E402
@@ -102,8 +103,8 @@ DEFAULT_CHOSEN = point_label(RAG_RELEVANCE_MAX_DISTANCE, "hybrid")
 async def vector_only(db, query, campaign_id, threshold):
     """The pre-hybrid implementation: top-3 by cosine distance, gated."""
     try:
-        emb = embedding_service.embed(query)
-    except RuntimeError:  # no model loaded (--embeddings skip, or not cached)
+        emb = await embedding_service.embed(query)
+    except ModelServiceError:  # no embeddings (--embeddings skip, or ml down)
         return []
     distance = JournalEntry.embedding.cosine_distance(emb)
     res = await db.execute(
@@ -199,19 +200,22 @@ async def run(args: argparse.Namespace, *, embedding_model=None) -> eval_common.
     labels = [point_label(t, m) for t in thresholds for m in MODES]
     if args.chosen not in labels:
         raise SeedError(f"--chosen {args.chosen!r} is not a swept point; choose one of {labels}")
-    model = eval_common.install_embedding_model(args.embeddings, embedding_model)
-    if model is None:
-        print("warning: no embedding model; vector retrieval scores 0 and hybrid is lexical-only",
-              file=sys.stderr)
-    async with eval_common.open_session(args.database_url) as db:
-        data = await eval_common.load_campaign(
-            args.seed, db, args.campaign_id, owner_email=args.owner_email,
-            embedder=eval_common.seed_demo.embedder_from_model(model),
-        )
-        positives = sum(1 for _, exp in LABELED if exp)
-        print(f"campaign {data.id}: {len(data.entries)} entries; "
-              f"{positives} on-topic + {len(LABELED) - positives} off-topic labeled queries\n")
-        table = await evaluate(db, data.id, thresholds, chosen=args.chosen)
+    try:
+        model = await eval_common.install_embedding_model(args.embeddings, embedding_model)
+        if model is None:
+            print("warning: no embedding model; vector retrieval scores 0 and hybrid is lexical-only",
+                  file=sys.stderr)
+        async with eval_common.open_session(args.database_url) as db:
+            data = await eval_common.load_campaign(
+                args.seed, db, args.campaign_id, owner_email=args.owner_email,
+                embedder=eval_common.embedder_for(model),
+            )
+            positives = sum(1 for _, exp in LABELED if exp)
+            print(f"campaign {data.id}: {len(data.entries)} entries; "
+                  f"{positives} on-topic + {len(LABELED) - positives} off-topic labeled queries\n")
+            table = await evaluate(db, data.id, thresholds, chosen=args.chosen)
+    finally:
+        embedding_service.use_client(None)
     print(eval_common.format_table(table))
     if args.out:
         embed_name = "fake" if isinstance(model, eval_common.FakeEmbeddingModel) else (

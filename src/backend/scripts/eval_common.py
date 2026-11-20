@@ -45,7 +45,7 @@ _BACKEND_DIR = Path(__file__).resolve().parents[1]
 if str(_BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(_BACKEND_DIR))
 
-from scripts import seed_demo  # noqa: E402  (sets HF_HUB_OFFLINE before any HF import)
+from scripts import seed_demo  # noqa: E402
 from scripts.seed_demo import EMBEDDING_MODES, SeedError  # noqa: E402
 
 from sqlalchemy import select  # noqa: E402
@@ -126,11 +126,15 @@ async def load_campaign(
 # ── Embeddings ──────────────────────────────────────────────────────────────
 
 class FakeEmbeddingModel:
-    """Deterministic stand-in for the SentenceTransformer: a hashed bag of
+    """Deterministic stand-in for the ml sidecar's MiniLM: a hashed bag of
     lowercase words, L2-normalised. Shared words -> smaller cosine distance,
-    which is enough to exercise the vector path in tests without the model."""
+    which is enough to exercise the vector path in tests without the model.
+    Install it with embedding_service.use_client (it has `async embed`)."""
 
     dim = EMBEDDING_DIM
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        return [self.encode(t).tolist() for t in texts]
 
     def encode(self, text: str, normalize_embeddings: bool = True):
         vec = [0.0] * self.dim
@@ -146,16 +150,42 @@ class _List(list):
         return list(self)
 
 
-def install_embedding_model(mode: str = "auto", model=None):
-    """Load (or take) the embedding model and install it where
-    app.services.embedding_service.embed reads it, so retrieval_service and
-    the seed embed the same way. Returns the model, or None (no vectors)."""
+class DisabledEmbeddingClient:
+    """Installed when there are no embeddings (--embeddings skip, or ml did
+    not answer under auto): every call fails at once, so retrieval goes
+    lexical-only instead of waiting on an unreachable sidecar."""
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        from app.clients.errors import ModelServiceUnavailable
+
+        raise ModelServiceUnavailable("embeddings disabled for this run")
+
+
+async def install_embedding_model(mode: str = "auto", model=None):
+    """Install the embedding client app.services.embedding_service uses
+    (embedding_service.use_client), so retrieval_service and the seed embed
+    the same way. `model` (e.g. FakeEmbeddingModel) wins; otherwise the ml
+    sidecar is probed per `mode` (require: SeedError if it does not answer).
+    Returns the installed client, or None (no vectors; a
+    DisabledEmbeddingClient is installed). The caller restores the default
+    with embedding_service.use_client(None)."""
     from app.services import embedding_service
 
-    if model is None:
-        model = seed_demo.load_embedding_model(mode)
-    embedding_service._model = model
-    return model
+    if model is not None:
+        embedding_service.use_client(model)
+        return model
+    embedding_service.use_client(None)
+    if await seed_demo.load_embedder(mode) is not None:
+        return embedding_service.current_client()
+    embedding_service.use_client(DisabledEmbeddingClient())
+    return None
+
+
+def embedder_for(model) -> seed_demo.Embedder | None:
+    """The seed's embedder once install_embedding_model returned `model`."""
+    from app.services import embedding_service
+
+    return None if model is None else embedding_service.embed
 
 
 # ── Sweeps and tables ───────────────────────────────────────────────────────
@@ -412,12 +442,16 @@ WINDOW = 3
 
 
 async def smoke(args: argparse.Namespace, *, embedding_model=None) -> ResultTable:
-    model = install_embedding_model(args.embeddings, embedding_model)
-    embedder = seed_demo.embedder_from_model(model)
-    llm = make_llm(args)
-    async with open_session(args.database_url) as session:
-        data = await load_campaign(args.seed, session, args.campaign_id,
-                                   owner_email=args.owner_email, embedder=embedder)
+    from app.services import embedding_service
+
+    try:
+        model = await install_embedding_model(args.embeddings, embedding_model)
+        llm = make_llm(args)
+        async with open_session(args.database_url) as session:
+            data = await load_campaign(args.seed, session, args.campaign_id,
+                                       owner_email=args.owner_email, embedder=embedder_for(model))
+    finally:
+        embedding_service.use_client(None)
     entries = data.entries
     windows = []
     for i in range(0, len(entries), WINDOW):

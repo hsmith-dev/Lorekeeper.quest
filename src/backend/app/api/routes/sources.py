@@ -1,4 +1,6 @@
+import logging
 import uuid
+
 from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File, Form
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import func
@@ -8,6 +10,7 @@ from app.access import (
     scoped_get,
     scoped_select,
 )
+from app.clients.errors import ModelServiceError
 from app.core.limiter import limiter
 from app.db.session import get_db
 from app.db.models.user import User
@@ -15,7 +18,9 @@ from app.db.models.source import SourceDocument, SourceChunk
 from app.schemas.source import SourceDocumentResponse
 from app.api.deps import PARTY_READ, get_current_user
 from app.services.source_service import extract_text, chunk_text
-from app.services.embedding_service import embed
+from app.services.embedding_service import embed_many
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -81,17 +86,26 @@ async def upload_source(
         filename=file.filename,
     )
     check_create(doc, ctx)
+
+    # Every chunk's vector before anything is written: with the ml sidecar
+    # down the upload is a 503 and nothing is committed.
+    try:
+        vectors = await embed_many(chunks)
+    except ModelServiceError as exc:
+        logger.warning("Source upload failed, ml sidecar: %s", exc)
+        raise HTTPException(status_code=503, detail="Embedding model unavailable")
+
     db.add(doc)
     await db.flush()
 
-    for i, chunk in enumerate(chunks):
+    for i, (chunk, vector) in enumerate(zip(chunks, vectors)):
         db.add(SourceChunk(
             source_document_id=doc.id,
             user_id=user.id,
             campaign_id=campaign_id,
             chunk_index=i,
             content=chunk,
-            embedding=embed(chunk),
+            embedding=vector,
         ))
 
     await db.commit()

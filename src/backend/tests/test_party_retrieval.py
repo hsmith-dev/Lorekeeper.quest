@@ -22,7 +22,8 @@ import sqlalchemy as sa
 from hypothesis import HealthCheck, given, settings, strategies as st
 
 from app.access import GM, ctx_for, role_map, scoped_select
-from app.clients.fakes import fake_vector
+from app.clients.errors import ModelServiceUnavailable
+from app.clients.fakes import FakeMLClient, fake_vector
 from app.db.models.campaign import Campaign, Genre
 from app.db.models.journal import JournalEntry
 from app.db.models.shorthand import ShorthandTerm
@@ -37,9 +38,19 @@ from scripts import backfill_party_embeddings
 from tests.ev4.fixtures import bearer, create_user, make_member
 
 
+async def _no_tags(text):
+    return []
+
+
+async def _broken_embed(text):
+    raise ModelServiceUnavailable("ml sidecar unreachable")
+
+
 @pytest.fixture(autouse=True)
 def fake_embed(monkeypatch):
-    monkeypatch.setattr(embedding_service, "embed", fake_vector)
+    # FakeMLClient (ENVIRONMENT=test) already embeds with fake_vector; pin it
+    # so no test leaks an override into the next.
+    monkeypatch.setattr(embedding_service, "_override", FakeMLClient())
 
 
 class FakeValkey:
@@ -234,7 +245,7 @@ def _close(a, b) -> bool:
 
 
 async def test_create_journal_entry_indexes_party_fields(db, world, monkeypatch):
-    monkeypatch.setattr(journal_service, "extract_tags", lambda text: [])
+    monkeypatch.setattr(journal_service, "extract_tags", _no_tags)
     narrative = "The party crossed the bridge at dawn."
     entry = await journal_service.create_journal_entry(
         db, world.owner.id, world.a, "Zorblax watched", uuid.uuid4().hex, None, narrative=narrative,
@@ -245,11 +256,8 @@ async def test_create_journal_entry_indexes_party_fields(db, world, monkeypatch)
 
 
 async def test_embedding_failure_leaves_party_embedding_null_and_saves(db, world, monkeypatch):
-    def broken(text):
-        raise RuntimeError("Embedding model not loaded")
-
-    monkeypatch.setattr(journal_service, "extract_tags", lambda text: [])
-    monkeypatch.setattr(embedding_service, "embed", broken)
+    monkeypatch.setattr(journal_service, "extract_tags", _no_tags)
+    monkeypatch.setattr(embedding_service, "embed", _broken_embed)
     entry = await journal_service.create_journal_entry(
         db, world.owner.id, world.a, "notes", uuid.uuid4().hex, None, narrative="Saved anyway.", gm_context=True)
     tsv_ok, _, _, vec = await _party_state(db, entry.id)
@@ -260,10 +268,7 @@ async def test_index_party_fields_clears_a_stale_vector(db, world, monkeypatch):
     entry = await add_entry(db, world.a, world.owner, "Old words.")
     assert entry.party_embedding is not None
     entry.narrative = "New words entirely."
-    def broken(text):
-        raise RuntimeError("down")
-
-    monkeypatch.setattr(embedding_service, "embed", broken)
+    monkeypatch.setattr(embedding_service, "embed", _broken_embed)
     await index_party_fields(db, entry)
     await db.flush()
     tsv_ok, _, _, vec = await _party_state(db, entry.id)
@@ -292,7 +297,7 @@ async def test_backfill_is_idempotent_and_reports_failures(db, world):
                      .execution_options(synchronize_session=False))
     await db.commit()
 
-    def embed(text):
+    async def embed(text):
         if "EMBED-FAIL" in text:
             raise RuntimeError("model down")
         return fake_vector(text)
@@ -329,7 +334,7 @@ async def test_dedup_key_is_per_campaign_and_author(fake_valkey):
 
 
 async def test_generate_409_only_for_the_same_campaign_and_author(db, world, client, monkeypatch):
-    monkeypatch.setattr(journal_service, "extract_tags", lambda text: [])
+    monkeypatch.setattr(journal_service, "extract_tags", _no_tags)
     other = await _campaign(db, world.owner, "B")
     h = uuid.uuid4().hex
 

@@ -158,15 +158,14 @@ Obligations that come with shipping these packages:
   example by mirroring the source packages next to each published image tag.
   Owner action before the first published image.
 
-Things to clean up later:
-
-- `Dockerfile.prod` keeps `build-essential` (gcc, binutils, make, perl, about
-  100 packages, mostly GPL) in the shipped image, because spaCy is compiled from
-  source on arm64. A multi-stage build that compiles in a builder stage and
-  copies only the venv would remove all of them, along with most of the
-  aggregate list.
-- The `en_core_web_trf` model and the CPU torch wheels stay in the image until
-  E0-Platform.3 and .6 move them to the `ml` sidecar.
+Since E0-Platform.6 the backend image no longer carries `build-essential`,
+`libpq-dev` (gcc, binutils, make, perl and about 100 other packages, mostly
+GPL), the `en_core_web_trf` model or the CPU torch wheels: spaCy and
+sentence-transformers left the backend for the `ml` sidecar, every remaining
+requirement ships a binary wheel on amd64 and arm64, and asyncpg needs no
+libpq. Register rows only the backend used were deleted; shared rows lost
+`backend` (a few GCC runtime and Kerberos libraries stay for the stt image's
+ffmpeg closure).
 
 ## Known gaps (`[[pending]]`)
 
@@ -180,18 +179,18 @@ An entry can be limited to certain images (`images`).
 `cuda-bindings` and `cuda-pathfinder`. These are under the NVIDIA EULA,
 proprietary terms that the commercial and AGPL editions cannot pass on.
 
-- **Shipped images today:** none of them. E0-Platform.2 installs CPU-only
-  `torch==2.15.0+cpu` and `torchvision==0.29.2+cpu` from the PyTorch CPU index
-  in both backend Dockerfiles, and a build step fails if any `nvidia-*` or
-  `cuda-*` package appears. The backend image scan also fails on them: the
-  pending entries do not apply to `backend`.
-- **Interim rule until AD-1 lands:** any image that installs torch for the
+- **Shipped images today:** none of them. The backend image installs no torch
+  at all since E0-Platform.6 (CPU torch from E0-Platform.2 until then), and
+  CI-3 fails on torch in its pip list. The backend image scan also fails on
+  NVIDIA wheels: the pending entries do not apply to `backend`. The `ml` image
+  installs CPU torch from the PyTorch CPU index.
+- **Rule:** any image that installs torch for the
   commercial build must install it from the CPU wheel index (pin
   `torch==<ver>+cpu` from `--index-url https://download.pytorch.org/whl/cpu`
   first, then install the requirements with
   `--extra-index-url https://download.pytorch.org/whl/cpu`). Never install
   plain PyPI torch on x86-64.
-- **After AD-1:** the web and worker images never install torch. `ml` defaults
+- **AD-1 (in place since E0-Platform.6):** the web and worker images never install torch. `ml` defaults
   to CPU wheels, with an optional GPU override image. The pending entries
   (`tracking: "E0-Platform AD-1 / ml CPU image"`) cover that override image
   only (`images = ["ml-gpu"]`).
@@ -235,4 +234,5 @@ the web image installs no OCR package at all. `rapidocr` lists python-bidi
 only under its optional `rtl` extra, which we do not install; the
 `image-licenses (ml)` scan would fail if it came back, since its register row
 and exception are gone. torchvision also left the `ml` image (only EasyOCR
-needed it); the backend image still installs it until E0-Platform.6.
+needed it), and the backend image dropped it with CPU torch in E0-Platform.6,
+so no shipped image installs it.

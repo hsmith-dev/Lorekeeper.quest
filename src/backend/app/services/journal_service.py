@@ -1,3 +1,4 @@
+import logging
 import uuid
 from datetime import date
 from fastapi import HTTPException
@@ -15,6 +16,8 @@ from app.services.retrieval_service import index_party_fields
 from app.services.source_service import retrieve_canon_context
 from app.services.shorthand_service import get_glossary
 from app.services.llm_provider import LLMConfig
+
+logger = logging.getLogger(__name__)
 
 
 async def generate_draft_narrative(
@@ -95,7 +98,13 @@ async def create_journal_entry(
     if narrative is None:
         narrative = await generate_draft_narrative(db, user_id, campaign_id, notes, config, gm_context=gm_context)
 
-    extracted: list[ExtractedTag] = extract_tags(narrative)
+    # Journal save never blocks on AI: with the ml sidecar down the entry
+    # saves with no tags (and NULL vectors, below).
+    try:
+        extracted: list[ExtractedTag] = await extract_tags(narrative)
+    except Exception as exc:  # noqa: BLE001 -- ModelServiceError mostly; never block the save
+        logger.warning("Tag extraction skipped, ml sidecar failed: %s", exc)
+        extracted = []
 
     entry = JournalEntry(
         user_id=user_id,
@@ -131,9 +140,10 @@ async def create_journal_entry(
 
     # Generate and store embedding for RAG retrieval
     try:
-        entry.embedding = embedding_service.embed(f"{notes} {narrative}")
-    except Exception:
-        pass  # embedding failure must not block journal creation
+        entry.embedding = await embedding_service.embed(f"{notes} {narrative}")
+    except Exception as exc:  # noqa: BLE001 -- ModelServiceError mostly; never block the save
+        # Embedding failure must not block journal creation.
+        logger.warning("Journal embedding skipped, ml sidecar failed: %s", exc)
 
     # Party search fields (Narrative only, never the Shorthand), same
     # transaction; an embedding failure leaves party_embedding NULL.

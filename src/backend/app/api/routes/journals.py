@@ -1,9 +1,12 @@
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import and_, case, false, or_, select, func
 from sqlalchemy.orm import selectinload
 import uuid
 
+from app.clients.errors import ModelServiceError
 from app.core.limiter import limiter, user_or_ip
 from app.db.session import get_db
 from app.db.models.user import User
@@ -39,6 +42,8 @@ from app.services import embedding_service
 from app.services.retrieval_service import index_party_fields
 from app.services.llm_provider import LLMConfig
 from app.services import llm_config_service
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -369,9 +374,18 @@ async def reindex_journal_embeddings(
     entries = list(entries_result.scalars().all())
     for entry in entries:
         can_write(ctx, entry)
-        text = f"{entry.shorthand} {entry.narrative}"
-        entry.embedding = embedding_service.embed(text)
-        await index_party_fields(db, entry)
+    # Every vector first, in batches: with the ml sidecar down this is a 503
+    # before any row changes.
+    texts = [f"{e.shorthand} {e.narrative}" for e in entries] + [e.narrative for e in entries]
+    try:
+        vectors = await embedding_service.embed_many(texts)
+    except ModelServiceError as exc:
+        logger.warning("Journal reindex failed, ml sidecar: %s", exc)
+        raise HTTPException(status_code=503, detail="Embedding model unavailable")
+    n = len(entries)
+    for i, entry in enumerate(entries):
+        entry.embedding = vectors[i]
+        await index_party_fields(db, entry, party_vector=vectors[n + i])
     await db.commit()
     return {"reindexed": len(entries)}
 

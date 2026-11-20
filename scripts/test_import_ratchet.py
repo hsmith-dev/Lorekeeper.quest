@@ -1,8 +1,9 @@
 """CI-2 (AD-1): the import-linter contracts exist and their exceptions only shrink.
 
-src/backend/.importlinter holds the layer contracts. Today's direct model
-imports (the four in-process model services) are listed in the `models`
-contract's ignore_imports, each under a `# ratchet: <reason>` line. This test:
+src/backend/.importlinter holds the layer contracts. Since E0-Platform.6 no
+contract has an ignore_imports line (the last two, in-process spaCy and MiniLM,
+became ml-client wrappers). An exception would sit under a
+`# ratchet: <reason>` line. This test:
 
   * fails if an ignore_imports line is not in FROZEN_IGNORES (the list grew),
     or has no `# ratchet:` reason above it;
@@ -34,15 +35,11 @@ import pytest
 REPO = Path(__file__).resolve().parent.parent
 CONFIG = REPO / "src/backend/.importlinter"
 
-# The ceiling. Remove a line here in the PR that removes it from .importlinter
-# (E0-Platform.6 removes the other two; E0-QA.9 removed vision_service ->
-# easyocr when OCR moved to ml /v1/ocr; E0-Platform.5 removed transcription_service
-# -> whisper when transcription moved to the stt sidecar). Never add one.
-FROZEN_IGNORES = {
-    "models": frozenset({
-        "app.services.nlp_service -> spacy",
-        "app.services.embedding_service -> sentence_transformers",
-    }),
+# The ceiling, empty: E0-QA.9 removed vision_service -> easyocr, E0-Platform.5
+# transcription_service -> whisper, and E0-Platform.6 nlp_service -> spacy and
+# embedding_service -> sentence_transformers. Never add one.
+FROZEN_IGNORES: dict[str, frozenset[str]] = {
+    "models": frozenset(),
 }
 
 # Contracts the E0-QA.10 AC names: id -> type.
@@ -184,8 +181,8 @@ HAVE_LINTER = importlib.util.find_spec("importlinter") is not None
 needs_linter = pytest.mark.skipif(not HAVE_LINTER, reason="import-linter not installed (requirements-dev.txt)")
 
 TODAY = {
-    "services/nlp_service.py": "import spacy\n",
-    "services/embedding_service.py": "from sentence_transformers import SentenceTransformer\n",
+    "services/nlp_service.py": "from app.clients import ml\n",
+    "services/embedding_service.py": "from app.clients import ml\n",
     "services/transcription_service.py": "from app.clients import stt\n",
     "services/vision_service.py": "from app.clients import ml\n",
     "services/journal_service.py": ("from app.access import context\nfrom app.db import base\n"
@@ -207,7 +204,8 @@ TODAY = {
 }
 
 
-def lint(tmp_path: Path, extra: dict[str, str | None] | None = None) -> subprocess.CompletedProcess[str]:
+def lint(tmp_path: Path, extra: dict[str, str | None] | None = None,
+         config: str | None = None) -> subprocess.CompletedProcess[str]:
     files = dict(TODAY)
     files.update(extra or {})
     pkg = tmp_path / "app"
@@ -217,7 +215,7 @@ def lint(tmp_path: Path, extra: dict[str, str | None] | None = None) -> subproce
     for rel, body in files.items():
         if body is not None:
             (pkg / rel).write_text(body)
-    (tmp_path / ".importlinter").write_text(CONFIG.read_text())
+    (tmp_path / ".importlinter").write_text(config if config is not None else CONFIG.read_text())
     env = {**os.environ, "PYTHONPATH": str(tmp_path)}
     return subprocess.run(
         [sys.executable, "-c", "import sys; from importlinter.cli import lint_imports_command as c; sys.exit(c())",
@@ -274,7 +272,14 @@ def test_planted_violation_fails(tmp_path, plant, contract, offender):
 
 @needs_linter
 def test_stale_ignore_line_fails(tmp_path):
-    r = lint(tmp_path, {"services/nlp_service.py": "# NER now goes through app.clients.ml\n"})
+    """An ignore_imports line that matches no import fails the run, so a fixed
+    import cannot leave its exception behind (the real config has none, so the
+    test plants one in its copy)."""
+    marker = "unmatched_ignore_imports_alerting = error\n"
+    text = CONFIG.read_text()
+    assert marker in text
+    planted = text.replace(marker, marker + "ignore_imports =\n    app.services.nlp_service -> spacy\n", 1)
+    r = lint(tmp_path, config=planted)
     out = r.stdout + r.stderr
     assert r.returncode != 0, out
     assert "app.services.nlp_service -> spacy" in out

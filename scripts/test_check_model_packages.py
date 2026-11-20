@@ -17,11 +17,9 @@ cmp = importlib.util.module_from_spec(_spec)
 sys.modules[_spec.name] = cmp  # dataclasses resolve annotations through sys.modules
 _spec.loader.exec_module(cmp)
 
-# The ceiling: the baseline may lose entries, never gain them. Shrink this set
-# in the same PR that removes a line from model_packages_baseline.txt.
-FROZEN_BASELINE = frozenset({
-    "torch", "torchvision", "spacy", "en-core-web-trf", "sentence-transformers",
-})
+# The ceiling: the baseline may lose entries, never gain them. Empty since
+# E0-Platform.6 removed the last in-process models from the backend image.
+FROZEN_BASELINE = frozenset()
 
 
 def write(tmp_path: Path, name: str, body: str) -> Path:

@@ -41,15 +41,13 @@ jobs:
 
       # Only runtime requirements: requirements-dev.txt (pytest etc.) is never
       # distributed, so of it only the checker's pyyaml is installed (it is
-      # also a runtime transitive, so it adds nothing unregistered). CPU-only
-      # torch wheels keep the install small; their licence metadata is
-      # identical to the CUDA build, but the CUDA build's NVIDIA wheels are
-      # never seen here (E0-QA.8 scans the real images).
+      # also a runtime transitive, so it adds nothing unregistered). Plain
+      # PyPI, as both backend Dockerfiles install it: no model packages since
+      # E0-Platform.6 (E0-QA.8 scans the real images).
       - name: Install runtime dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install --extra-index-url https://download.pytorch.org/whl/cpu \
-            -r src/backend/requirements.txt
+          pip install -r src/backend/requirements.txt
           pip install -r <(grep -i '^pyyaml' src/backend/requirements-dev.txt)
 
       # Reads installed package metadata directly (PEP 639 License-Expression,
@@ -146,9 +144,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # The backend image (CPU torch, transformers, spaCy en_core_web_trf) is
-      # several GB, and buildx --load holds it twice; the runner's preinstalled
-      # SDKs are not needed here.
+      # The ml and stt images carry CPU torch / ctranslate2 and their models
+      # and run to GB sizes, and buildx --load holds an image twice; the
+      # runner's preinstalled SDKs are not needed here. (The backend image has
+      # no model packages since E0-Platform.6; the size step below records it.)
       - name: Free disk space
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL

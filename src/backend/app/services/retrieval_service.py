@@ -169,7 +169,7 @@ async def _search(
     # ── Dense retriever ────────────────────────────────────────────────────
     vector_hits: dict[uuid.UUID, tuple[JournalEntry, float, int]] = {}
     try:
-        query_embedding = embedding_service.embed(query_text)
+        query_embedding = await embedding_service.embed(query_text)
         distance = vec_col.cosine_distance(query_embedding)
         result = await db.execute(
             select(JournalEntry, distance.label("dist"))
@@ -287,7 +287,9 @@ async def _search(
 
 # ── Party fields ───────────────────────────────────────────────────────────
 
-async def index_party_fields(db: AsyncSession, entry: JournalEntry) -> None:
+async def index_party_fields(
+    db: AsyncSession, entry: JournalEntry, *, party_vector: list[float] | None = None
+) -> None:
     """Set `entry`'s Party search fields from its stored Narrative, in the
     caller's transaction (the caller commits): `party_tsv =
     to_tsvector('english', narrative)` in SQL, and `party_embedding =
@@ -295,7 +297,9 @@ async def index_party_fields(db: AsyncSession, entry: JournalEntry) -> None:
     (clearing a stale vector) and never raises, so it never blocks a save.
 
     Called from every journal write and reindex path (journal_service,
-    journals.reindex). E0-Journal moves it into `reindex_entry`."""
+    journals.reindex). E0-Journal moves it into `reindex_entry`.
+    `party_vector`, when given, is embed(narrative) already computed by the
+    caller (reindex embeds a whole Campaign in one batch first)."""
     await db.flush()  # the row exists and the stored narrative is the current one
     await db.execute(
         update(JournalEntry)
@@ -303,10 +307,13 @@ async def index_party_fields(db: AsyncSession, entry: JournalEntry) -> None:
         .values(party_tsv=func.to_tsvector("english", JournalEntry.narrative))
         .execution_options(synchronize_session=False)
     )
+    if party_vector is not None:
+        entry.party_embedding = party_vector
+        return
     try:
-        vector = embedding_service.embed(entry.narrative)
+        vector = await embedding_service.embed(entry.narrative)
     except Exception:
-        vector = None  # no model / model failure: non-GM vector search skips the row
+        vector = None  # ml sidecar down / failure: non-GM vector search skips the row
     entry.party_embedding = vector
 
 

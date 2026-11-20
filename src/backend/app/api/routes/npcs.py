@@ -1,5 +1,7 @@
+import logging
 import uuid
-from fastapi import APIRouter, Depends, Request
+
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import or_
 from sqlalchemy.orm import selectinload
@@ -10,6 +12,7 @@ from app.access import (
     require_campaign_for,
     scoped_get, scoped_select,
 )
+from app.clients.errors import ModelServiceError
 from app.db.session import get_db
 from app.db.models.user import User
 from app.db.models.npc import NpcEntry
@@ -24,6 +27,8 @@ from app.services.chat_service import generate_npc_bio
 from app.services.llm_provider import LLMConfig
 from app.services import llm_config_service
 from app.db.models.tag import TagType
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -188,7 +193,7 @@ async def extract_npcs_from_journals(
     ctx: CampaignContext = Depends(require_campaign("gm")),
     db: AsyncSession = Depends(get_db),
 ) -> NpcExtractResponse:
-    """Run spaCy NER over recent journal entries (`campaign_id` query
+    """Run NER (the ml sidecar's spaCy) over recent journal entries (`campaign_id` query
     parameter) and return PERSON entity names. GM only: it reads Shorthand
     and the NPC list (always_gm)."""
     entries_result = await db.execute(
@@ -201,7 +206,11 @@ async def extract_npcs_from_journals(
         return NpcExtractResponse(suggestions=[])
 
     combined = " ".join(f"{r.shorthand} {r.narrative}" for r in rows)
-    tags = extract_tags(combined)
+    try:
+        tags = await extract_tags(combined)
+    except ModelServiceError as exc:
+        logger.warning("NPC extract failed, ml sidecar: %s", exc)
+        raise HTTPException(status_code=503, detail="NER model unavailable")
     names = [t.name for t in tags if t.tag_type == TagType.character]
 
     # Exclude names already in the wiki for this campaign

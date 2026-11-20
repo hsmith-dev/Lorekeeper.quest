@@ -7,6 +7,7 @@ import {
   useAdminModels,
   useAdminLogs,
   useAdminJobStats,
+  useAdminSidecars,
   useAdminUsers,
   useSuspendUser,
   useUnsuspendUser,
@@ -29,6 +30,8 @@ import type {
   PromoCodeAdmin,
   JobQueueName,
   JobStatusName,
+  SidecarModel,
+  SidecarModelState,
 } from "../types";
 
 function formatDate(iso: string) {
@@ -695,6 +698,121 @@ function JobCountsCard() {
   );
 }
 
+const MODEL_STATE: Record<SidecarModelState, { label: string; tone: string }> = {
+  loaded: { label: "Loaded", tone: "text-success" },
+  loading: { label: "Loading", tone: "text-warning" },
+  not_loaded: { label: "Not loaded", tone: "text-muted-foreground" },
+  failed: { label: "Failed", tone: "text-danger" },
+};
+
+function formatMb(bytes: number | null) {
+  return bytes == null ? "—" : `${Math.round(bytes / 1_048_576).toLocaleString()} MB`;
+}
+
+function SidecarPanel({
+  title,
+  reachable,
+  error,
+  models,
+  facts,
+}: {
+  title: string;
+  reachable: boolean;
+  error: string | null;
+  models: SidecarModel[];
+  facts: { label: string; value: string }[];
+}) {
+  return (
+    <div className="rounded-md border border-border p-3 flex flex-col gap-2 min-w-0">
+      <div className="flex items-center justify-between gap-2">
+        <p className="font-medium text-card-foreground">{title}</p>
+        <span
+          className={`text-xs rounded-full border px-2 py-0.5 ${
+            reachable ? "bg-success/14 border-success/40 text-success" : "bg-danger/14 border-danger/40 text-danger"
+          }`}
+        >
+          {reachable ? "Reachable" : "Unreachable"}
+        </span>
+      </div>
+      {!reachable && error && <p className="text-xs text-danger break-words">{error}</p>}
+      {reachable && (
+        <>
+          <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-xs tabular-nums">
+            {facts.map((f) => (
+              <div key={f.label} className="contents">
+                <dt className="text-muted-foreground">{f.label}</dt>
+                <dd className="text-card-foreground">{f.value}</dd>
+              </div>
+            ))}
+          </dl>
+          {models.length > 0 && (
+            <ul className="text-xs flex flex-col gap-0.5">
+              {models.map((m) => {
+                const st = MODEL_STATE[m.state] ?? { label: m.state, tone: "text-muted-foreground" };
+                return (
+                  <li key={m.name} className="flex items-center justify-between gap-2 border-t border-border pt-1">
+                    <span className="text-card-foreground truncate" title={m.name}>
+                      {m.name} <span className="text-muted-foreground">({m.kind}{m.lazy ? ", lazy" : ""})</span>
+                    </span>
+                    <span className={`shrink-0 ${st.tone}`}>{st.label}</span>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function SidecarStatusCard() {
+  const { data, isLoading, isError } = useAdminSidecars();
+  return (
+    <div className="rounded-lg border border-border bg-card p-5 flex flex-col gap-3">
+      <div>
+        <p className="font-semibold text-card-foreground">Model sidecars</p>
+        <p className="text-sm text-muted-foreground">
+          Embeddings, tagging and OCR run in the ml sidecar; speech-to-text in stt. The web and worker
+          processes load no models. Refreshes every 15 seconds.
+        </p>
+      </div>
+      {isLoading && <p className="text-sm text-muted-foreground">Loading sidecar status…</p>}
+      {isError && <p className="text-sm text-danger">Could not load sidecar status.</p>}
+      {data && (
+        <div className="grid gap-3 sm:grid-cols-2">
+          <SidecarPanel
+            title="ml"
+            reachable={data.ml.reachable}
+            error={data.ml.error}
+            models={data.ml.models}
+            facts={[
+              { label: "Memory", value: formatMb(data.ml.rss_bytes) },
+              {
+                label: "Lazy budget",
+                value:
+                  data.ml.resident_budget_mb == null
+                    ? "—"
+                    : `${data.ml.lazy_resident_mb ?? 0} / ${data.ml.resident_budget_mb} MB`,
+              },
+            ]}
+          />
+          <SidecarPanel
+            title="stt"
+            reachable={data.stt.reachable}
+            error={data.stt.error}
+            models={data.stt.models}
+            facts={[
+              { label: "Memory", value: formatMb(data.stt.rss_bytes) },
+              { label: "Device", value: [data.stt.device, data.stt.compute_type].filter(Boolean).join(" · ") || "—" },
+            ]}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
 type InstallProgress = { variant: "finetuned" | "base"; status: string; pct: number | null; detail: string };
 
 function SystemTab() {
@@ -864,6 +982,9 @@ function SystemTab() {
 
       {/* ── Background jobs ── */}
       <JobCountsCard />
+
+      {/* ── Model sidecars ── */}
+      <SidecarStatusCard />
 
       {/* ── Troubleshooting ── */}
       <div className="rounded-lg border border-border bg-card p-5 flex flex-col gap-3">

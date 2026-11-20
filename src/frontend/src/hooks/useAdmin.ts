@@ -158,6 +158,14 @@ export function useAdminJobStats() {
   });
 }
 
+export function useAdminSidecars() {
+  return useQuery<import("../types").AdminSidecars>({
+    queryKey: ["admin-sidecars"],
+    queryFn: async () => (await api.getAdminSidecars()).data,
+    refetchInterval: 15_000,
+  });
+}
+
 export function useUpdateAdminConfig() {
   const qc = useQueryClient();
   return useMutation({

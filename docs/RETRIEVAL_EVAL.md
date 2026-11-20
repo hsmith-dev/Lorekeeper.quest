@@ -50,7 +50,7 @@ margin over vector-only is largest (+4 queries, all proper-noun rescues).
 ## The retrieval architecture these numbers validate
 
 1. **Dense retriever**: pgvector cosine distance over sentence-transformer
-   embeddings, top-10 pool.
+   embeddings (MiniLM, served by the `ml` sidecar), top-10 pool.
 2. **Lexical retriever**: per-content-word full-text matching against the
    GIN-indexed tsv column, top-10 pool, ranked by matched-word count.
 3. **Reciprocal Rank Fusion** (K=60) merges the two rankings.
@@ -105,9 +105,13 @@ docker compose -f docker-compose.prod.yml exec backend \
 docker compose -f docker-compose.prod.yml cp backend:/tmp/RETRIEVAL_EVAL.md docs/RETRIEVAL_EVAL.md
 ```
 
-From a checkout with a local Postgres, run the same two scripts from
-`src/backend/` without the `docker compose` prefix (`--seed` defaults to
-`seeds/demo_campaign.json`, `--out docs/RETRIEVAL_EVAL.md` updates this file).
-Without a cached embedding model, `--embeddings auto` still runs: vector-only
-scores 0 and hybrid is lexical-only, so only `require` reproduces the numbers
-above.
+Embeddings come from the `ml` sidecar at `ML_URL` (default `http://ml:8000`;
+the backend loads no model since E0-Platform.6), so `ml` must be up. From a
+checkout with a local Postgres, run the same two scripts from `src/backend/`
+without the `docker compose` prefix, with `ML_URL` pointing at a running `ml`
+(`--seed` defaults to `seeds/demo_campaign.json`, `--out docs/RETRIEVAL_EVAL.md`
+updates this file). `--embeddings require` fails with a clear error when `ml`
+is unreachable. `--embeddings auto` warns and still runs without it:
+vector-only scores 0 and hybrid is lexical-only, so only `require` reproduces
+the numbers above. The published results still await a re-run on the desktop
+with the 12-entry seed and the sidecar.
