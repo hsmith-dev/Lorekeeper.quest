@@ -168,6 +168,21 @@ jobs:
           cache-from: type=gha,scope=image-${{ matrix.image }}
           cache-to: type=gha,mode=max,scope=image-${{ matrix.image }}
 
+      # Image size, for the record (E0-Platform.6 measured the backend image
+      # shrinking when the model packages left it).
+      - name: Image size
+        run: |
+          bytes=$(docker image inspect --format '{{.Size}}' "lorekeeper-${{ matrix.image }}:licence-scan")
+          echo "lorekeeper-${{ matrix.image }}: $bytes bytes ($(numfmt --to=iec-i --suffix=B "$bytes"))" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # CI-3 (AD-1) on the built image: its real pip set, transitive packages
+      # included, holds no model package (scripts/check_model_packages.py).
+      - name: No model packages installed (backend)
+        if: ${{ matrix.image == 'backend' }}
+        run: |
+          docker run --rm --network none --entrypoint pip "lorekeeper-backend:licence-scan" list --format=freeze \
+            | python3 scripts/check_model_packages.py --installed -
+
       - uses: actions/setup-python@v5
         if: ${{ !matrix.python }}
         with:

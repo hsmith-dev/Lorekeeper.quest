@@ -148,3 +148,36 @@ def test_pip_install_forms():
     assert cmp.pip_install_packages("python -m pip install --upgrade pip && pip3 install 'torch==2' easyocr") == ["pip", "torch", "easyocr"]
     assert cmp.pip_install_packages("/usr/local/bin/pip install -r req.txt --target=/x spacy") == ["spacy"]
     assert cmp.pip_install_packages("pip install ./wheels/foo.whl https://x/y.whl") == []
+
+
+# ---- --installed: the built image's pip list --------------------------------
+
+def test_installed_list_clean():
+    assert cmp.scan_installed("fastapi==0.115.0\nnumpy==1.26.4\npgvector==0.4.2\n") == []
+
+
+def test_installed_list_catches_transitive_model_packages():
+    errors = cmp.scan_installed("fastapi==0.115.0\ntorch==2.15.0+cpu\nen-core-web-trf @ file:///x.whl\n"
+                                "Transformers==5.22.1\n", "img")
+    assert [e.split(":")[1] for e in errors] == ["2", "3", "4"]
+    assert "'torch'" in errors[0] and "'en-core-web-trf'" in errors[1] and "'transformers'" in errors[2]
+
+
+def test_installed_ignores_the_baseline(tmp_path, capsys):
+    req = write(tmp_path, "requirements.txt", "spacy==3.7.6\n")
+    dock = write(tmp_path, "Dockerfile", "")
+    base = write(tmp_path, "baseline.txt", "spacy: until E0-Platform.6\n")
+    frozen = write(tmp_path, "freeze.txt", "spacy==3.7.6\n")
+    rc = cmp.main(["--requirements", str(req), "--dockerfile", str(dock), "--baseline", str(base),
+                   "--installed", str(frozen)])
+    assert rc == 1 and "'spacy' is installed" in capsys.readouterr().err
+
+
+def test_installed_empty_list_fails(tmp_path, capsys):
+    req = write(tmp_path, "requirements.txt", "")
+    dock = write(tmp_path, "Dockerfile", "")
+    base = write(tmp_path, "baseline.txt", "")
+    empty = write(tmp_path, "freeze.txt", "\n")
+    rc = cmp.main(["--requirements", str(req), "--dockerfile", str(dock), "--baseline", str(base),
+                   "--installed", str(empty)])
+    assert rc == 1 and "empty package list" in capsys.readouterr().err
