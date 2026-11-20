@@ -124,9 +124,11 @@ async def join_campaign(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> JoinCampaignResponse:
-    """Redeem a 'collaborate' share link. Needs a signed-in account (never
-    anonymous). E0-Access.6: a link granting Player (or a legacy link with no
-    Role, which grants Player) may be redeemed without a paid or granted
+    """Redeem a 'collaborate' share link: the new Member gets the link's
+    Role (E0-Access.12). An existing Member who redeems a link keeps their
+    Role (`already_member: true`). Needs a signed-in account (never
+    anonymous). E0-Access.6: a link granting Player (or a legacy link with
+    no Role, which grants Player) may be redeemed without a paid or granted
     account, since a Player only uses Party reads; a link granting any other
     Role (co_gm) still needs one (`require_active_account`, the 402
     account-gate). A revoked or expired link is the same 404 as an unknown
@@ -149,6 +151,7 @@ async def join_campaign(
     if existing.scalar_one_or_none():
         return JoinCampaignResponse(campaign_id=campaign.id, campaign_name=campaign.name, already_member=True)
 
-    db.add(CampaignMember(campaign_id=campaign.id, user_id=user.id))
+    # E0-Access.12: the Member gets the link's Role (a legacy link with none grants Player).
+    db.add(CampaignMember(campaign_id=campaign.id, user_id=user.id, role=share.role or CampaignRole.PLAYER))
     await db.commit()
     return JoinCampaignResponse(campaign_id=campaign.id, campaign_name=campaign.name, already_member=False)

@@ -25,7 +25,10 @@ Rules, in order:
         `character_sheets` row the Player created (`created_by_user_id =
         ctx.user_id`) may be updated or deleted. A create is still refused
         (a transient row never matches), templates stay GM-only, and another
-        user's sheet is the one 404. `SHEET_AUTHOR_STOPGAP = False` removes it.
+        user's sheet is the one 404. `SHEET_AUTHOR_STOPGAP = False` removes it;
+      - an existing (persisted) `jobs` row they started (`created_by =
+        ctx.user_id`): cancel and retry (E0-Jobs.7, app/jobs/control.py).
+        A Job is only ever created through `enqueue`, never through this gate.
 
 Every refusal is the one `not_found()` (never 403), so a write the caller may
 not make answers exactly like a missing row.
@@ -62,6 +65,7 @@ _UNSCOPED = object()
 _CAMPAIGNS = "campaigns"
 _JOURNAL_ENTRIES = "journal_entries"
 _CHARACTER_SHEETS = "character_sheets"
+_JOBS = "jobs"
 # Unscoped tables whose rows follow a parent the route already gated.
 _PARENT_SCOPED = frozenset({"journal_tags"})
 # STOPGAP until E7 (owner decision 2026-11-01): Players may update / delete
@@ -101,6 +105,9 @@ def _player_may_write(ctx: CampaignContext, obj: Any) -> bool:
         if SHEET_AUTHOR_STOPGAP and _persisted(obj):
             return getattr(obj, "created_by_user_id", None) == ctx.user_id
         return False
+    if table == _JOBS:
+        # E0-Jobs.7: the starter may cancel or retry their own Job.
+        return _persisted(obj) and getattr(obj, "created_by", None) == ctx.user_id
     return False
 
 

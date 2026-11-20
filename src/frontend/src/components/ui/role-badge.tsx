@@ -1,6 +1,7 @@
 import { cn } from "@/lib/utils"
 
-// Campaign role pill beside the campaign name (CampaignSwitcher, E0-UX.7).
+// Campaign role pill beside the campaign name (CampaignSwitcher, E0-UX.7)
+// and on Sharing › Members rows (E0-Access.12).
 // Purely informational: permissions are enforced server-side.
 
 export type CampaignRole = "gm" | "co_gm" | "player"
@@ -13,10 +14,12 @@ const ROLE_LABEL: Record<CampaignRole, string> = {
 
 export interface RoleBadgeProps {
   role: CampaignRole
+  /** Overrides the role's label (e.g. "Owner" on the Owner's Members row). */
+  label?: string
   className?: string
 }
 
-function RoleBadge({ role, className }: RoleBadgeProps) {
+function RoleBadge({ role, label, className }: RoleBadgeProps) {
   return (
     <span
       className={cn(
@@ -24,7 +27,7 @@ function RoleBadge({ role, className }: RoleBadgeProps) {
         className
       )}
     >
-      {ROLE_LABEL[role]}
+      {label ?? ROLE_LABEL[role]}
     </span>
   )
 }

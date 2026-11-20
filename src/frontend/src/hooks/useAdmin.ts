@@ -150,6 +150,14 @@ export function useAdminLogs(enabled: boolean) {
   });
 }
 
+export function useAdminJobStats() {
+  return useQuery<import("../types").AdminJobStats>({
+    queryKey: ["admin-job-stats"],
+    queryFn: async () => (await api.getAdminJobStats()).data,
+    refetchInterval: 15_000,
+  });
+}
+
 export function useUpdateAdminConfig() {
   const qc = useQueryClient();
   return useMutation({
