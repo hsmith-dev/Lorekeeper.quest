@@ -1,3 +1,5 @@
+import type { GrantRole } from "./members";
+
 export type Genre = "fantasy" | "scifi" | "horror" | "videogame" | "other";
 
 export interface UserProfile {
@@ -59,8 +61,19 @@ export interface ShareToken {
   id: string;
   token: string;
   kind: ShareKind;
+  /** The Role a collaborate link grants; null for a read-only link. */
+  role: GrantRole | null;
+  expires_at: string | null;
   revoked: boolean;
   created_at: string;
+}
+
+/** `POST /api/campaigns/{id}/share` body. A collaborate link's `role`
+ *  defaults to player; a read-only link takes none. */
+export interface ShareTokenCreate {
+  kind: ShareKind;
+  role?: GrantRole;
+  expires_at?: string | null;
 }
 
 export interface PublicCampaign {
@@ -132,13 +145,7 @@ export interface JoinCampaignResult {
   already_member: boolean;
 }
 
-export interface CampaignMember {
-  id: string;
-  user_id: string;
-  display_name: string;
-  email: string;
-  created_at: string;
-}
+export type { CampaignMember } from "./members";
 
 export interface TagCategoryRef {
   id: string;
@@ -511,6 +518,16 @@ export interface ModelStatus {
 export interface AdminLogs {
   source: "file" | "memory";
   lines: string[];
+}
+
+// GET /api/admin/jobs/stats (E0-Jobs.7): Job counts across every Campaign.
+export type JobStatusName = "queued" | "running" | "done" | "failed" | "cancelled";
+export type JobQueueName = "interactive" | "onsave" | "backfill";
+
+export interface AdminJobStats {
+  total: number;
+  by_status: Record<JobStatusName, number>;
+  by_queue: Record<JobQueueName, Record<JobStatusName, number>>;
 }
 
 export interface RetrievalCandidate {

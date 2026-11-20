@@ -1,3 +1,4 @@
+import logging
 import re
 from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File
 from pydantic import BaseModel
@@ -7,7 +8,9 @@ from app.clients.errors import ModelServiceError, ModelServiceUnavailable
 from app.core.limiter import limiter, user_or_ip
 from app.db.models.user import User
 from app.services.vision_service import extract_notes_from_image
-from app.services.transcription_service import transcribe_audio
+from app.services.transcription_service import transcribe
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -15,6 +18,7 @@ _ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
 _ALLOWED_AUDIO_TYPES = {"audio/webm", "audio/ogg", "audio/wav", "audio/mp4", "audio/mpeg", "audio/x-m4a"}
 _MAX_IMAGE_BYTES = 10 * 1024 * 1024   # 10 MB
 _MAX_AUDIO_BYTES = 25 * 1024 * 1024   # 25 MB
+_UNTRANSCRIBABLE = "Could not transcribe audio. Try speaking more clearly."
 
 # Discord timestamp/header patterns to strip
 _DISCORD_HEADER = re.compile(
@@ -88,12 +92,22 @@ async def ingest_voice(
     contents = await file.read()
     if len(contents) > _MAX_AUDIO_BYTES:
         raise HTTPException(status_code=413, detail="Audio exceeds 25 MB limit.")
-    # Determine file extension from content type
-    ext_map = {"ogg": ".ogg", "wav": ".wav", "mp4": ".mp4", "mpeg": ".mp3", "m4a": ".m4a"}
-    ext = next((v for k, v in ext_map.items() if k in content_type), ".webm")
-    text = await transcribe_audio(contents, ext)
+    if not contents:
+        raise HTTPException(status_code=422, detail=_UNTRANSCRIBABLE)
+    # The stt sidecar sniffs the container itself, so no extension is passed.
+    try:
+        text = await transcribe(contents)
+    except ModelServiceError as exc:
+        # Never log the audio or the sidecar's echo of it: type and status only.
+        logger.warning("Voice transcription failed for user %s: %s (status %s)",
+                       user.id, type(exc).__name__, exc.status_code)
+        rejected = (not isinstance(exc, ModelServiceUnavailable)
+                    and exc.status_code is not None and 400 <= exc.status_code < 500)
+        if rejected:  # the sidecar could not read this audio
+            raise HTTPException(status_code=422, detail=_UNTRANSCRIBABLE) from exc
+        raise HTTPException(status_code=503, detail="Speech model unavailable") from exc
     if not text:
-        raise HTTPException(status_code=422, detail="Could not transcribe audio. Try speaking more clearly.")
+        raise HTTPException(status_code=422, detail=_UNTRANSCRIBABLE)
     return IngestVoiceResponse(transcribed_text=text)
 
 

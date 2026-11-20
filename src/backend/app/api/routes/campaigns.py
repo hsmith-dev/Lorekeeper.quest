@@ -19,13 +19,16 @@ from app.schemas.campaign import (
     CampaignConceptRequest, CampaignConceptResponse,
 )
 from app.db.models.campaign_member import CampaignMember
-from app.schemas.share import ShareTokenResponse, ShareTokenCreate, CampaignMemberResponse
+from app.domain.enums import CampaignRole
+from app.schemas.share import ShareTokenResponse, ShareTokenCreate
 from app.schemas.tag_category import TagCategoryCreate, TagCategoryResponse
 from app.access import (
-    CampaignContext, campaign_grants_removed, can_write, check_create, project, project_all, remove_member,
-    require_campaign, revoke_share_token as revoke_grant, role_map_for_request, scoped_get, scoped_select,
+    GM, MEMBER_VIEW, CampaignContext, audience_ctx, campaign_grants_removed, can_write, check_create, project,
+    project_all, remove_member, require_campaign, revoke_share_token as revoke_grant, role_map_for_request,
+    scoped_get, scoped_select,
 )
 from app.api.deps import PARTY_READ, get_current_user, get_user_llm_config
+from app.core.limiter import limiter, user_or_ip
 from app.services.export_service import build_campaign_markdown, build_campaign_pdf
 from app.services.chat_service import generate_campaign_concept
 from app.services.llm_provider import LLMConfig
@@ -35,9 +38,13 @@ router = APIRouter()
 
 # E0-Access.5: every Campaign route checks the caller's Role in this Campaign
 # through require_campaign. Management (PATCH / DELETE the Campaign, Share
-# Links, members) is Owner-only; authoring and GM reads (export, analytics,
-# tag-category writes) need `gm` (Owner or Co-GM); Party reads need `player`.
-# Every denial is the one 404 {"detail": "Not found"}. E0-Access.6: every
+# Links, members) is Owner-only; authoring (tag-category writes) needs `gm`
+# (Owner or Co-GM); Party reads need `player`. Export and analytics
+# (E0-Access.13) need `player` and cover every Member's entries, scoped by
+# Role: a GM sees all of them; a Player's analytics cover what their Audience
+# covers (Party plus own Private), their export only Party narratives.
+# Every denial is the one 404 {"detail": "Not found"}. The Members list,
+# Role change and removal live in members.py (E0-Access.12). E0-Access.6: every
 # write calls can_write on the row it writes (leave removes the caller's own
 # grant, not a Campaign row, and needs only `player`).
 #
@@ -142,23 +149,50 @@ async def update_campaign(
     return campaign
 
 
+# Per-user rate limits (user_or_ip, E0-Platform.8): any Member may now export
+# or read analytics, and a PDF is a CPU-bound WeasyPrint render. PDF and
+# Markdown have separate buckets. A denied caller (the one 404) never reaches
+# the limiter, so a 429 never tells a hidden Campaign from a missing one.
+EXPORT_PDF_RATE = "5/minute"
+EXPORT_MARKDOWN_RATE = "10/minute"
+ANALYTICS_RATE = "30/minute"
+
+
+def _export_key(request: Request) -> str:
+    fmt = "markdown" if request.query_params.get("format") == "markdown" else "pdf"
+    return f"{user_or_ip(request)}|export:{fmt}"
+
+
+def _export_rate(key: str) -> str:
+    return EXPORT_MARKDOWN_RATE if key.endswith("|export:markdown") else EXPORT_PDF_RATE
+
+
 @router.get("/{campaign_id}/export")
+@limiter.limit(_export_rate, key_func=_export_key)
 async def export_campaign(
+    request: Request,
     format: str = Query("pdf", pattern="^(pdf|markdown)$"),
-    ctx: CampaignContext = Depends(_gm),
+    ctx: CampaignContext = Depends(_player),
     db: AsyncSession = Depends(get_db),
 ) -> Response:
-    """The caller's own entries of the Campaign as PDF or Markdown. GM only
-    (Owner or Co-GM); E0-Access.13 widens it to every Member's entries,
-    scoped by Role."""
-    campaign = await scoped_get(db, Campaign, ctx, ctx.campaign_id)
+    """The Campaign's entries as PDF or Markdown (E0-Access.13). A GM gets
+    every Member's entries with Shorthand; a Player (or a GM previewing as
+    one) only the Party narratives, read through the member view
+    (`audience_ctx(MEMBER_VIEW)`), so not even their own Private entries and
+    no Shorthand. The export is built only from the projections, the one
+    place GM fields are stripped."""
+    export_ctx = ctx if ctx.role == GM else audience_ctx(ctx.campaign_id, MEMBER_VIEW, by=ctx)
+    campaign = await scoped_get(db, Campaign, export_ctx, export_ctx.campaign_id)
 
+    # project() reads entry.tags and each tag's custom_category: load them
+    # here, a lazy load on the AsyncSession raises MissingGreenlet.
     entries_result = await db.execute(
-        scoped_select(JournalEntry, ctx)
-        .where(JournalEntry.user_id == ctx.user_id)
+        scoped_select(JournalEntry, export_ctx)
+        .options(selectinload(JournalEntry.tags).selectinload(Tag.custom_category))
         .order_by(JournalEntry.session_date.asc().nullslast(), JournalEntry.created_at.asc(), JournalEntry.id)
     )
-    entries = list(entries_result.scalars().all())
+    entries = await project_all(db, entries_result.scalars().all(), export_ctx)
+    projected = project(campaign, export_ctx)
 
     # ASCII only: HTTP headers are Latin-1, so a name like "Ōkami" made the response a 500.
     safe_name = "".join(
@@ -166,7 +200,7 @@ async def export_campaign(
     ).strip().replace(" ", "_") or "campaign"
 
     if format == "markdown":
-        content = build_campaign_markdown(campaign, entries)
+        content = build_campaign_markdown(projected, entries)
         return Response(
             content=content,
             media_type="text/markdown",
@@ -174,7 +208,7 @@ async def export_campaign(
         )
 
     # WeasyPrint layout is CPU-bound: keep it off the event loop.
-    content = await run_in_threadpool(build_campaign_pdf, campaign, entries)
+    content = await run_in_threadpool(build_campaign_pdf, projected, entries)
     return Response(
         content=content,
         media_type="application/pdf",
@@ -183,23 +217,27 @@ async def export_campaign(
 
 
 @router.get("/{campaign_id}/analytics", response_model=CampaignAnalytics)
+@limiter.limit(ANALYTICS_RATE, key_func=user_or_ip)
 async def get_campaign_analytics(
-    ctx: CampaignContext = Depends(_gm),
+    request: Request,
+    ctx: CampaignContext = Depends(_player),
     db: AsyncSession = Depends(get_db),
 ) -> CampaignAnalytics:
-    """Stats over the caller's own entries of the Campaign. GM only (Owner or
-    Co-GM); E0-Access.13 widens it to every Member, scoped by Role."""
-    own = scoped_select(JournalEntry, ctx).where(JournalEntry.user_id == ctx.user_id)
+    """Stats over every entry of the Campaign the caller may see
+    (E0-Access.13): every Member's entries for a GM; for a Player, the
+    entries their Audience covers (Party plus their own Private ones). A GM
+    previewing as a Player gets the member view (Party entries only)."""
+    visible = scoped_select(JournalEntry, ctx)
 
     totals_result = await db.execute(
-        own.with_only_columns(func.count(JournalEntry.id), func.avg(func.length(JournalEntry.narrative)))
+        visible.with_only_columns(func.count(JournalEntry.id), func.avg(func.length(JournalEntry.narrative)))
     )
     total_entries, avg_length = totals_result.one()
 
     effective_date = func.coalesce(JournalEntry.session_date, cast(JournalEntry.created_at, Date))
     week_start = func.date_trunc("week", effective_date)
     weekly_result = await db.execute(
-        own.with_only_columns(week_start, func.count(JournalEntry.id))
+        visible.with_only_columns(week_start, func.count(JournalEntry.id))
         .group_by(week_start)
         .order_by(week_start)
     )
@@ -207,14 +245,15 @@ async def get_campaign_analytics(
         WeeklyCount(week_start=w.date().isoformat(), count=c) for w, c in weekly_result.all()
     ]
 
-    own_ids = own.with_only_columns(JournalEntry.id)
+    visible_ids = visible.with_only_columns(JournalEntry.id)
 
     async def top_tags(tag_type: TagType, limit: int = 5) -> list[TagCount]:
-        # Links visible to ctx, on the caller's own entries.
+        # Links visible to ctx (a Shorthand-derived link is GM-only), on
+        # entries visible to ctx.
         tags_result = await db.execute(
             scoped_select(JournalTag, ctx)
             .join(Tag, Tag.id == JournalTag.tag_id)
-            .where(JournalTag.journal_id.in_(own_ids), Tag.tag_type == tag_type)
+            .where(JournalTag.journal_id.in_(visible_ids), Tag.tag_type == tag_type)
             .with_only_columns(Tag.name, func.count(JournalTag.journal_id))
             .group_by(Tag.id, Tag.name)
             .order_by(func.count(JournalTag.journal_id).desc(), Tag.name)
@@ -254,6 +293,10 @@ async def create_share_token(
         created_by_user_id=ctx.user_id,
         token=secrets.token_urlsafe(24),
         kind=body.kind,
+        # E0-Access.12: a collaborate link grants its Role (the schema
+        # defaults it to player); a read-only link grants none.
+        role=CampaignRole(body.role) if body.role else None,
+        expires_at=body.expires_at,
     )
     can_write(ctx, token)
     db.add(token)
@@ -275,62 +318,12 @@ async def revoke_share_token(
     await db.commit()
 
 
-@router.get("/{campaign_id}/members", response_model=list[CampaignMemberResponse])
-async def list_campaign_members(
-    ctx: CampaignContext = Depends(_owner),
-    db: AsyncSession = Depends(get_db),
-) -> list[CampaignMemberResponse]:
-    result = await db.execute(
-        scoped_select(CampaignMember, ctx)
-        .add_columns(User)
-        .join(User, CampaignMember.user_id == User.id)
-        .order_by(CampaignMember.created_at, CampaignMember.id)
-    )
-    return [
-        CampaignMemberResponse(
-            id=member.id, user_id=member.user_id,
-            display_name=member_user.display_name, email=member_user.email,
-            created_at=member.created_at,
-        )
-        for member, member_user in result.all()
-    ]
-
-
-@router.delete("/{campaign_id}/members/{member_id}", status_code=204)
-async def remove_campaign_member(
-    member_id: uuid.UUID,
-    delete_entries: bool = Query(
-        False,
-        description=(
-            "False (default): revoke this member's access; their journal "
-            "entries stay in the campaign, visible to the DM and remaining "
-            "members. True: also permanently delete every entry they wrote "
-            "in this campaign."
-        ),
-    ),
-    ctx: CampaignContext = Depends(_owner),
-    db: AsyncSession = Depends(get_db),
-) -> None:
-    member = await scoped_get(db, CampaignMember, ctx, member_id)
-    can_write(ctx, member)
-    if delete_entries:
-        entries_result = await db.execute(
-            scoped_select(JournalEntry, ctx).where(JournalEntry.user_id == member.user_id)
-        )
-        for entry in entries_result.scalars().all():
-            can_write(ctx, entry)
-            await db.delete(entry)
-    # E0-Access.10: the grant is gone; open streams close on the publish.
-    await remove_member(db, member)
-    await db.commit()
-
-
 @router.post("/{campaign_id}/leave", status_code=204)
 async def leave_campaign(
     ctx: CampaignContext = Depends(_player),
     db: AsyncSession = Depends(get_db),
 ) -> None:
-    """Self-service counterpart to remove_campaign_member above — a
+    """Self-service counterpart to remove_campaign_member (members.py) — a
     collaborator removing themselves rather than the owner removing them.
     Always keeps the leaving member's existing entries (same default as an
     owner-initiated removal); there's no self-service "and delete my entries

@@ -6,6 +6,7 @@ import { useFeedbackList, useFeedbackContext } from "../hooks/useFeedback";
 import {
   useAdminModels,
   useAdminLogs,
+  useAdminJobStats,
   useAdminUsers,
   useSuspendUser,
   useUnsuspendUser,
@@ -21,7 +22,14 @@ import {
   useAdminConfig,
   useUpdateAdminConfig,
 } from "../hooks/useAdmin";
-import type { FeedbackAdmin, FeedbackCategory, AdminUser, PromoCodeAdmin } from "../types";
+import type {
+  FeedbackAdmin,
+  FeedbackCategory,
+  AdminUser,
+  PromoCodeAdmin,
+  JobQueueName,
+  JobStatusName,
+} from "../types";
 
 function formatDate(iso: string) {
   return new Date(iso).toLocaleString(undefined, { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" });
@@ -610,6 +618,83 @@ function formatGB(bytes: number) {
   return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
 }
 
+// Background Jobs (E0-Jobs.7): counts by status and queue across every Campaign.
+const JOB_STATUSES: { key: JobStatusName; label: string; tone: string }[] = [
+  { key: "queued", label: "Queued", tone: "text-card-foreground" },
+  { key: "running", label: "Running", tone: "text-card-foreground" },
+  { key: "done", label: "Done", tone: "text-success" },
+  { key: "failed", label: "Failed", tone: "text-danger" },
+  { key: "cancelled", label: "Cancelled", tone: "text-muted-foreground" },
+];
+const JOB_QUEUES: { key: JobQueueName; label: string }[] = [
+  { key: "interactive", label: "Interactive" },
+  { key: "onsave", label: "On save" },
+  { key: "backfill", label: "Backfill" },
+];
+
+function JobCountsCard() {
+  const { data, isLoading, isError } = useAdminJobStats();
+  return (
+    <div className="rounded-lg border border-border bg-card p-5 flex flex-col gap-3">
+      <div>
+        <p className="font-semibold text-card-foreground">Background jobs</p>
+        <p className="text-sm text-muted-foreground">
+          Every Job on this server, by status and queue. Interactive work runs first, then on-save Jobs,
+          then backfills. Refreshes every 15 seconds.
+        </p>
+      </div>
+      {isLoading && <p className="text-sm text-muted-foreground">Loading job counts…</p>}
+      {isError && <p className="text-sm text-danger">Could not load job counts.</p>}
+      {data && (
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm tabular-nums">
+            <thead>
+              <tr className="text-left text-xs text-muted-foreground">
+                <th scope="col" className="py-1 pr-3 font-medium">Queue</th>
+                {JOB_STATUSES.map((s) => (
+                  <th key={s.key} scope="col" className="py-1 px-2 font-medium text-right">
+                    {s.label}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {JOB_QUEUES.map((q) => (
+                <tr key={q.key} className="border-t border-border">
+                  <th scope="row" className="py-1.5 pr-3 font-normal text-left text-card-foreground whitespace-nowrap">
+                    {q.label}
+                  </th>
+                  {JOB_STATUSES.map((s) => {
+                    const n = data.by_queue[q.key]?.[s.key] ?? 0;
+                    return (
+                      <td key={s.key} className={`py-1.5 px-2 text-right ${n ? s.tone : "text-muted-foreground"}`}>
+                        {n}
+                      </td>
+                    );
+                  })}
+                </tr>
+              ))}
+              <tr className="border-t border-border font-medium">
+                <th scope="row" className="py-1.5 pr-3 text-left text-card-foreground">
+                  All ({data.total})
+                </th>
+                {JOB_STATUSES.map((s) => {
+                  const n = data.by_status[s.key] ?? 0;
+                  return (
+                    <td key={s.key} className={`py-1.5 px-2 text-right ${n ? s.tone : "text-muted-foreground"}`}>
+                      {n}
+                    </td>
+                  );
+                })}
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
 type InstallProgress = { variant: "finetuned" | "base"; status: string; pct: number | null; detail: string };
 
 function SystemTab() {
@@ -776,6 +861,9 @@ function SystemTab() {
           </>
         )}
       </div>
+
+      {/* ── Background jobs ── */}
+      <JobCountsCard />
 
       {/* ── Troubleshooting ── */}
       <div className="rounded-lg border border-border bg-card p-5 flex flex-col gap-3">

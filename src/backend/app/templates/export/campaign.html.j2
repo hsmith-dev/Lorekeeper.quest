@@ -16,7 +16,9 @@
   {%- for entry in entries %}
   <section class="entry">
     <h2 class="date">{{ entry.date }}</h2>
+    {%- if entry.shorthand is not none %}
     <p class="meta notes">Notes: {{ entry.shorthand }}</p>
+    {%- endif %}
     <div class="text narrative">{{ entry.narrative }}</div>
   </section>
   {%- endfor %}

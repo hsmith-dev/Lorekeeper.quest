@@ -114,17 +114,13 @@ export const getCampaignAnalytics = (campaign_id: string) =>
 export const getShareTokens = (campaign_id: string) =>
   api.get<import("../types").ShareToken[]>(`/api/campaigns/${campaign_id}/share`);
 
-export const createShareToken = (campaign_id: string, kind: import("../types").ShareKind) =>
-  api.post<import("../types").ShareToken>(`/api/campaigns/${campaign_id}/share`, { kind });
+export const createShareToken = (campaign_id: string, body: import("../types").ShareTokenCreate) =>
+  api.post<import("../types").ShareToken>(`/api/campaigns/${campaign_id}/share`, body);
 
 export const revokeShareToken = (campaign_id: string, token_id: string) =>
   api.delete(`/api/campaigns/${campaign_id}/share/${token_id}`);
 
-export const getCampaignMembers = (campaign_id: string) =>
-  api.get<import("../types").CampaignMember[]>(`/api/campaigns/${campaign_id}/members`);
-
-export const removeCampaignMember = (campaign_id: string, member_id: string, deleteEntries: boolean = false) =>
-  api.delete(`/api/campaigns/${campaign_id}/members/${member_id}`, { params: { delete_entries: deleteEntries } });
+// Members (list, change Role, remove) live in services/api/members.ts (E0-Access.12).
 
 export const leaveCampaign = (campaign_id: string) =>
   api.post(`/api/campaigns/${campaign_id}/leave`);
@@ -475,3 +471,6 @@ export const getAdminLogs = (lines = 200) =>
 
 export const getSupportBundle = () =>
   api.get<Blob>("/api/admin/support-bundle", { responseType: "blob" });
+
+// Admin — background Job counts by status and queue (E0-Jobs.7)
+export const getAdminJobStats = () => api.get<import("../types").AdminJobStats>("/api/admin/jobs/stats");

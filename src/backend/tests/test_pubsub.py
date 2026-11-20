@@ -47,9 +47,22 @@ async def valkey(request):
         client = aioredis.from_url(VALKEY_TEST_URL, decode_responses=True)
     previous = valkey_client.set_valkey(client)
     yield client
+    # Listeners and trails first, while the client is open: a test that failed
+    # before closing its Collector must not end as a "Connection closed by
+    # server" from the pool closing under a live subscriber.
+    await Collector.close_all()
+    await _cancel_trails()
     valkey_client.set_valkey(previous)
-    pubsub._TRAILING.clear()
     await client.aclose()
+
+
+async def _cancel_trails() -> None:
+    trails = list(pubsub._TRAILING.values())
+    pubsub._TRAILING.clear()
+    tasks = [t.task for t in trails if t.task is not None and not t.task.done()]
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
 
 
 @pytest.fixture
@@ -86,11 +99,22 @@ async def wait_until(cond, timeout: float = 2.0) -> None:
 class Collector:
     """Runs one listener in a task and keeps what it yields."""
 
+    _open: list["Collector"] = []
+
     def __init__(self, gen):
         self.gen = gen
         self.items: list[tuple[str, object]] = []
         self.ended = False
         self.task = asyncio.ensure_future(self._run())
+        Collector._open.append(self)
+
+    @classmethod
+    async def close_all(cls):
+        open_, cls._open = cls._open, []
+        loop = asyncio.get_running_loop()
+        for collector in open_:
+            if not collector.task.done() and collector.task.get_loop() is loop:
+                await collector.close()
 
     async def _run(self):
         try:
@@ -427,6 +451,71 @@ async def test_unkeyed_invalidation_burst_is_one_now_and_one_at_window_end(valke
     await asyncio.sleep(0.5)
     assert len(got.items) == 3
     await got.close()
+
+
+class _WindowEdgeClient:
+    """Valkey at a throttle window's last millisecond, scripted: PTTL already
+    reads 0 but the key still exists (Valkey expires a key once now >
+    deadline), so a SET NX is refused once more; a millisecond later the
+    window is free. `sets`/`pttls` are the replies, in call order."""
+
+    def __init__(self, sets, pttls):
+        self.sets, self.pttls = list(sets), list(pttls)
+        self.published: list[tuple[str, str]] = []
+
+    async def set(self, key, value, nx=False, px=None):
+        return self.sets.pop(0) if self.sets else True
+
+    async def pttl(self, key):
+        return self.pttls.pop(0) if self.pttls else self.last_pttl
+
+    last_pttl = 0
+
+    async def publish(self, channel, message):
+        self.published.append((channel, message))
+
+
+@pytest.fixture
+def edge_client():
+    clients = []
+
+    def install(sets, pttls, last_pttl=0):
+        client = _WindowEdgeClient(sets, pttls)
+        client.last_pttl = last_pttl
+        clients.append(valkey_client.set_valkey(client))
+        return client
+
+    yield install
+    if clients:
+        valkey_client.set_valkey(clients[0])
+    pubsub._TRAILING.clear()
+
+
+async def test_a_trail_survives_the_windows_last_millisecond(edge_client):
+    """The flake in the burst test against real Valkey (about 1 run in 10):
+    the trail woke with PTTL 0, took it for "expired", lost the SET NX to
+    the still-live key and dropped the last invalidation unsent."""
+    # SET: leading edge free; second publish held; the trail at PTTL 0 still
+    # held; a millisecond later free. PTTL: the trail's first read (5 ms
+    # left), then 0 at the edge.
+    client = edge_client(sets=[True, False, False, True], pttls=[5, 0])
+    cid = uuid.uuid4()
+    await publish_campaign_event(cid, "visibility", None)
+    await publish_campaign_event(cid, "visibility", None)
+    await wait_until(lambda: len(client.published) == 2, timeout=1)
+    assert [json.loads(m)["data"] for _c, m in client.published] == [{"domain": "visibility", "id": None}] * 2
+    assert pubsub._TRAILING == {}
+
+
+async def test_a_trail_that_never_gets_the_window_is_dropped_and_logged(edge_client, caplog):
+    # The key never frees and never shows a new window's TTL (no expiry: -1).
+    client = edge_client(sets=[True] + [False] * 20, pttls=[], last_pttl=-1)
+    caplog.set_level(logging.WARNING, logger="app.core.pubsub")
+    cid = uuid.uuid4()
+    await publish_campaign_event(cid, "visibility", None)
+    await publish_campaign_event(cid, "visibility", None)
+    await wait_until(lambda: "pubsub_trail_dropped" in caplog.text, timeout=1)
+    assert len(client.published) == 1 and pubsub._TRAILING == {}
 
 
 async def test_flush_pending_sends_the_trailing_publish_now(valkey, monkeypatch):

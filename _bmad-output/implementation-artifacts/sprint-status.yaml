@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 10-31-2026 23:30
-last_updated: 11-20-2026 08:13
+last_updated: 11-20-2026 13:16
 project: Lorekeeper.quest
 project_key: NOKEY
 tracking_system: file-system
@@ -86,7 +86,7 @@ development_status:
   3-2-cpu-only-torch-in-the-backend-image-closes-the-nvidia-wheel: done
   3-3-ml-sidecar-for-embeddings-and-ner-with-its-client: done
   3-4-ml-lazy-nli-and-ocr-under-a-resident-memory-budget: done
-  3-5-stt-sidecar-with-faster-whisper-and-voice-upload-switched-to: backlog
+  3-5-stt-sidecar-with-faster-whisper-and-voice-upload-switched-to: done
   3-6-web-and-worker-image-without-models-async-client-wrappers-an: backlog
   3-7-one-16-gb-profile-with-container-limits-gpu-override-and-sum: backlog
   3-8-per-user-rate-limit-keying-in-slowapi-and-nginx: done
@@ -106,8 +106,8 @@ development_status:
   4-9-set_visibility-the-only-visibility-writer: done
   4-10-grant-changes-bump-access_epoch-and-close-open-streams: done
   4-11-campaign-events-route-and-usecampaignevents: done
-  4-12-members-api-and-roles-in-sharing-members: backlog
-  4-13-analytics-and-export-cover-every-member-scoped-by-role: backlog
+  4-12-members-api-and-roles-in-sharing-members: done
+  4-13-analytics-and-export-cover-every-member-scoped-by-role: done
   4-14-optional-pending-owner-decision-od-1-legacy-npcs-and-quests: backlog  # OPTIONAL, pending owner decision OD-1
   epic-4-retrospective: optional
 
@@ -118,7 +118,7 @@ development_status:
   5-4-reaper-and-restart-recovery: done
   5-5-queue-priority-per-model-serialisation-cursor-backfills-and: done
   5-6-core-pubsub-py-and-core-sse-py: done
-  5-7-job-routes-and-the-sse-stream: backlog
+  5-7-job-routes-and-the-sse-stream: done
   5-8-file-service-access-checked-file-route-and-backups: done
   5-9-lib-sse-ts-usechat-migration-and-usejobstream: backlog
   5-10-job-tray-job-rows-completion-notices-and-the-navbar-tray-con: backlog

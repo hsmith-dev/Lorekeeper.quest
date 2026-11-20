@@ -1,39 +1,19 @@
-import asyncio
-import io
-import logging
-import tempfile
-import os
-from concurrent.futures import ThreadPoolExecutor
+"""Speech-to-text, served by the `stt` sidecar (src/services/stt).
 
-logger = logging.getLogger(__name__)
+A thin async wrapper over app/clients/stt.py: no model, thread pool or temp
+file lives in the backend any more (E0-Platform.5). Errors are the client's
+ModelServiceError / ModelServiceUnavailable; callers map them.
+"""
 
-_model = None
-_executor = ThreadPoolExecutor(max_workers=1)
+from __future__ import annotations
 
+from typing import Literal
 
-def _load_model():
-    global _model
-    if _model is not None:
-        return
-    import whisper
-    logger.info("Loading Whisper 'base' model...")
-    _model = whisper.load_model("base")
-    logger.info("Whisper loaded.")
+from app.clients import stt
 
 
-def _transcribe(audio_bytes: bytes, ext: str) -> str:
-    _load_model()
-    import whisper
-    with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as f:
-        f.write(audio_bytes)
-        tmp_path = f.name
-    try:
-        result = whisper.transcribe(_model, tmp_path, fp16=False)
-        return result["text"].strip()
-    finally:
-        os.unlink(tmp_path)
-
-
-async def transcribe_audio(audio_bytes: bytes, ext: str = ".webm") -> str:
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(_executor, _transcribe, audio_bytes, ext)
+async def transcribe(audio: bytes, *, initial_prompt: str | None = None,
+                     format: Literal["pcm16"] | None = None) -> str:
+    """The transcript text, stripped ("" for silence)."""
+    result = await stt.transcribe(audio, initial_prompt=initial_prompt, format=format)
+    return result.text.strip()

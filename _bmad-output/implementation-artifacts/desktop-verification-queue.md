@@ -130,3 +130,16 @@ Stories were merged on green GitHub CI while the desktop was offline (owner deci
 - [ ] Real stack behind nginx: `curl -skN https://<host>/api/campaigns/<id>/events -H "Authorization: Bearer <jwt>"` → `event: subscribed` immediately, `event: ping` every 15 s; GM changes an entry's Visibility → `invalidate {"domain":"visibility","id":null}` at once
 - [ ] Browser, as a Player: a record the GM hides disappears from their list without reload
 - [ ] Load: per-Player DB query per id-bearing event (deferred) — measure with ~10 connected Players
+
+## Cleanup + checks from the pubsub deflake (PR #71) — DO FIRST when the desktop is back
+- [ ] **Remove leftovers (one is a CPU stress loop):** `docker rm -f deflake-stress deflake-pg deflake-valkey` and `rm -rf ~/lorekeeper-dev/runs/deflake ~/lorekeeper-dev/runs/deflake-plugin ~/lorekeeper-dev/runs/deflake-run.sh ~/lorekeeper-dev/runs/deflake-fail*.txt`
+- [ ] Old `pubsub.py` under the same load (48 busy loops, test capped at 1 CPU), 200 runs → before-under-load failure rate (commands in PR #71 body)
+- [ ] `tests/access/test_grants.py::test_campaign_delete_mid_stream_closes_the_stream` under load, 200 runs (suspected separate cause: grant-watch subscribe racing the delete's publish → falls back to the 30 s poll > 8 s test timeout)
+
+## E0-Jobs.7 — Job routes and the SSE stream (PR #69)
+- [ ] Prod compose: `curl -N -H "Authorization: Bearer <token>" "https://<host>/api/jobs/stream?campaign_id=<id>"` → `event: subscribed` immediately and a `job` frame within 5 s of starting a `system.noop` Job; `nginx -t` passes
+- [ ] With the `worker` stopped: enqueue a Job, cancel it, start the worker → row stays `cancelled`, the Job never runs
+
+## E0-Access.12 — Members API and Roles (PR #74)
+- [ ] Unpaid Player (account gating ON) logs in → lands on `/dashboard`, browses Party content with no 402s from other dashboard calls
+- [ ] Timing-sensitive probe: `pytest tests/test_members_api.py tests/ev4/test_probes.py -k members` in `lorekeeper-backend-test` (with TEST_DATABASE_URL/DATABASE_URL/VALKEY_URL/VALKEY_TEST_URL) — `probe_demotion_closes_the_events_stream` passes reliably
