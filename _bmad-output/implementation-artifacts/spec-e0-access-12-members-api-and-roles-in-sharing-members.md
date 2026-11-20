@@ -2,13 +2,27 @@
 title: 'E0-Access.12: Members API and Roles in Sharing › Members'
 type: 'feature'
 created: '2026-11-20'
-status: 'in-progress'
+status: 'done'
 baseline_revision: '0d71955bfb4845679b134717f820267a0d79656d'
 review_loop_iteration: 0
-followup_review_recommended: false
+followup_review_recommended: true
 context: ['/Users/harrisonsmith/Documents/GitHub/Lorekeeper.quest/_bmad-output/implementation-artifacts/orchestration/builder-brief.md']
 warnings: ['oversized']
-deferred: []
+deferred:
+  - summary: >-
+      The unpaid-login redirect in useAuth.ts is pinned only by a source guard.
+    evidence: |-
+      check-members.mjs tests loginDestination; nothing runs unpaidDestination or the login branch (no module mocking in the node checks).
+    location: >-
+      src/frontend/src/hooks/useAuth.ts
+    severity: low
+  - summary: >-
+      Two concurrent joins by the same user can raise the uq_campaign_member IntegrityError as a 500.
+    evidence: |-
+      Pre-existing check-then-insert in join_campaign; unverified, needs a concurrent-request test.
+    location: >-
+      src/backend/app/api/routes/share.py
+    severity: low (unverified)
 ---
 
 <intent-contract>
@@ -81,6 +95,37 @@ deferred: []
 
 ## Review Triage Log
 
+### 2026-11-20 — Review pass
+- verdicts: 27 findings — high 0, medium 3, low 12, false 8, maybe-false 4
+- findings:
+  - `[medium]` `[patch]` Blind: removing a Co-GM leaves their GM-context chats unarchived; rejoining as a Player brings them back — `_archive_chats` helper now also runs in `remove_member` for a co_gm; test_removing_a_co_gm_archives_their_chats.
+  - `[medium]` `[patch]` Blind + Edge: PATCH promotes an unpaid Player to co_gm, after which account_gate 402s their Party reads in every Campaign — PATCH to co_gm runs require_active_account on the Member and answers 409 (not 402, which would bounce the Owner to /subscribe); test_promoting_needs_an_active_account.
+  - `[medium]` `[patch]` Blind: the "delete their entries" option lost its permanent / cannot-be-undone warning — the inline confirm says so again.
+  - `[low]` `[patch]` Blind: focus fell to body after a successful removal — focus moves to the Members heading and a polite status announces the removal.
+  - `[false]` `[reject]` Blind: login comment's 402 claim is wrong — account_gate (deps.py:76) 402s PARTY_READ routes for an unpaid user who is GM anywhere, so an unpaid Owner gets 402 and goes to /subscribe as commented.
+  - `[low]` `[defer]` Blind + VerificationGap: the login wiring (unpaidDestination) has no behavioural test, only a source guard — needs a module-mocking harness the node checks lack; deferred.
+  - `[false]` `[reject]` Blind: the unpaid co_gm join path is untested — tests/access/test_write_rules.py::test_co_gm_link_needs_a_paid_account covers 402 and no row.
+  - `[false]` `[reject]` Blind: read-only link expiry on the anonymous view is untested — E0-Access.4 owns and tests it (resolve_share_token expiry, tests/test_share.py, tests/access/test_grants.py); unchanged here.
+  - `[low]` `[patch]` Blind: the demotion probe did not assert the stream subscribed before the PATCH — asserts `not request.done()` and `subscribed()` first.
+  - `[low]` `[reject]` Blind: expired links vanish from the Owner's list — the list shows live links as it did for revoked ones; showing dead links is new UI beyond a direct fix.
+  - `[low]` `[patch]` Blind: an existing Member redeeming a link keeps their Role, undocumented — join docstring says so.
+  - `[low]` `[patch]` Blind: overlong join docstring line — rewrapped.
+  - `[low]` `[patch]` Blind: member_id is str without a stated reason — one-line comment (junk id must be the uniform 404, not 422).
+  - `[low]` `[patch]` VerificationGap: naive expires_at branch never exercised — test_naive_expires_at_is_utc (future 201 as UTC, past 422).
+  - `[maybe-false]` `[defer]` Edge: concurrent double join can hit uq_campaign_member as a 500 — pre-existing join code path; would need a concurrent-request test to settle; low impact.
+  - `[low]` `[patch]` Edge: Cancel/Esc on remove focused a still-disabled Remove button — focus moves in an effect once the button is enabled.
+  - `[low]` `[patch]` Edge: confirmDemotion focused radios still disabled by isPending — same effect-based focus.
+  - `[false]` `[reject]` Edge: an unpaid Player elsewhere who is co-GM in another Campaign lands on /subscribe — by account_gate design a GM anywhere must pay; every Party read would 402 for them anyway.
+  - `[false]` `[reject]` Intent: a read-only link with a role is 422 beyond the story — the story gives read_only as `{kind, expires_at?}`; a role there would be stored meaninglessly, rejecting is the strict reading.
+  - `[false]` `[reject]` Intent: archiving in the shared mutator reaches every demotion path — intended (requester: role changes only through grants.py).
+  - `[maybe-false]` `[reject]` Intent: the UI is checked by pure helpers and source guards, not rendering — a throwaway Playwright run at 375 px exercised the keyboard demotion flow (notice, Esc, PATCH body, badge, no overflow); a committed render harness is out of this repo's frontend-check pattern.
+  - `[low]` `[reject]` Intent: SegmentedControl instead of a "Role select" — the requester asked for the role picker built from segmented-control/combobox primitives.
+  - `[low]` `[reject]` Intent: expiry is date-only in the UI — a date input is the accessible 375 px control; the API still takes a datetime.
+  - `[maybe-false]` `[reject]` Intent: list response shape changed (member_id, joined_at, no email) — the AC fixes that shape; paths unchanged and the only caller is updated.
+  - `[false]` `[reject]` Intent: login routing is unrequested — the requester asked to fix the unpaid-Player /subscribe redirect when in scope (join with a Player link is this story).
+  - `[maybe-false]` `[reject]` Intent: "invite people with a Role" as a direct invite — the ACs place the Role on collaborate links only.
+  - `[false]` `[reject]` Intent: "all management routes" in the EV-4 note vs share routes — share routes keep their probes in probes/campaigns.py.
+
 ## Design Notes
 
 Archive in `change_member_role`, not the route: it is the single Role mutator, so any future demotion path archives too. `member_id: null` marks the Owner row, so there is nothing to PATCH or DELETE. `email` leaves the list (the AC's exact field set). Expiry from the UI is a date: end of that local day, sent as ISO with offset. `leave_campaign` stays in `campaigns.py` (not management; avoids churn next to E0-Access.13).
@@ -91,3 +136,17 @@ Archive in `change_member_role`, not the route: it is the single Role mutator, s
 - `gh pr checks <PR>` -- expected: backend-tests, gates, frontend-ci, license-check green.
 - `cd src/frontend && npx tsc --noEmit && npm run build && npm run lint:tokens && node scripts/check-members.mjs` -- expected: exit 0.
 - `python3 scripts/check_scoped_queries.py` -- expected: clean.
+
+## Auto Run Result
+
+Status: done
+
+**Summary:** Owner-only Members API in `members.py` (list with a synthetic Owner row, PATCH Role, DELETE moved from `campaigns.py`). Role changes go only through `grants.change_member_role`, which archives a demoted Co-GM's chats; `remove_member` archives a removed Co-GM's chats. Promotion to Co-GM needs an active account (409 otherwise). Share links store `role`/`expires_at`; join grants the link's role. Sharing › Members has RoleBadge, a SegmentedControl picker with the archive notice, inline remove confirm, link Role/expiry, loading/empty/error states, Esc via pushLayer. An unpaid user already in a Campaign logs in to `/dashboard`.
+
+**Files:** `app/access/grants.py` (archive on demotion/removal), `app/api/routes/members.py` (routes), `app/api/routes/campaigns.py` (routes moved out; share role/expiry), `app/api/routes/share.py` (join role), `app/schemas/members.py`, `app/schemas/share.py`, `tests/test_members_api.py` (new), `tests/ev4/probes/members.py`, `tests/ev4/probes/campaigns.py`, `tests/access/test_campaign_permissions.py`, frontend `SharingPage.tsx`, `useSharing.ts`, `useAuth.ts`, `lib/members.ts` (new), `services/api.ts`, `services/api/members.ts`, `types/*`, `role-badge.tsx`, `scripts/check-members.mjs` (new), `frontend-ci.yml`.
+
+**Review:** 27 findings; 13 patched (3 medium, 10 low), 2 deferred, 12 rejected (reasons in the triage log). Follow-up review recommended: true — 3 medium patches; the risk is that the patch round (409 promotion gate, archive-on-removal, effect-based focus) is verified only by CI and the throwaway Playwright run.
+
+**Verification:** First commit c14f8ea: all GitHub CI checks green (backend tests on Postgres+Valkey, gates incl. EV-4 and CI-8, frontend, licences). Patch round: tsc, lint:tokens, check-members (12/12), check_scoped_queries clean, Playwright 375 px keyboard demotion run passed; backend re-run by CI on the follow-up push.
+
+**Residual risks:** `probe_demotion_closes_the_events_stream` holds a live stream and may be timing-sensitive. Needs desktop verification: an unpaid Player browsing the dashboard after login (other dashboard calls may still 402).

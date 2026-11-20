@@ -150,6 +150,8 @@ async def probe_demotion_closes_the_events_stream(ev4, actor):
                 if request.done() or await subscribed():
                     break
                 await asyncio.sleep(0.01)
+            assert not request.done(), "the events stream ended before the demotion"
+            assert await subscribed(), "the events stream never subscribed"
             r = await owner.patch(f"{BASE}/{a}/members/{member}", json={"role": "player"})
             assert r.status_code == 200 and r.json()["role"] == "player", r.text
             stream = await asyncio.wait_for(request, 15)

@@ -171,11 +171,16 @@ function focusSelected(root: HTMLElement | null) {
   root?.querySelector<HTMLButtonElement>('[role="radio"][aria-checked="true"]')?.focus();
 }
 
-function MemberRowView({ campaignId, member }: { campaignId: string; member: CampaignMember }) {
+function MemberRowView({ campaignId, member, onRemoved }: {
+  campaignId: string; member: CampaignMember; onRemoved: (name: string) => void;
+}) {
   const change = useChangeMemberRole(campaignId);
   const remove = useRemoveCampaignMember(campaignId);
   const [pendingRole, setPendingRole] = useState<GrantRole | null>(null);
   const [removing, setRemoving] = useState(false);
+  // Where focus returns once the control there is enabled again (after the
+  // re-render that clears the pending state).
+  const [focusAfter, setFocusAfter] = useState<"picker" | "remove" | null>(null);
   const pickerRef = useRef<HTMLDivElement>(null);
   const confirmRef = useRef<HTMLButtonElement>(null);
   const removeRef = useRef<HTMLButtonElement>(null);
@@ -186,30 +191,45 @@ function MemberRowView({ campaignId, member }: { campaignId: string; member: Cam
 
   const cancelDemotion = () => {
     setPendingRole(null);
-    focusSelected(pickerRef.current);
+    setFocusAfter("picker");
   };
   const cancelRemove = () => {
     setRemoving(false);
-    removeRef.current?.focus();
+    setFocusAfter("remove");
   };
+
+  useEffect(() => {
+    if (focusAfter === "picker" && !change.isPending) {
+      focusSelected(pickerRef.current);
+      setFocusAfter(null);
+    } else if (focusAfter === "remove" && !remove.isPending && !removing) {
+      removeRef.current?.focus();
+      setFocusAfter(null);
+    }
+  }, [focusAfter, change.isPending, remove.isPending, removing]);
 
   useEffect(() => {
     if (pendingRole === null) return;
     confirmRef.current?.focus();
-    return pushLayer(() => {
-      setPendingRole(null);
-      focusSelected(pickerRef.current);
-    });
+    return pushLayer(cancelDemotion);
   }, [pendingRole]);
 
   useEffect(() => {
     if (!removing) return;
     removeConfirmRef.current?.focus();
-    return pushLayer(() => {
-      setRemoving(false);
-      removeRef.current?.focus();
-    });
+    return pushLayer(cancelRemove);
   }, [removing]);
+
+  const removeMember = (deleteEntries: boolean) => {
+    if (memberId === null) return;
+    remove.mutate({ memberId, deleteEntries }, {
+      onSuccess: () => onRemoved(member.display_name),
+      onError: () => {
+        setRemoving(false);
+        setFocusAfter("remove");
+      },
+    });
+  };
 
   const pick = (role: GrantRole) => {
     if (owner || memberId === null || role === member.role) return;
@@ -225,7 +245,7 @@ function MemberRowView({ campaignId, member }: { campaignId: string; member: Cam
     change.mutate({ memberId, role: pendingRole }, {
       onSettled: () => {
         setPendingRole(null);
-        focusSelected(pickerRef.current);
+        setFocusAfter("picker");
       },
     });
   };
@@ -286,17 +306,18 @@ function MemberRowView({ campaignId, member }: { campaignId: string; member: Cam
       {removing && memberId !== null && (
         <div className="flex flex-col gap-2 rounded-md border border-destructive/30 bg-destructive/10 p-3">
           <p role="alert" className="text-sm text-foreground">
-            Remove {member.display_name}? Their journal entries stay in the campaign unless you also delete them.
+            Remove {member.display_name}? Their journal entries stay in the campaign. “Remove and delete
+            their entries” permanently deletes every entry they wrote in this campaign and cannot be undone.
           </p>
           <div className="flex flex-wrap gap-2">
             <Button ref={removeConfirmRef} type="button" variant="destructive" size="sm" write className="h-11 md:h-9"
-              onClick={() => remove.mutate({ memberId }, { onSettled: () => setRemoving(false) })}
+              onClick={() => removeMember(false)}
               disabled={remove.isPending}>
               Remove
             </Button>
             <Button type="button" variant="outline" size="sm" write
               className="h-11 border-destructive/30 text-danger hover:bg-destructive/10 md:h-9"
-              onClick={() => remove.mutate({ memberId, deleteEntries: true }, { onSettled: () => setRemoving(false) })}
+              onClick={() => removeMember(true)}
               disabled={remove.isPending}>
               Remove and delete their entries
             </Button>
@@ -317,12 +338,20 @@ function MembersSection({ campaignId }: { campaignId: string }) {
   const { data: members, isLoading, isError, error, refetch } = useCampaignMembers(campaignId);
   const rows = members ?? [];
   const onlyOwner = rows.every(isOwnerRow);
+  const headingRef = useRef<HTMLHeadingElement>(null);
+  const [status, setStatus] = useState("");
+  // The removed row unmounts: focus the section heading and announce it.
+  const onRemoved = (name: string) => {
+    setStatus(`Removed ${name}.`);
+    headingRef.current?.focus();
+  };
 
   return (
     <section className="rounded-lg border border-border bg-card p-4 flex flex-col gap-3" aria-labelledby="sharing-members">
-      <h3 id="sharing-members" className="text-xs font-semibold uppercase tracking-widest text-muted-foreground" style={{ fontFamily: "var(--font-heading)" }}>
+      <h3 id="sharing-members" ref={headingRef} tabIndex={-1} className="text-xs font-semibold uppercase tracking-widest text-muted-foreground" style={{ fontFamily: "var(--font-heading)" }}>
         Members
       </h3>
+      <p role="status" aria-live="polite" className="sr-only">{status}</p>
       {isLoading && (
         <div className="flex flex-col gap-3" aria-busy="true">
           <Skeleton className="h-10 w-full" />
@@ -332,7 +361,8 @@ function MembersSection({ campaignId }: { campaignId: string }) {
       {isError && <InlineError error={error} fallback="Couldn't load the members." onRetry={() => void refetch()} />}
       {!isLoading && !isError && rows.length > 0 && (
         <ul className="flex flex-col gap-3">
-          {rows.map((m) => <MemberRowView key={m.member_id ?? `owner-${m.user_id}`} campaignId={campaignId} member={m} />)}
+          {rows.map((m) => <MemberRowView key={m.member_id ?? `owner-${m.user_id}`} campaignId={campaignId} member={m}
+            onRemoved={onRemoved} />)}
         </ul>
       )}
       {!isLoading && !isError && onlyOwner && (

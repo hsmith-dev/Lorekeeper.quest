@@ -20,7 +20,7 @@ Account gate (app/api/deps.py, E0-Access.6): `/me` is a Party read
 (openapi_extra=PARTY_READ), open to a Player with no paid account; the
 management routes need one.
 """
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -28,7 +28,7 @@ from app.access import (
     CampaignContext, can_write, change_member_role, display_role, remove_member, require_campaign, scoped_get,
     scoped_select,
 )
-from app.api.deps import PARTY_READ
+from app.api.deps import PARTY_READ, require_active_account
 from app.db.models.campaign import Campaign
 from app.db.models.campaign_member import CampaignMember
 from app.db.models.journal import JournalEntry
@@ -84,6 +84,7 @@ async def list_campaign_members(
 
 @router.patch("/{campaign_id}/members/{member_id}", response_model=MemberResponse)
 async def change_campaign_member_role(
+    # str, not uuid.UUID: a junk id must be the same 404 as every other refusal, not a 422.
     member_id: str,
     body: MemberRoleUpdate,
     ctx: CampaignContext = Depends(_owner),
@@ -93,6 +94,16 @@ async def change_campaign_member_role(
     publish); a demotion from co_gm archives their chat sessions."""
     member = await scoped_get(db, CampaignMember, ctx, member_id, options=[selectinload(CampaignMember.user)])
     can_write(ctx, member)
+    if body.role == "co_gm" and CampaignRole(member.role) is not CampaignRole.CO_GM:
+        # A GM anywhere needs an active account (account_gate would 402 their
+        # Party reads everywhere), the same check a co_gm link makes on join.
+        # 409, not 402: the Owner's client would redirect to /subscribe.
+        try:
+            await require_active_account(member.user)
+        except HTTPException as exc:
+            if exc.status_code != 402:
+                raise
+            raise HTTPException(status_code=409, detail="They need an active account to be a Co-GM.") from None
     if await change_member_role(db, member, body.role):
         response = _member_row(member, member.user)
         await db.commit()
@@ -102,6 +113,7 @@ async def change_campaign_member_role(
 
 @router.delete("/{campaign_id}/members/{member_id}", status_code=204)
 async def remove_campaign_member(
+    # str, not uuid.UUID: a junk id must be the same 404 as every other refusal, not a 422.
     member_id: str,
     delete_entries: bool = Query(
         False,

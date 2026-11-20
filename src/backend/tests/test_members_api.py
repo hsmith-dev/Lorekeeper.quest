@@ -187,6 +187,52 @@ async def test_a_promotion_archives_nothing(client, db, ev4):
     assert chat.archived_at is None
 
 
+async def test_removing_a_co_gm_archives_their_chats(client, db, ev4):
+    a = ev4.a.campaign_id
+    owner = await ev4.actor("gm_owner")
+    co_gm = await ev4.actor("co_gm")
+    mine = ChatSession(user_id=co_gm.user_id, campaign_id=a, title="GM context")
+    free = ChatSession(user_id=co_gm.user_id, campaign_id=None, title="Free")
+    db.add_all([mine, free])
+    await db.commit()
+    r = await client.delete(_url(a, await _member_id(db, a, co_gm.user_id)), headers=owner.headers)
+    assert r.status_code == 204, r.text
+    archived = dict((await db.execute(
+        sa.select(ChatSession.id, ChatSession.archived_at).where(ChatSession.id.in_([mine.id, free.id]))
+        .execution_options(populate_existing=True))).all())
+    assert archived[mine.id] is not None and archived[free.id] is None
+
+
+@pytest.fixture
+def gated(monkeypatch):
+    """The platform gated (no open-access mode), whatever the DB row says."""
+    from app.services import app_config_service
+
+    async def closed(_db):
+        return False
+
+    monkeypatch.setattr(app_config_service, "is_open_access", closed)
+
+
+async def test_promoting_needs_an_active_account(client, db, ev4, gated, published):
+    a = ev4.a.campaign_id
+    owner = await ev4.actor("gm_owner")
+    unpaid = await create_user(db, "unpaid_member")
+    unpaid.access_granted = False
+    await db.commit()
+    await make_member(db, role="player", campaign_id=a, user=unpaid)
+    mid = await _member_id(db, a, unpaid.id)
+    r = await client.patch(_url(a, mid), json={"role": "co_gm"}, headers=owner.headers)
+    assert (r.status_code, r.json()) == (409, {"detail": "They need an active account to be a Co-GM."})
+    row = await _row(db, mid)
+    assert (row.role, row.access_epoch) == (CampaignRole.PLAYER, 0)
+    assert published == []
+    paid = await ev4.actor("player")
+    r = await client.patch(_url(a, await _member_id(db, a, paid.user_id)), json={"role": "co_gm"},
+                           headers=owner.headers)
+    assert r.status_code == 200 and r.json()["role"] == "co_gm", r.text
+
+
 # ── Escalation and bad bodies ──────────────────────────────────────────────
 
 async def test_every_escalation_is_the_one_404(client, db, ev4, published):
@@ -294,6 +340,16 @@ async def test_bad_share_bodies_are_422(client, db, ev4, body):
     assert r.status_code == 422, r.text
     assert await db.scalar(sa.select(sa.func.count()).select_from(CampaignShareToken).where(
         CampaignShareToken.campaign_id == a)) == before
+
+
+async def test_naive_expires_at_is_utc(client, ev4):
+    owner = await ev4.actor("gm_owner")
+    url = f"/api/campaigns/{ev4.a.campaign_id}/share"
+    r = await client.post(url, json={"kind": "collaborate", "expires_at": "2030-01-01T12:00:00"}, headers=owner.headers)
+    assert r.status_code == 201, r.text
+    assert datetime.fromisoformat(r.json()["expires_at"]) == datetime(2030, 1, 1, 12, tzinfo=timezone.utc)
+    r = await client.post(url, json={"kind": "read_only", "expires_at": "2020-01-01T00:00:00"}, headers=owner.headers)
+    assert r.status_code == 422, r.text
 
 
 async def test_expires_at_now_is_422(client, ev4):
