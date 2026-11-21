@@ -15,8 +15,9 @@ class FeedbackCreate(BaseModel):
     # Optional — lets the submitter point at which campaign this is about,
     # so an admin reviewing it can pull that campaign's actual content (see
     # GET /api/feedback/{id}/context) instead of guessing from the message
-    # text alone. Ownership isn't checked against the submitter — a
-    # collaborator on someone else's shared campaign can still reference it.
+    # text alone. Any Member (not only the Owner) can reference a Campaign;
+    # one the submitter cannot reach is dropped (stored as None), exactly
+    # like an id that does not exist (api/routes/feedback.py).
     campaign_id: uuid.UUID | None = None
 
 
