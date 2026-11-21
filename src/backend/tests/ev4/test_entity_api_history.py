@@ -9,6 +9,8 @@ aliases and Entity references, over HTTP.
     from every read (list, item, search) and so is their history.
   * An ENTITY_REF naming a GM-only Entity: the attribute is absent and the
     history values are null; the id appears nowhere in the Player's bodies.
+  * The `entity_field` citation of a hidden reference and of an unset one
+    are the same (dropped).
   * After the F3-world copy, a Player's list of a Campaign with only migrated
     (GM-only) Entities is byte-identical to an empty Campaign's.
 
@@ -196,3 +198,30 @@ async def _migrated_ids(db, campaign_id) -> list[str]:
 
     return [str(i) for i in (await db.execute(sa.select(Entity.id).where(Entity.campaign_id == campaign_id)))
             .scalars().all()]
+
+
+async def test_a_hidden_reference_cites_like_an_unset_one(ev4, db):
+    """The `entity_field` resolver: a Player's citation of an ENTITY_REF that
+    names a GM-only Entity and one of a reference that is unset answer alike
+    (both dropped), so the citation never tells them apart."""
+    import uuid
+
+    from app.access import ctx_for, resolve_sources
+    from app.schemas.sources import SourceKind, SourceRef
+
+    gm, player = await _gm_player(ev4)
+    vault = await _create(gm, ev4, type="location", name="Vault")
+    pointed = await _create(gm, ev4, type="item", name="Bell", attributes={"location_entity_id": vault})
+    unset = await _create(gm, ev4, type="item", name="Cup")
+    for entity_id in (pointed, unset):
+        await _publish(gm, entity_id)
+    ctx = await ctx_for(db, player.user_id, ev4.a.campaign_id)
+
+    async def cite(entity_id):
+        ref = SourceRef(kind=SourceKind.ENTITY_FIELD, id=uuid.UUID(entity_id), field="attributes.location_entity_id")
+        return [(c.title, c.quote) for c in await resolve_sources(db, [ref], ctx)]
+
+    assert await cite(pointed) == await cite(unset) == []
+    # The Party bodies of the two Items match too (no location key on either).
+    bodies = [await _ok(await player.get(f"{BASE}/{i}")) for i in (pointed, unset)]
+    assert [b["attributes"] for b in bodies] == [{}, {}]

@@ -32,6 +32,13 @@ deferred:
     location: >-
       src/backend/app/api/routes/entities.py create_entity
     severity: medium
+  - summary: >-
+      Once a hidden Entity H is published, a Party-visible `attributes.<ref>` history row of A starts showing H's id, which reveals A pointed at H before H was published.
+    evidence: |-
+      Reference ids in history are redacted by current visibility of the target (project, visible_entity_ids), not by the target's visibility at write time. Raised by the independent data-safety review of PR #75; for E0-WorldCore.11 (history), e.g. stamp ref visibility on the row or drop ref values written while the target was hidden.
+    location: >-
+      src/backend/app/access/projection.py
+    severity: low
 ---
 
 <intent-contract>
@@ -229,3 +236,9 @@ Status: done (PR #75, draft; CI green on ec641c2).
 **Verification:** GitHub CI on ec641c2: Backend tests 2555 passed and 4 skipped; Structural gates green (CI-2, CI-3, CI-7, CI-8, CI-10, CI-11; EV-4 117 probes with 0 leaks); Frontend CI and Dependency licences green. CI caught 3 failures, all fixed in tests: the world_rows expectation that the migrated row is Party-visible, the `ev4` fixture registration, and a test-helper argument shadowing.
 
 **Residual risks:** the data-safety review of the migration is still pending (orchestrator). By design, Players no longer see the F3 `migrated` history row after publication.
+
+### 2026-11-21 — Coordinator follow-up after the independent data-safety review
+- `EntityPartyResponse` drops `created_at`/`updated_at` (privacy first: they dated GM-only edits and the time before publication; no frontend consumer yet). EV-4: `probe_get_entity` asserts gm_notes, a field hide and a hidden-field edit leave the Party item and list bodies byte-identical (`ignore=()`).
+- `entity_field` resolver: any `attributes.<key>` with no value in ctx's projection (unset, hidden, or a reference ctx may not see) drops the citation, so a hidden reference and an unset one are indistinguishable (`test_a_hidden_reference_cites_like_an_unset_one`, resolver test).
+- Create takes `pg_advisory_xact_lock(hashtextextended('entity_name:<campaign>:<type>:<normalized name>'))` before the duplicate check, so a double-submit gets the 409 (frontmatter duplicate-race item resolved).
+- New deferred item for E0-WorldCore.11: reference ids in history become visible once the target is published.

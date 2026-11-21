@@ -286,7 +286,8 @@ async def test_entity_field_resolver(ev4, db):
                         status="alive", attributes={"pronouns": "she/her"})
     item = await create(type="item", name="Bell", attributes={"location_entity_id": str(secret_place),
                                                               "holder_entity_id": str(mira)})
-    for entity_id in (mira, item):
+    plain = await create(type="item", name="Cup")  # no location set
+    for entity_id in (mira, item, plain):
         await set_visibility(db, gm_ctx, RecordRef(kind="entity", id=entity_id), "party")
     await set_visibility(db, gm_ctx, RecordRef(kind="entity", id=mira, field="status"), "gm")
     await db.commit()
@@ -297,7 +298,7 @@ async def test_entity_field_resolver(ev4, db):
     refs = [ref(mira, "description"), ref(mira, "attributes.pronouns"), ref(mira, "status"),
             ref(mira, "gm_notes"), ref(item, "attributes.location_entity_id"), ref(secret_place, "name"),
             ref(item, "attributes"), ref(item, "attributes.holder_entity_id"), ref(mira, "attributes.nope"),
-            ref(mira, "field_visibility.status")]
+            ref(mira, "field_visibility.status"), ref(plain, "attributes.location_entity_id")]
     shown = {(c.ref.id, c.ref.field): c for c in await resolve_sources(db, refs, player)}
     assert set(shown) == {(mira, "description"), (mira, "attributes.pronouns"), (item, "attributes"),
                           (item, "attributes.holder_entity_id")}
@@ -310,8 +311,11 @@ async def test_entity_field_resolver(ev4, db):
     assert (holder.title, holder.quote) == ("Bell · Held by", str(mira))
     assert str(secret_place) not in shown[(item, "attributes")].quote
     gm = {(c.ref.id, c.ref.field): c for c in await resolve_sources(db, refs, gm_ctx)}
-    # An unknown attribute key is dropped for everyone.
-    assert set(gm) == {(r.id, r.field) for r in refs} - {(mira, "attributes.nope")}
+    # A hidden reference and an unset one answer alike: no citation.
+    assert (item, "attributes.location_entity_id") not in shown and (plain, "attributes.location_entity_id") not in shown
+    # An unknown attribute key, and an unset one, are dropped for everyone.
+    assert set(gm) == {(r.id, r.field) for r in refs} - {(mira, "attributes.nope"),
+                                                         (plain, "attributes.location_entity_id")}
     assert gm[(mira, "status")].quote == "alive" and gm[(mira, "status")].title == "Mira · Status"
     assert gm[(item, "attributes.location_entity_id")].quote == str(secret_place)
     assert gm[(item, "attributes")].title == "Bell · Attributes"

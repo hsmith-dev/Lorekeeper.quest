@@ -220,6 +220,22 @@ async def probe_get_entity(ev4, actor):
     await assert_hidden_field_equals_unset(actor, f"{BASE}/{w.hidden_status}", "status",
                                            unset_url=f"{BASE}/{w.party}")
     await assert_counts_and_ranking_unchanged(actor, f"{BASE}/{w.party}", lambda: _gm_only_write(ev4, w))
+    # Privacy first: GM-only edits (gm_notes, hiding a field, editing it while
+    # hidden) leave the Party body byte-identical; no timestamp dates them.
+    await assert_counts_and_ranking_unchanged(
+        actor, [f"{BASE}/{w.party}", f"{BASE}/?campaign_id={ev4.a.campaign_id}"],
+        lambda: _hidden_edits(ev4, w), ignore=())
+
+
+async def _hidden_edits(ev4, w: World) -> None:
+    from app.services.world_service import apply_change
+
+    await apply_change(ev4.db, w.gm, {"op": "update_field", "entity_id": w.party, "field": "gm_notes",
+                                      "value": mint_canary("XENTNOTES3", ev4.a.campaign_id).token})
+    await _publish(ev4.db, w.gm, w.party, "description", "gm")
+    await apply_change(ev4.db, w.gm, {"op": "update_field", "entity_id": w.party, "field": "description",
+                                      "value": mint_canary("XENTHIDDEN", ev4.a.campaign_id).token})
+    await ev4.db.commit()
 
 
 @ev4_probe("GET", "/api/entities/{entity_id}/history")

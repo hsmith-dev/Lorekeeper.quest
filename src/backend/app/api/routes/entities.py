@@ -43,6 +43,7 @@ from typing import Any, Awaitable, Callable
 
 from fastapi import APIRouter, Depends, Query, Request, Response
 from fastapi.responses import JSONResponse
+import sqlalchemy as sa
 from sqlalchemy import func
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -194,11 +195,16 @@ async def create_entity(
 ):
     ctx = await ctx_for_request(request, db, user, body.campaign_id, "gm")
     key = normalize_name(body.name)
+    # One create per (Campaign, type, name) at a time: a double-submit waits
+    # here, then sees the first one's committed row and gets the 409.
+    await db.execute(sa.select(sa.func.pg_advisory_xact_lock(sa.func.hashtextextended(
+        f"entity_name:{ctx.campaign_id}:{body.type.value}:{key}", 0))))
     live = await _rows(db, scoped_select(Entity, ctx).where(
         Entity.type == body.type.value, Entity.deleted_at.is_(None), Entity.merged_into_id.is_(None))
         .order_by(Entity.created_at, Entity.id))
     existing = next((e for e in live if normalize_name(e.name) == key), None)
     if existing is not None:
+        await db.rollback()  # releases the lock
         return JSONResponse(status_code=409, content={"detail": "An Entity with this name exists",
                                                       "code": "duplicate", "existing_id": str(existing.id)})
     change = {"op": "create_entity", **body.model_dump(exclude={"campaign_id"}, mode="json")}

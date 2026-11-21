@@ -1293,7 +1293,8 @@ async def resolve_entity_field(entity: Entity, ref: SourceRef, ctx: CampaignCont
     Entity and the field; the quote is the field's value as `access.project`
     renders it for ctx (a hidden field as unset), truncated to QUOTE_MAX. None
     (the ref is dropped) for an `attributes.<key>` the Entity's type does not
-    define, and for an ENTITY_REF attribute naming an Entity ctx may not see.
+    define and for one with no value in ctx's projection (unset, hidden, or an
+    ENTITY_REF naming an Entity ctx may not see: indistinguishable).
     `field=None` (the whole record, GM only) quotes the description."""
     name = ref.field
     key = name[len(ATTRIBUTES_PREFIX):] if name is not None and name.startswith(ATTRIBUTES_PREFIX) else None
@@ -1307,10 +1308,11 @@ async def resolve_entity_field(entity: Entity, ref: SourceRef, ctx: CampaignCont
         return entity.name, _quote_text(body.get("description"))[:QUOTE_MAX]
     if key is not None:
         attrs = body.get("attributes") or {}
-        if (et.attribute(entity.type, key).value_kind is et.ValueKind.ENTITY_REF
-                and (entity.attributes or {}).get(key) is not None and key not in attrs):
-            return None  # a reference ctx may not see: no citation at all
-        value = attrs.get(key)
+        if key not in attrs:
+            # Unset, hidden, or a reference ctx may not see: all the same, no
+            # citation (an empty-quote citation would tell them apart).
+            return None
+        value = attrs[key]
     else:
         value = body.get(name)
     return f"{entity.name} · {_field_label(entity, name)}", _quote_text(value)[:QUOTE_MAX]

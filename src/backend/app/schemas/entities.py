@@ -63,9 +63,9 @@ class EntityPartyResponse(BaseModel):
     description: str | None
     status: str
     attributes: dict[str, Any] = Field(default_factory=dict)
-    # No merged_into_id: the survivor may be GM-only.
-    created_at: datetime
-    updated_at: datetime
+    # No merged_into_id: the survivor may be GM-only. No created_at/updated_at
+    # (E0-WorldCore.5, privacy first): they would date GM-only edits (gm_notes,
+    # a hidden field, a Visibility change) and the time before publication.
     # E0-WorldCore.5: a hidden `aliases` field renders [] (as unset).
     aliases: list["EntityAliasPartyResponse"] = Field(default_factory=list)
     steps: list["QuestStepPartyResponse"] = Field(default_factory=list)
