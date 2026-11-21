@@ -27,9 +27,20 @@ use the same default, so the sum checked here is the one compose runs with.
 Literal limits: a hard-coded `memory:` under `deploy.resources.limits`, or a
 `mem_limit:`, is outside the sum, so each one must be listed in
 scripts/memory_literal_limits_baseline.txt with a reason. That baseline only
-shrinks (E0-Platform.7 moves today's literals to *_MEM_LIMIT variables): a
-literal not in it fails, and an entry that matches no literal fails (remove
-it). scripts/test_check_memory_budget.py freezes its ceiling.
+shrinks (E0-Platform.7 emptied it): a literal not in it fails, and an entry
+that matches no literal fails (remove it). scripts/test_check_memory_budget.py
+freezes its ceiling.
+
+The profile (E0-Platform.7): docker-compose.prod.yml is the one 16 GB
+profile. Every service in it must set `deploy.resources.limits.memory` from a
+`*_MEM_LIMIT` variable, so nothing in the profile runs outside the sum. A
+variable referenced only by services in an excluded profile (`diarize`, which
+AD-7 keeps outside the sum: it runs only while `stt` is unloaded) is reported
+but not summed. A variable with no service yet (TTS_MEM_LIMIT, reserved for
+E5's `tts`) still counts, so the sum stays true when that service lands.
+
+Overrides: docker-compose.gpu.yml only adds GPU devices. It must not set or
+change any memory limit (AD-7: a GPU changes speed only).
 
 To raise one limit, lower another in the same PR and re-run EV-5 (AD-7).
 
@@ -46,6 +57,9 @@ REPO = Path(__file__).resolve().parent.parent
 ENV_EXAMPLE = REPO / ".env.example"
 LITERAL_BASELINE = REPO / "scripts" / "memory_literal_limits_baseline.txt"
 COMPOSE_GLOBS = ("docker-compose*.yml", "docker-compose*.yaml", "compose*.yml", "compose*.yaml")
+PROFILE_FILE = "docker-compose.prod.yml"  # the one 16 GB profile (AD-7)
+OVERRIDE_FILES = ("docker-compose.gpu.yml",)  # may add devices, never limits
+EXCLUDED_PROFILES = frozenset({"diarize"})  # outside the sum (AD-7)
 LIMIT_BYTES = int(14.5 * 1024**3)  # 14.5 GiB: Docker's `g` is binary (see the docstring)
 
 _UNITS = {"": 1, "b": 1, "k": 1024, "m": 1024**2, "g": 1024**3, "t": 1024**4}
@@ -144,6 +158,95 @@ def literal_limits(path: Path) -> list[tuple[str, str, int]]:
     return out
 
 
+def _strip(value: str) -> str:
+    return value.split(" #", 1)[0].strip().strip("'\"")
+
+
+def compose_services(path: Path) -> dict[str, dict]:
+    """{service: {"line", "memory", "memory_line", "profiles"}} for a compose file.
+
+    `memory` is the raw value of `memory:` directly under a `limits:` key, or
+    of `mem_limit:` (None when the service sets neither). `profiles` reads
+    both `profiles: [a, b]` and a block list. Indentation based, like
+    literal_limits().
+    """
+    services: dict[str, dict] = {}
+    stack: list[tuple[int, str]] = []
+    in_profiles: tuple[str, int] | None = None  # (service, indent of `profiles:`)
+    for n, line in enumerate(path.read_text().splitlines(), 1):
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        here = len(line) - len(line.lstrip())
+        # YAML allows a block list at the key's own indent (`profiles:` then
+        # `- diarize` in the same column) as well as deeper.
+        if in_profiles and here >= in_profiles[1] and line.lstrip().startswith("-"):
+            item = _strip(line.lstrip()[1:])
+            if item:
+                services[in_profiles[0]]["profiles"].append(item)
+            continue
+        in_profiles = None
+        m = _KEY.match(line)
+        if not m:
+            continue
+        indent = len(m.group(1)) + len(m.group(2) or "")
+        key, value = m.group(3), _strip(m.group(4))
+        while stack and stack[-1][0] >= indent:
+            stack.pop()
+        keys = [k for _, k in stack]
+        if keys == ["services"]:
+            services[key] = {"line": n, "memory": None, "memory_line": None, "profiles": []}
+        elif len(keys) >= 2 and keys[0] == "services" and keys[1] in services:
+            svc = services[keys[1]]
+            if len(keys) == 2 and key == "profiles":
+                if value.startswith("["):
+                    svc["profiles"] += [_strip(v) for v in value.strip("[]").split(",") if v.strip()]
+                elif value:
+                    svc["profiles"].append(value)
+                else:
+                    in_profiles = (keys[1], indent)
+            elif value and (key == "mem_limit" or (key == "memory" and keys[-1] == "limits")):
+                svc["memory"], svc["memory_line"] = value, n
+        stack.append((indent, key))
+    return services
+
+
+def check_profile(compose: list[Path]) -> tuple[set[str], list[str], list[str]]:
+    """(variables left out of the sum, report lines, errors) for the profile and the overrides."""
+    errors: list[str] = []
+    report: list[str] = []
+    used_by: dict[str, list[tuple[str, bool]]] = {}  # var -> [(service, in an excluded profile)]
+    for path in compose:
+        if path.name in OVERRIDE_FILES:
+            for service, info in compose_services(path).items():
+                if info["memory"] is not None:
+                    errors.append(
+                        f"{path.name}:{info['memory_line']}: service '{service}' sets a memory limit "
+                        f"({info['memory']}); this override may add GPU devices only, never change a "
+                        "limit (AD-7: a GPU changes speed, not the budget)")
+        if path.name != PROFILE_FILE:
+            continue
+        for service, info in compose_services(path).items():
+            excluded = bool(EXCLUDED_PROFILES & set(info["profiles"]))
+            refs = [m.group(1) or m.group(4) for m in _REF.finditer(info["memory"] or "")]
+            if not refs:
+                what = ("no memory limit" if info["memory"] is None
+                        else f"a hard-coded memory limit {info['memory']}")
+                var = re.sub(r"\W", "_", service).upper() + "_MEM_LIMIT"
+                errors.append(
+                    f"{path.name}:{info['line']}: service '{service}' has {what}; every service in the "
+                    f"16 GB profile needs `deploy.resources.limits.memory: ${{{var}:-<size>}}` with "
+                    f"`{var}=<size>` declared in .env.example")
+                continue
+            for var in refs:
+                used_by.setdefault(var, []).append((service, excluded))
+    left_out = {v for v, users in used_by.items() if all(ex for _, ex in users)}
+    for var in sorted(left_out):
+        names = ", ".join(s for s, _ in used_by[var])
+        report.append(f"  {var} is used only by {names} (profile "
+                      f"{'/'.join(sorted(EXCLUDED_PROFILES))}): outside the sum (AD-7)")
+    return left_out, report, errors
+
+
 def load_literal_baseline(path: Path) -> tuple[dict[tuple[str, str, str], str], list[str]]:
     """{(compose file, service, value): reason}. Lines: `<file> <service> <value>  # reason`."""
     entries: dict[tuple[str, str, str], str] = {}
@@ -193,8 +296,11 @@ def check(env_path: Path, compose: list[Path], limit: int = LIMIT_BYTES,
     """(report lines, errors). literal_baseline=None: no literal limit is baselined."""
     limits, errors = read_limits(env_path)
     errors += check_compose(compose, limits, env_path.name)
-    total = sum(b for _, b, _ in limits.values())
-    report = [f"  {var:<24} {raw:>8}  ({fmt(b)})" for var, (raw, b, _) in sorted(limits.items())]
+    left_out, profile_report, profile_errors = check_profile(compose)
+    errors += profile_errors
+    total = sum(b for var, (_, b, _) in limits.items() if var not in left_out)
+    report = [f"  {var:<24} {raw:>8}  ({fmt(b)}){'  not summed' if var in left_out else ''}"
+              for var, (raw, b, _) in sorted(limits.items())]
     report.append(f"  {'sum':<24} {'':>8}  ({fmt(total)}; ceiling {fmt(limit)}, binary units)")
     if not limits:
         report = [f"  no *_MEM_LIMIT in {env_path.name}; nothing to sum"]
@@ -204,7 +310,7 @@ def check(env_path: Path, compose: list[Path], limit: int = LIMIT_BYTES,
             f"{fmt(total - limit)} (AD-7's 14.5 GB is 14.5 GiB, as Docker's g is binary); "
             "lower another limit in the same PR and re-run EV-5")
     literal_report, literal_errors = check_literals(compose, literal_baseline)
-    return report + literal_report, errors + literal_errors
+    return report + profile_report + literal_report, errors + literal_errors
 
 
 def main(argv: list[str] | None = None) -> int:

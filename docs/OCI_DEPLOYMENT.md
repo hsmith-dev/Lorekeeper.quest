@@ -114,7 +114,7 @@ CORS_ORIGINS=["http://<public-ip>"]        # or https://yourdomain.com once you 
 FRONTEND_URL=http://<public-ip>
 ```
 
-then `docker compose -f docker-compose.prod.yml restart backend`.
+then `docker compose -f docker-compose.prod.yml restart web`.
 
 At this point `http://<public-ip>/` should load the app.
 
@@ -150,7 +150,7 @@ and the frontend shows "Billing isn't configured yet."
 No admin UI yet — mint codes from the instance:
 
 ```bash
-docker compose -f docker-compose.prod.yml exec backend python scripts/create_promo_code.py create BETA2026 --max-redemptions 50
+docker compose -f docker-compose.prod.yml exec web python scripts/create_promo_code.py create BETA2026 --max-redemptions 50
 ```
 
 Full usage in the script's own `--help` / header docstring.
@@ -205,7 +205,7 @@ history) — horizontal-scale that tier:
 2. Provision N more A1.Flex instances (again, up to 4 total OCPUs
    free — beyond that, paid A1.Flex is billed per OCPU/GB-hour, which is
    still cheap relative to most cloud compute).
-3. Each instance runs `backend` + `nginx` (from `docker-compose.prod.yml`,
+3. Each instance runs `web`, `worker` + `nginx` (from `docker-compose.prod.yml`,
    minus the `postgres`/`valkey`/`ollama` services — those become shared,
    see Step 3) pointing at the shared Postgres/Valkey/Ollama instances via
    private IP.

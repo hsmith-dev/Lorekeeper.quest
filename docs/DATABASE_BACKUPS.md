@@ -122,5 +122,5 @@ download → restore) actually round-trips.
 | Manual backup right now | `ssh ubuntu@<instance> "cd ~/lorekeeper && ./scripts/backup-db.sh"` |
 | List backups | `ssh ubuntu@<instance> "ls -lh ~/lorekeeper/backups"` |
 | Restore from a backup (database + stored files) | `ssh ubuntu@<instance> "cd ~/lorekeeper && ./scripts/restore-db.sh backups/<file>.dump"` |
-| Back up a Campaign's kept Live audio too | `docker compose -f docker-compose.prod.yml exec backend touch /data/files/<campaign_id>/.backup-live-audio` |
+| Back up a Campaign's kept Live audio too | `docker compose -f docker-compose.prod.yml exec web touch /data/files/<campaign_id>/.backup-live-audio` |
 | Check the cron job is installed | `ssh ubuntu@<instance> "crontab -l"` |

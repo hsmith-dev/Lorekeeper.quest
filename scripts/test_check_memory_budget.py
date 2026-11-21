@@ -31,15 +31,19 @@ VALKEY_MEM_LIMIT=128m
 """
 
 
-# The ceiling for hard-coded compose limits (outside the sum). Shrink it in the
-# PR that moves a literal to a *_MEM_LIMIT variable (E0-Platform.7).
-FROZEN_LITERALS = frozenset({
-    ("docker-compose.prod.yml", "postgres", "3g"),
-    ("docker-compose.prod.yml", "valkey", "512m"),  # was "redis" (renamed, same limit)
-    ("docker-compose.prod.yml", "ollama", "14g"),
-    ("docker-compose.prod.yml", "backend", "14g"),
-    ("docker-compose.prod.yml", "nginx", "256m"),
-})
+# The ceiling for hard-coded compose limits (outside the sum). E0-Platform.7
+# moved every one to a *_MEM_LIMIT variable, so it is empty and stays empty.
+FROZEN_LITERALS: frozenset[tuple[str, str, str]] = frozenset()
+
+# The nine AD-7 variables E0-Platform.7 declares in .env.example (the
+# compose service each belongs to, or None while the service is reserved).
+AD7_REPO = {
+    "OLLAMA_MEM_LIMIT": ("5.25g", "ollama"), "ML_MEM_LIMIT": ("2.5g", "ml"),
+    "TTS_MEM_LIMIT": ("2.5g", None), "STT_MEM_LIMIT": ("1.25g", "stt"),
+    "WEB_MEM_LIMIT": ("1g", "web"), "WORKER_MEM_LIMIT": ("1g", "worker"),
+    "POSTGRES_MEM_LIMIT": ("768m", "postgres"), "VALKEY_MEM_LIMIT": ("128m", "valkey"),
+    "NGINX_MEM_LIMIT": ("128m", "nginx"),
+}
 
 
 def run(tmp_path: Path, env: str, compose: str = "", baseline: str | None = None):
@@ -209,3 +213,189 @@ def test_literal_baseline_entry_without_reason_fails(tmp_path):
     baseline = "docker-compose.yml postgres 3g\ndocker-compose.yml redis 512m  # x\n"
     _, errors = run(tmp_path, "# ML_MEM_LIMIT=2560m\n", COMPOSE_LITERALS, baseline)
     assert any("no reason" in e for e in errors)
+
+
+# ---- E0-Platform.7: the one profile, the diarize exclusion, the GPU override
+
+def test_repo_declares_the_ad7_limits_and_prod_uses_each():
+    # Which variables exist and which service uses each is fixed; the values
+    # may move (raise one, lower another) as long as CI-14's sum holds.
+    limits, errors = cmb.read_limits(cmb.ENV_EXAMPLE)
+    assert errors == []
+    assert set(limits) == set(AD7_REPO)
+    services = cmb.compose_services(cmb.REPO / cmb.PROFILE_FILE)
+    for var, (_, service) in AD7_REPO.items():
+        if service is not None:
+            assert services[service]["memory"] == f"${{{var}:-{limits[var][0]}}}", service
+    assert sum(b for _, b, _ in limits.values()) <= cmb.LIMIT_BYTES
+
+
+def test_ad7_table_spelled_as_shipped_is_exactly_the_ceiling():
+    # AD-7's own table (AD7_REPO) sums to exactly 14.5 GiB: the inclusive edge.
+    assert sum(cmb.parse_size(raw) for raw, _ in AD7_REPO.values()) == cmb.LIMIT_BYTES
+
+
+def test_gpu_override_touches_only_ollama_and_stt():
+    services = cmb.compose_services(cmb.REPO / "docker-compose.gpu.yml")
+    assert set(services) == {"ollama", "stt"}
+    assert all(s["memory"] is None for s in services.values())
+
+
+def profile_run(tmp_path, env, profile, override=None):
+    (tmp_path / ".env.example").write_text(env)
+    files = [tmp_path / cmb.PROFILE_FILE]
+    files[0].write_text(profile)
+    if override is not None:
+        files.append(tmp_path / "docker-compose.gpu.yml")
+        files[1].write_text(override)
+    return cmb.check(tmp_path / ".env.example", files, literal_baseline=None)
+
+
+PROFILE = """\
+services:
+  web:
+    image: x
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: ${WEB_MEM_LIMIT:-1g}
+  ml:
+    deploy:
+      resources:
+        limits:
+          memory: ${ML_MEM_LIMIT:-2.5g}
+"""
+TWO = "WEB_MEM_LIMIT=1g\nML_MEM_LIMIT=2.5g\n"
+# AD7 with ML uncommented at 2.5g, so it matches PROFILE's default.
+AD7_FULL = AD7.replace("# ML_MEM_LIMIT=2560m", "ML_MEM_LIMIT=2.5g")
+
+
+def test_profile_with_a_limit_on_every_service_passes(tmp_path):
+    _, errors = profile_run(tmp_path, TWO, PROFILE)
+    assert errors == []
+
+
+def test_over_budget_by_one_mebibyte_fails(tmp_path):
+    env = AD7.replace("OLLAMA_MEM_LIMIT=5.25g", "OLLAMA_MEM_LIMIT=5377m")  # 5.25g = 5376m
+    _, errors = run(tmp_path, env)
+    assert len(errors) == 1 and "over the AD-7 ceiling" in errors[0]
+
+
+def test_profile_service_without_a_limit_fails(tmp_path):
+    profile = PROFILE + '  nginx:\n    image: nginx\n    ports:\n      - "80:80"\n'
+    _, errors = profile_run(tmp_path, TWO, profile)
+    assert len(errors) == 1
+    assert "'nginx' has no memory limit" in errors[0] and "NGINX_MEM_LIMIT" in errors[0]
+    assert f"{cmb.PROFILE_FILE}:14" in errors[0]  # PROFILE is 13 lines
+
+
+def test_profile_service_with_a_literal_limit_fails(tmp_path):
+    profile = PROFILE + "  nginx:\n    deploy:\n      resources:\n        limits:\n          memory: 256m\n"
+    _, errors = profile_run(tmp_path, TWO, profile)
+    # Reported by both the profile rule and the literal ratchet.
+    assert any("'nginx' has a hard-coded memory limit 256m" in e for e in errors)
+    assert any("outside the AD-7 sum" in e for e in errors)
+
+
+def test_only_a_reservation_is_not_a_limit(tmp_path):
+    profile = PROFILE + "  nginx:\n    deploy:\n      resources:\n        reservations:\n          memory: 64m\n"
+    _, errors = profile_run(tmp_path, TWO, profile)
+    assert len(errors) == 1 and "'nginx' has no memory limit" in errors[0]
+
+
+def test_profile_limit_variable_not_declared_fails(tmp_path):
+    _, errors = profile_run(tmp_path, "WEB_MEM_LIMIT=1g\n", PROFILE)
+    assert len(errors) == 1 and "ML_MEM_LIMIT is used but not declared" in errors[0]
+
+
+def test_reserved_variable_without_a_service_still_counts(tmp_path):
+    # TTS_MEM_LIMIT in AD7 has no service; one more mebibyte goes over.
+    _, errors = profile_run(tmp_path, AD7_FULL + "EXTRA_MEM_LIMIT=1m\n", PROFILE)
+    assert len(errors) == 1 and "over the AD-7 ceiling" in errors[0]
+
+
+DIARIZE_INLINE = """\
+  diarize:
+    profiles: [diarize]
+    deploy:
+      resources:
+        limits:
+          memory: ${DIARIZE_MEM_LIMIT:-3g}
+"""
+
+DIARIZE_BLOCK = """\
+  diarize:
+    profiles:
+      - diarize
+    deploy:
+      resources:
+        limits:
+          memory: ${DIARIZE_MEM_LIMIT:-3g}
+"""
+
+
+DIARIZE_BLOCK_SAME_INDENT = """\
+  diarize:
+    profiles:
+    - diarize
+    deploy:
+      resources:
+        limits:
+          memory: ${DIARIZE_MEM_LIMIT:-3g}
+"""
+
+
+@pytest.mark.parametrize("diarize", [DIARIZE_INLINE, DIARIZE_BLOCK, DIARIZE_BLOCK_SAME_INDENT])
+def test_diarize_profile_is_outside_the_sum(tmp_path, diarize):
+    # AD7 is already at the ceiling; 3g more would fail if it were summed.
+    report, errors = profile_run(tmp_path, AD7_FULL + "DIARIZE_MEM_LIMIT=3g\n", PROFILE + diarize)
+    assert errors == []
+    text = "\n".join(report)
+    assert "14.50 GiB" in text and "DIARIZE_MEM_LIMIT is used only by diarize" in text
+    assert any("DIARIZE_MEM_LIMIT" in line and "not summed" in line for line in report)
+
+
+def test_variable_shared_with_a_non_diarize_service_is_summed(tmp_path):
+    shared = PROFILE + DIARIZE_INLINE + DIARIZE_INLINE.replace("  diarize:\n    profiles: [diarize]\n", "  other:\n")
+    _, errors = profile_run(tmp_path, AD7_FULL + "DIARIZE_MEM_LIMIT=3g\n", shared)
+    assert len(errors) == 1 and "over the AD-7 ceiling" in errors[0]
+
+
+def test_other_profiles_are_summed(tmp_path):
+    tts = DIARIZE_INLINE.replace("diarize", "tts").replace("DIARIZE_MEM_LIMIT:-3g", "TTS_MEM_LIMIT:-2.5g")
+    # A `tts` profile service (E5) is inside the sum, unlike diarize.
+    report, errors = profile_run(tmp_path, AD7_FULL, PROFILE + tts)
+    assert errors == [] and not any("not summed" in line for line in report)
+
+
+GPU_OK = """\
+services:
+  ollama:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+"""
+
+
+def test_gpu_override_with_devices_only_passes(tmp_path):
+    _, errors = profile_run(tmp_path, TWO, PROFILE, GPU_OK)
+    assert errors == []
+
+
+@pytest.mark.parametrize("limit", ["memory: 8g", "memory: ${ML_MEM_LIMIT:-2.5g}"])
+def test_gpu_override_setting_a_limit_fails(tmp_path, limit):
+    override = GPU_OK + f"  ml:\n    deploy:\n      resources:\n        limits:\n          {limit}\n"
+    _, errors = profile_run(tmp_path, TWO, PROFILE, override)
+    # GPU_OK is 9 lines, so the memory line is 14.
+    assert any("docker-compose.gpu.yml:14" in e and "'ml' sets a memory limit" in e for e in errors), errors
+
+
+def test_non_profile_compose_files_need_no_limits(tmp_path):
+    # docker-compose.yml (dev) is not the 16 GB profile.
+    _, errors = run(tmp_path, "", "services:\n  backend:\n    image: x\n")
+    assert errors == []

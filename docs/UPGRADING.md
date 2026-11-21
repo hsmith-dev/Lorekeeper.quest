@@ -39,3 +39,29 @@ Your old NPC and Quest rows are kept as they were. The copy is safe to run
 again: it never duplicates an Entity. A value it does not recognise takes
 the default status (or kind NPC) and is written to the upgrade log instead
 of stopping the upgrade.
+
+## One 16 GB profile: `backend` is now `web` (E0-Platform.7)
+
+`docker-compose.prod.yml` now gives every container a memory limit from
+`.env.example`, and together they add up to 14.5 GiB (see README, "Why 16 GB").
+Two things to do when you upgrade:
+
+1. **Copy the new limits into your `.env`.** Add the "Memory budget" block from
+   `.env.example` (`OLLAMA_MEM_LIMIT` through `NGINX_MEM_LIMIT`). Without it the
+   compose file uses the same values as defaults, so this only matters if you
+   want to change one: lower another by the same amount.
+2. **Remove the old `backend` container.** The API service is renamed `web`.
+   Start the upgraded stack with
+   `docker compose -f docker-compose.prod.yml up -d --build --remove-orphans`;
+   without `--remove-orphans` the old `backend` container (with its old 14 GB
+   limit) keeps running beside `web` and writing to the same database. Your
+   logs volume keeps its name, and `web` still answers to the `backend`
+   hostname, so a custom nginx config or `.env` pointing at
+   `http://backend:8000` keeps working. Commands change from
+   `docker compose ... exec backend` to `docker compose ... exec web`.
+
+The bundled Ollama now keeps one model loaded (`OLLAMA_MAX_LOADED_MODELS=1`,
+was 2) and unloads it after 30 idle minutes (was 60), so it fits its 5.25 GiB
+limit. If you installed both `lorekeeper` and `lorekeeper-base` (as
+`scripts/deploy-oci.sh` does), switching between them in Settings or Model
+Evaluation now reloads the model, which takes about a minute on CPU.

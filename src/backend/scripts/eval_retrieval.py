@@ -23,8 +23,8 @@ Operating points are thresholds x {vector-only, hybrid}; the chosen point
 No LLM is called; --fake-llm and the other shared flags are accepted (see
 eval_common.build_parser).
 
-Run inside the backend container (seed first, see scripts/seed_demo.py):
-  docker compose -f docker-compose.prod.yml exec backend \\
+Run inside the web container (seed first, see scripts/seed_demo.py):
+  docker compose -f docker-compose.prod.yml exec web \\
       python scripts/eval_retrieval.py --campaign-id <uuid> --out /tmp/RETRIEVAL_EVAL.md
 (copy docs/RETRIEVAL_EVAL.md to /tmp in the container first with
 `docker compose cp`, and copy it back out afterwards: the image has neither

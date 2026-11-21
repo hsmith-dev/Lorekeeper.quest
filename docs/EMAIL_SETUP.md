@@ -62,7 +62,7 @@ failure, so a mismatch here fails silently from the app's perspective. Check
 Resend's dashboard → **Logs** if welcome/reset emails don't seem to be
 arriving.
 
-Restart the backend (`docker compose -f docker-compose.prod.yml restart backend`
+Restart the backend (`docker compose -f docker-compose.prod.yml restart web`
 or re-run `scripts/deploy-oci.sh`) to pick up the new values.
 
 ## 4. Test it

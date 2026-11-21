@@ -16,11 +16,11 @@ LLM, no model in this process:
   --embeddings require  exit 1 if the ml sidecar does not answer
   --embeddings skip     never call the ml sidecar
 
-Run inside the backend container (the repo's seeds/ is not in the image, so
+Run inside the web container (the repo's seeds/ is not in the image, so
 copy the file in first):
 
-  docker compose -f docker-compose.prod.yml cp seeds/demo_campaign.json backend:/tmp/demo_campaign.json
-  docker compose -f docker-compose.prod.yml exec backend \\
+  docker compose -f docker-compose.prod.yml cp seeds/demo_campaign.json web:/tmp/demo_campaign.json
+  docker compose -f docker-compose.prod.yml exec web \\
       python scripts/seed_demo.py --seed /tmp/demo_campaign.json --owner-email you@example.com
 
 From a checkout (src/backend/), --seed defaults to ../../seeds/demo_campaign.json.

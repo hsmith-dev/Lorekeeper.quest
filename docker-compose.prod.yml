@@ -3,21 +3,33 @@
 #
 # Usage:
 #   docker compose -f docker-compose.prod.yml up -d --build
+#   With an NVIDIA GPU, add the override (speed only; no limit changes):
+#   docker compose -f docker-compose.prod.yml -f docker-compose.gpu.yml up -d --build
+#
+# One profile for a 16 GB box (AD-7): every service's memory limit is a
+# *_MEM_LIMIT variable from .env.example, and together they come to 14.5 GiB,
+# leaving 1.5 GB for the OS and Docker. CI-14 (scripts/check_memory_budget.py)
+# fails the build if the sum goes over or a service here has no limit
+# variable. To raise one limit, lower another in the same PR.
 #
 # Before starting:
 #   1. Copy .env.example → .env and fill in all values
 #   2. Set ENVIRONMENT=production in .env
 #   3. Set CORS_ORIGINS to your actual domain, e.g. ["https://yourdomain.com"]
 #   4. Pick an LLM path:
-#      a) GPU host running KoboldCpp on the HOST — point KOBOLD_URL at the
-#         host gateway: KOBOLD_URL=http://host.docker.internal:5001
-#         (needs `extra_hosts: - "host.docker.internal:host-gateway"` added
-#         to the backend service below on Linux)
-#      b) No GPU (e.g. Oracle Cloud's Always Free Ampere A1 tier) — use the
-#         `ollama` service below instead, reachable internally at
+#      a) The bundled `ollama` service below (the default; CPU-only unless you
+#         add docker-compose.gpu.yml), reachable internally at
 #         http://ollama:11434. See scripts/deploy-oci.sh for the one-time
-#         model import step. Point Settings' provider URL at it per-account,
-#         or set it as the default in .env.
+#         model import step.
+#      b) Ollama or KoboldCpp already running on the HOST (e.g. a GPU
+#         desktop): set KOBOLD_URL=http://host.docker.internal:11434
+#         (KoboldCpp: :5001). `web` and `worker` map that name to the host
+#         gateway (extra_hosts below). Then keep the bundled one stopped on
+#         every `up` (`--scale ollama=0`, or an override with
+#         `ollama: deploy: replicas: 0`; see README) and give the host Ollama
+#         the same context / parallel / loaded-model settings as below.
+#         OLLAMA_MEM_LIMIT's 5.25g still counts toward the host's 16 GB:
+#         the host's own Ollama needs at least that much of the same RAM.
 #
 # HTTPS works out of the box: if no certificate is mounted, the nginx
 #   container generates a self-signed one at startup (see
@@ -35,27 +47,29 @@ services:
   postgres:
     image: pgvector/pgvector:pg16
     restart: unless-stopped
+    # AD-7: shared_buffers sized to the 768m limit, leaving room for
+    # per-connection and work_mem memory beside it.
+    command: postgres -c shared_buffers=192MB
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
     volumes:
       - postgres_data:/var/lib/postgresql/data
-    # Not exposed to host — only backend can reach it
+    # Not exposed to host — only web and worker can reach it
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
       interval: 10s
       timeout: 5s
       retries: 5
-    # Resource ceilings on every service below (see the same note on
-    # `backend`) — respected by plain `docker compose up` on this Compose
-    # version, no swarm needed. postgres idles under 50MB; this is pure
-    # headroom, not a reflection of expected steady-state usage.
+    # Resource ceilings on every service below are respected by plain
+    # `docker compose up` on this Compose version, no swarm needed. Memory
+    # comes from the AD-7 budget in .env.example.
     deploy:
       resources:
         limits:
           cpus: "1.0"
-          memory: 3g
+          memory: ${POSTGRES_MEM_LIMIT:-768m}
 
   # Valkey (BSD-3-Clause, Linux Foundation): a drop-in, Redis-compatible
   # server. Replaces redis:7-alpine, which resolves to Redis 7.4+ (RSALv2 /
@@ -67,7 +81,11 @@ services:
   valkey:
     image: valkey/valkey:8.1.11-alpine
     restart: unless-stopped
-    command: valkey-server --save 60 1 --loglevel warning
+    # AD-7: maxmemory 96mb under the 128m container limit. noeviction on
+    # purpose: the RQ queues, Job leases and the LLM gate live here, and
+    # silently evicting them would lose work; a full Valkey refuses writes
+    # with an error instead.
+    command: valkey-server --save 60 1 --loglevel warning --maxmemory 96mb --maxmemory-policy noeviction
     volumes:
       - valkey_data:/data
     healthcheck:
@@ -85,30 +103,30 @@ services:
       resources:
         limits:
           cpus: "0.5"
-          memory: 512m
+          memory: ${VALKEY_MEM_LIMIT:-128m}
 
-  # Optional: CPU-served LLM for GPU-less hosts (e.g. OCI Always Free Ampere
-  # A1). Not exposed to the host — only reachable from other containers on
-  # this network at http://ollama:11434. Point a user's Settings provider URL
-  # (or the app-wide default in .env) there to use it. First run needs a
-  # one-time `docker compose -f docker-compose.prod.yml exec ollama ollama
-  # create lorekeeper -f /import-models/lorekeeper-Modelfile` — see
-  # scripts/deploy-oci.sh, which does this automatically.
+  # CPU-served LLM (GPU with docker-compose.gpu.yml). Not exposed to the host
+  # — only reachable from other containers on this network at
+  # http://ollama:11434. First run needs the `lorekeeper` model installed:
+  # Admin → System's model installer, or scripts/deploy-oci.sh's one-time
+  # `ollama create lorekeeper -f /import-models/lorekeeper-Modelfile`.
   ollama:
     image: ollama/ollama:latest
     restart: unless-stopped
+    # AD-7 / AD-8: one resident model, one request at a time, a fixed
+    # context. Every platform LLM task uses the same model (LOCAL_LLM_MODEL),
+    # so a second loaded model would only overcommit the 5.25g limit; a
+    # Settings or Model Evaluation switch to another model pays a cold load
+    # instead (was 2 models / 60m before E0-Platform.7).
+    # NUM_PARALLEL is fixed at 1, not read from .env: the 5.25g limit holds
+    # one KV cache, and Ollama's 0 ("auto") would open several. Keep the
+    # backend's OLLAMA_NUM_PARALLEL (and LLM_GATE_CAPACITY, if set) at 1 to
+    # match. CONTEXT_LENGTH is the same .env line the prompt budget reads.
     environment:
-      # Two models now live here (see scripts/deploy-oci.sh's import step) —
-      # "lorekeeper" (fine-tuned) and "lorekeeper-base", for Settings' AI
-      # Provider toggle and Model Evaluation's quick-compare buttons.
-      # Without this, Ollama's default keeps only one loaded at a time, so
-      # every switch between them pays a ~60s cold-load penalty on this
-      # CPU-only ARM host (confirmed live — see llama_server.go's "waiting
-      # for llama-server to become available" in this container's logs).
-      # Two Q4 7B models (~4GB each) comfortably fit in the instance's 24GB
-      # RAM alongside everything else, so keep both resident.
-      OLLAMA_MAX_LOADED_MODELS: "2"
-      OLLAMA_KEEP_ALIVE: "60m"
+      OLLAMA_MAX_LOADED_MODELS: "1"
+      OLLAMA_NUM_PARALLEL: "1"
+      OLLAMA_CONTEXT_LENGTH: ${OLLAMA_CONTEXT_LENGTH:-4096}
+      OLLAMA_KEEP_ALIVE: "30m"
     volumes:
       - ollama_data:/root/.ollama
       - ./src/ml/models:/import-models:ro
@@ -118,23 +136,28 @@ services:
       timeout: 10s
       retries: 5
       start_period: 20s
-    # Measured live: two Q4 7B models loaded simultaneously (OLLAMA_MAX_LOADED_
-    # MODELS=2 above) run ~9GB combined; 14GB leaves real headroom for context/
-    # KV-cache growth during generation without letting a leak or a third
-    # model somehow loading eat the whole box.
+    # Memory: AD-7's 5.25g holds one Q4 7B model at a 4096 context. On the
+    # E0-QA.15 Reference Box run (4 threads) the runner peaked at 5.08 GB;
+    # a 12-thread run was OOM-killed at this limit on a 2k-token prompt, so
+    # it is still to be re-checked on the desktop (docs/BENCHMARKS.md).
     #
     # CPU: no cap by default (cpus 0 = unlimited) — llama.cpp generation speed
     # scales with cores, and the old fixed cpus "3.0" held a 24-core host to
     # ~0.7 tok/s, long enough for chat answers to hit KOBOLD_TIMEOUT_SECONDS.
     # Set OLLAMA_CPUS in .env (e.g. OLLAMA_CPUS=6) to reserve cores for other
-    # work on a shared host. Unset or empty falls back to 0 (the `:-`).
+    # work on a shared host, and then give the model a matching
+    # `PARAMETER num_thread` (Ollama starts one thread per HOST core and
+    # ignores the quota; see .env.example). Unset or empty falls back to 0.
     deploy:
       resources:
         limits:
           cpus: "${OLLAMA_CPUS:-0}"
-          memory: 14g
+          memory: ${OLLAMA_MEM_LIMIT:-5.25g}
 
-  backend:
+  # The API (gunicorn, 4 Uvicorn workers). Called `backend` before
+  # E0-Platform.7; that name stays as a network alias so an old .env or a
+  # custom nginx config pointing at http://backend:8000 keeps working.
+  web:
     build:
       context: ./src/backend
       dockerfile: Dockerfile.prod
@@ -165,6 +188,10 @@ services:
         condition: service_healthy
       valkey:
         condition: service_healthy
+    # An LLM on the Docker host (KOBOLD_URL=http://host.docker.internal:...).
+    # Docker Desktop resolves the name already; on Linux this maps it.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     # Run migrations on startup before serving. Deliberately a single line —
     # a folded (`>`) multi-line YAML scalar only folds line breaks to spaces
     # for lines at the *same* indentation as the first content line; any
@@ -172,7 +199,7 @@ services:
     # literal, so `sh -c` received real embedded newlines and every flag
     # after `gunicorn app.main:app` ran as its own bogus one-word command
     # (`sh: -w: not found`, etc.). One line sidesteps the whole footgun.
-    # --forwarded-allow-ips="*" is safe here specifically because the backend
+    # --forwarded-allow-ips="*" is safe here specifically because the API
     # isn't exposed to the host (see the comment below) — nginx is the only
     # thing that can ever reach it, so there's no untrusted peer that could
     # spoof X-Forwarded-For. Without this, gunicorn/UvicornWorker only trusts
@@ -190,43 +217,30 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
-    # Since E0-Platform.6 no gunicorn worker loads a model (embeddings, NER
-    # and OCR come from `ml`, speech from `stt`), so the history below no
-    # longer describes the process; the cap stays until E0-Platform.7 sizes
-    # it (WEB_MEM_LIMIT) from a fresh measurement.
-    #
-    # History: measured live via `docker stats`, 4 gunicorn workers idled at
-    # ~6.4GB RAM combined, each loading its own copy of the spaCy
-    # transformer and sentence-transformers models at startup.
-    #
-    # This was originally capped at 10g on that idle number alone, which
-    # was wrong: it only covers steady state, not the concurrent *loading*
-    # burst all 4 workers do at once on every container start/redeploy.
-    # Confirmed live via cgroup memory.peak with the cap raised out of the
-    # way: real unconstrained startup peak is ~11.86GiB, ~1.86GB over the
-    # old 10g ceiling. Every redeploy was hitting that ceiling and having
-    # gunicorn workers cgroup-OOM-killed mid-boot ("Worker was sent
-    # SIGKILL! Perhaps out of memory?" in the logs) — gunicorn's master
-    # auto-respawned them so the container still reached `healthy`
-    # eventually and this went unnoticed, but real requests landing on a
-    # worker during that flapping window would fail. 14g leaves ~2GB of
-    # real headroom above the measured peak, not the idle number.
+    # AD-7: 1g for 4 gunicorn workers. Since E0-Platform.6 no worker loads a
+    # model (embeddings, NER and OCR come from `ml`, speech from `stt`), and
+    # the image is 141 MiB. The old 14g cap was sized for the in-process
+    # models (a measured 11.86 GiB boot peak with all four workers loading
+    # spaCy and sentence-transformers at once); that peak is gone with them.
+    # The new limit is still to be measured at idle and under load on the
+    # desktop.
     deploy:
       resources:
         limits:
           cpus: "2.0"
-          memory: 14g
+          memory: ${WEB_MEM_LIMIT:-1g}
     # `default` for postgres/valkey/ollama/nginx, `models` to reach the ml
     # and stt sidecars.
     networks:
-      - default
-      - models
+      default:
+        aliases: [backend]
+      models: {}
 
   # Background Jobs (E0-Jobs.3): an RQ WorkerPool of WORKER_PROCESSES
   # (default 2) LorekeeperWorker processes on the interactive, onsave and
-  # backfill queues (highest priority first). Same image and env as the
-  # backend; it starts after the backend is healthy, so after its migrations.
-  # No ports and no nginx route. Override the ceiling with WORKER_MEM_LIMIT.
+  # backfill queues (highest priority first). Same image and env as web; it
+  # starts after web is healthy, so after its migrations. No ports and no
+  # nginx route.
   worker:
     build:
       context: ./src/backend
@@ -236,8 +250,11 @@ services:
     environment:
       ENVIRONMENT: production
     depends_on:
-      backend:
+      web:
         condition: service_healthy
+    # Jobs call the LLM too: same host-gateway mapping as web.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     command: python -m app.jobs.worker
     # Jobs write recap audio, Chronicles and map tiles here, and files.gc
     # sweeps it (E0-Jobs.8).
@@ -259,10 +276,10 @@ services:
   # Shared embeddings + NER sidecar (src/services/ml): one copy of MiniLM and
   # en_core_web_trf instead of one per gunicorn worker. Not exposed to the
   # host and no nginx route — only on the internal `models` network, where
-  # the backend reaches it at ML_URL (default http://ml:8000). Since
-  # E0-Platform.6 the backend and worker call it for every embedding, NER and
-  # OCR request and load no model themselves. Weights are baked into the
-  # image; it runs offline.
+  # web and worker reach it at ML_URL (default http://ml:8000). Since
+  # E0-Platform.6 they call it for every embedding, NER and OCR request and
+  # load no model themselves. Weights are baked into the image; it runs
+  # offline.
   ml:
     # Tagged so scripts/sidecar_smoke.sh ml finds it by its default name.
     image: lorekeeper-ml:latest
@@ -282,21 +299,22 @@ services:
       timeout: 5s
       retries: 5
       start_period: 180s
-    # Provisional ceiling: MiniLM + en_core_web_trf resident in one process,
-    # plus the lazy NLI/OCR models under ML_RESIDENT_BUDGET_MB; measured
-    # limits come with E0-Platform.7. Override with ML_MEM_LIMIT in .env.
+    # AD-7: 2.5g for MiniLM + en_core_web_trf resident in one process, plus
+    # the lazy NLI/OCR models under ML_RESIDENT_BUDGET_MB (E0-QA.15: the
+    # xsmall NLI peaked at 1.23 GB cgroup in this image).
     deploy:
       resources:
         limits:
           cpus: "1.0"
-          memory: ${ML_MEM_LIMIT:-2560m}
+          memory: ${ML_MEM_LIMIT:-2.5g}
 
   # faster-whisper speech-to-text sidecar (src/services/stt): one copy of the
   # model instead of openai-whisper in every gunicorn worker. Same rules as
   # ml: no host port, no nginx route, only the internal `models` network,
-  # where the backend reaches it at STT_URL (default http://stt:8000).
+  # where web and worker reach it at STT_URL (default http://stt:8000).
   # Weights are baked into the image; it runs offline. The model loads on
   # the first request and unloads after STT_IDLE_UNLOAD_S idle.
+  # docker-compose.gpu.yml builds its `gpu` target instead.
   stt:
     image: lorekeeper-stt:latest
     build:
@@ -315,19 +333,19 @@ services:
       timeout: 5s
       retries: 5
       start_period: 30s
-    # AD-7 budget for stt: 1.25g. Override with STT_MEM_LIMIT in .env.
+    # AD-7: 1.25g (E0-QA.15: base int8 peaked at 0.5 GB cgroup).
     deploy:
       resources:
         limits:
           cpus: "2.0"
-          memory: ${STT_MEM_LIMIT:-1280m}
+          memory: ${STT_MEM_LIMIT:-1.25g}
 
   nginx:
     build:
       context: .
       dockerfile: nginx/Dockerfile
       args:
-        # Leave empty (default) — nginx on this server proxies /api to backend.
+        # Leave empty (default) — nginx on this server proxies /api to web.
         # Set VITE_API_URL=https://your-backend.com only for split-host deploys.
         VITE_API_URL: ${VITE_API_URL:-}
     restart: unless-stopped
@@ -335,7 +353,7 @@ services:
       - "80:80"
       - "443:443"
     depends_on:
-      backend:
+      web:
         condition: service_healthy
     volumes:
       - nginx_logs:/var/log/nginx
@@ -350,11 +368,11 @@ services:
       resources:
         limits:
           cpus: "0.5"
-          memory: 256m
+          memory: ${NGINX_MEM_LIMIT:-128m}
 
 networks:
   # internal: no route out of the network and no host port publishing, so
-  # the ml and stt sidecars can talk to the backend and nothing else.
+  # the ml and stt sidecars can talk to web and worker and nothing else.
   models:
     internal: true
 
@@ -363,6 +381,7 @@ volumes:
   valkey_data:
   nginx_logs:
   ollama_data:
+  # Keeps its pre-E0-Platform.7 name so existing logs survive the rename.
   backend_logs:
   # Stored files (E0-Jobs.8): backed up with the database by
   # scripts/backup-db.sh (docs/DATABASE_BACKUPS.md).
