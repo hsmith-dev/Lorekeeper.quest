@@ -65,7 +65,7 @@ echo "[$(date)] Database backup complete: $OUT_FILE ($SIZE)"
 # directory. In-flight temporary names (`.tmp-*`) are skipped. Run inside the
 # container so tar sees the volume as the app does.
 echo "[$(date)] Archiving stored files: $FILES_OUT"
-if ! docker compose -f docker-compose.prod.yml exec -T backend sh -c '
+if ! docker compose -f docker-compose.prod.yml exec -T web sh -c '
   set -e
   cd /data/files
   set --

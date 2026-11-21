@@ -22,10 +22,10 @@ A second run over a filled table changes nothing.
 
   python scripts/backfill_party_embeddings.py [--database-url URL] [--dry-run]
 
-Run inside the backend container (embeddings come from the `ml` sidecar
+Run inside the web container (embeddings come from the `ml` sidecar
 at ML_URL; with it down every row fails, stays NULL, and the run exits 1):
 
-  docker compose -f docker-compose.prod.yml exec backend python scripts/backfill_party_embeddings.py
+  docker compose -f docker-compose.prod.yml exec web python scripts/backfill_party_embeddings.py
 """
 from __future__ import annotations
 

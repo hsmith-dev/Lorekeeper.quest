@@ -1,0 +1,47 @@
+# =============================================================================
+# Lorekeeper — optional NVIDIA GPU override (AD-7)
+#
+#   docker compose -f docker-compose.prod.yml -f docker-compose.gpu.yml up -d --build
+#
+# Needs an NVIDIA GPU and the NVIDIA Container Toolkit on the host. A GPU
+# changes speed only: this file gives `ollama` and `stt` a GPU device
+# reservation and builds stt's local `gpu` target. It changes no other
+# service and no memory limit; CI-14 (scripts/check_memory_budget.py) fails if
+# a memory limit appears here.
+#
+# The stt `gpu` image carries NVIDIA's proprietary cuBLAS / cuDNN wheels. It
+# is built locally and never published (src/services/stt/Dockerfile), which
+# is why it gets its own tag instead of overwriting lorekeeper-stt:latest.
+#
+# Check: `docker compose -f docker-compose.prod.yml -f docker-compose.gpu.yml
+# exec ollama ollama ps` should read `100% GPU` once a model is loaded, and
+# Admin → System shows stt's device as `cuda`.
+# =============================================================================
+
+services:
+
+  ollama:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  stt:
+    image: lorekeeper-stt:gpu
+    build:
+      context: ./src/services/stt
+      dockerfile: Dockerfile
+      target: gpu
+    environment:
+      # float16 is what E0-QA.15 measured on the GPU (0.11 s per 15 s chunk).
+      STT_COMPUTE_TYPE: ${STT_GPU_COMPUTE_TYPE:-float16}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

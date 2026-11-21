@@ -92,17 +92,17 @@ generated; `--out` rewrites only those and leaves the prose alone.
 ```bash
 # 1. Seed the demo campaign (idempotent; prints the campaign id). The image
 #    does not contain the repo's seeds/, so copy the file in first.
-docker compose -f docker-compose.prod.yml cp seeds/demo_campaign.json backend:/tmp/demo_campaign.json
-docker compose -f docker-compose.prod.yml exec backend \
+docker compose -f docker-compose.prod.yml cp seeds/demo_campaign.json web:/tmp/demo_campaign.json
+docker compose -f docker-compose.prod.yml exec web \
     python scripts/seed_demo.py --seed /tmp/demo_campaign.json --embeddings require
 
 # 2. Sweep (default thresholds 0.55,0.65,0.75; hybrid@0.65 marked). The
 #    image has no docs/, so copy this report in, update it there, copy it back.
-docker compose -f docker-compose.prod.yml cp docs/RETRIEVAL_EVAL.md backend:/tmp/RETRIEVAL_EVAL.md
-docker compose -f docker-compose.prod.yml exec backend \
+docker compose -f docker-compose.prod.yml cp docs/RETRIEVAL_EVAL.md web:/tmp/RETRIEVAL_EVAL.md
+docker compose -f docker-compose.prod.yml exec web \
     python scripts/eval_retrieval.py --campaign-id <campaign-uuid> \
     --embeddings require --out /tmp/RETRIEVAL_EVAL.md
-docker compose -f docker-compose.prod.yml cp backend:/tmp/RETRIEVAL_EVAL.md docs/RETRIEVAL_EVAL.md
+docker compose -f docker-compose.prod.yml cp web:/tmp/RETRIEVAL_EVAL.md docs/RETRIEVAL_EVAL.md
 ```
 
 Embeddings come from the `ml` sidecar at `ML_URL` (default `http://ml:8000`;

@@ -89,8 +89,10 @@ fi
 
 # ── 4. Bring up the stack ───────────────────────────────────────────────────
 step "Docker Compose stack"
-docker compose -f docker-compose.prod.yml up -d --build
-ok "Stack starting — postgres, valkey, ollama, backend, nginx"
+# --remove-orphans: a stack from before E0-Platform.7 has a `backend` container
+# (now `web`) that would otherwise keep running beside it, outside the budget.
+docker compose -f docker-compose.prod.yml up -d --build --remove-orphans
+ok "Stack starting — postgres, valkey, ollama, web, worker, ml, stt, nginx"
 
 # ── 5. Wait for Ollama, then import the fine-tuned model ───────────────────
 step "Ollama model import"
@@ -134,5 +136,5 @@ echo ""
 ok "Deployed. Visit http://<this-instance's-public-ip>/ once nginx reports healthy."
 warn "Set up a domain + TLS (certbot) before treating this as more than a demo — see docker-compose.prod.yml's HTTPS comments."
 warn "No promo codes exist yet — account registration is gated (needs a promo code or a subscription)."
-warn "Mint one: docker compose -f docker-compose.prod.yml exec backend python scripts/create_promo_code.py create YOURCODE"
+warn "Mint one: docker compose -f docker-compose.prod.yml exec web python scripts/create_promo_code.py create YOURCODE"
 warn "Full deployment walkthrough + scaling path: docs/OCI_DEPLOYMENT.md. Payment processor setup: docs/PAYMENT_PROCESSOR_SETUP.md."
