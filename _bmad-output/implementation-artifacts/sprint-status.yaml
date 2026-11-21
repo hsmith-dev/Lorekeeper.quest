@@ -157,7 +157,7 @@ development_status:
   9-2-f3-world-migration-with-the-legacy-npc-quest-copy: done
   9-3-apply_change-history-and-revert: done
   9-4-name-matching-with-normalize_name-and-match_names: done
-  9-5-entity-api-with-gm-and-party-projections: backlog
+  9-5-entity-api-with-gm-and-party-projections: done
   9-6-legacy-npc-and-quest-adapters-and-old-link-resolver: backlog
   9-7-suggested-mentions-backfill-and-mention-confirm-remove: backlog
   9-8-journal-delete-detaches-the-entry-from-the-world: backlog

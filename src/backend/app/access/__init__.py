@@ -29,7 +29,13 @@ app/core/sse.py's close watch (app.core may not import app.access), so every
 registry's `gm_when` (deleted or merged Entities are GM only). E0-Access.11 adds
 Campaign events (`campaign_event_stream`, `deliverable`, `stream_ctx`,
 `register_event_domain`, `event_domains`, `BROADCAST_DOMAINS`): who receives
-which `campaign:{id}:events` invalidation. E0-Jobs.7 adds the Job reads (`get_job`,
+which `campaign:{id}:events` invalidation. E0-WorldCore.5 adds the registry's
+`as_parent_field` (an alias row follows its Entity's `aliases` field) and
+`audience_of(..., floor=False)`, the `entity_changes.write_visibility` floor,
+the ENTITY_REF redaction in `project` (`visible_entity_ids`), resolvers that
+take the row's ctx (`register_resolver(..., with_ctx=True)`) and Visibility
+kinds with non-column hideable fields (`register_visibility_kind(..., fields=)`).
+E0-Jobs.7 adds the Job reads (`get_job`,
 `list_jobs`, `queue_positions`, `job_response`, `visible_result_ref`,
 `register_result_kind`, `result_kinds`) and the `jobs:{id}` stream filter
 (`job_event_stream`, `deliverable_job_event`, `JobEventCheckFailed`).

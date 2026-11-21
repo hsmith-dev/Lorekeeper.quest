@@ -27,6 +27,12 @@ test_03c0b504f1d1_data_steps_are_idempotent re-applies its data steps and
 re-runs it through a downgrade; test_03c0b504f1d1_downgrade_drops_its_tables
 proves the downgrade removes exactly its tables and FKs.
 
+E0-WorldCore.5 (0f1c3b194a4b) adds `entity_changes.write_visibility`, NOT
+NULL with the server default `gm`: its check proves every existing row
+(the seed's `migrated` rows) is `gm`, and
+test_0f1c3b194a4b_downgrade_drops_its_column proves the downgrade removes
+only that column and the upgrade puts it back as `gm`.
+
 pytest collects tests/migrations/ before tests/test_*.py, so the module
 fixture rebuilds the clean session schema in teardown.
 """
@@ -79,6 +85,7 @@ f3_world = _load(
     "f3_world_revision",
     BACKEND_DIR / "migrations" / "versions" / "03c0b504f1d1_f3_world_entities_legacy_copy.py",
 )
+WRITE_VISIBILITY = "0f1c3b194a4b"
 
 # Seed ids from scripts/make_snapshot.py.
 SEED_ID = "00000000-0000-4000-8000-000000000{}".format
@@ -517,6 +524,17 @@ async def f3_set_null_links_keep_campaign_id(conn: AsyncConnection) -> None:
     }
 
 
+@post_upgrade_check(WRITE_VISIBILITY)
+async def every_history_row_is_written_for_the_gm(conn: AsyncConnection) -> None:
+    col = (await conn.execute(sa.text(
+        "SELECT is_nullable, column_default, udt_name FROM information_schema.columns "
+        "WHERE table_name = 'entity_changes' AND column_name = 'write_visibility'"))).one()
+    assert tuple(col) == ("NO", "'gm'::visibility", "visibility")
+    counts = dict((await conn.execute(sa.text(
+        "SELECT write_visibility::text, count(*) FROM entity_changes GROUP BY 1"))).all())
+    assert counts == {"gm": len(expected_seed_entities())}, counts
+
+
 # Every F1-core column, by table: (key columns, F1-core columns). The
 # idempotency test compares these values before and after re-applying the
 # data steps.
@@ -898,3 +916,42 @@ def test_a3e7c1f9d258_backfills_shorthand(upgraded_snapshot):
     finally:
         command.upgrade(cfg, "head")
     assert asyncio.run(_with_conn(TEST_DB_URL, _shorthand_word_matches)) == 1
+
+
+async def _changes_without_write_visibility(conn: AsyncConnection) -> list:
+    return list((await conn.execute(sa.text(
+        "SELECT to_jsonb(t) - 'write_visibility' FROM entity_changes t ORDER BY id"))).scalars())
+
+
+async def _all_changes(conn: AsyncConnection) -> list:
+    return list((await conn.execute(sa.text("SELECT to_jsonb(t) FROM entity_changes t ORDER BY id"))).scalars())
+
+
+async def _write_visibility_column(conn: AsyncConnection) -> int:
+    return await conn.scalar(sa.text(
+        "SELECT count(*) FROM information_schema.columns "
+        "WHERE table_name = 'entity_changes' AND column_name = 'write_visibility'"))
+
+
+def test_0f1c3b194a4b_downgrade_drops_its_column(upgraded_snapshot):
+    # Dev only (NFR-8): the downgrade removes exactly the column; every other
+    # value of entity_changes is unchanged, and the upgrade sets it back to gm.
+    cfg = alembic_config(TEST_DB_URL)
+    before = asyncio.run(_with_conn(TEST_DB_URL, _changes_without_write_visibility))
+    assert before, "seed changed: no entity_changes to compare"
+    tables = asyncio.run(_with_conn(TEST_DB_URL, _public_tables))
+    command.downgrade(cfg, F3_WORLD)
+    try:
+        version = asyncio.run(_state(TEST_DB_URL))[0]
+        column = asyncio.run(_with_conn(TEST_DB_URL, _write_visibility_column))
+        at_f3 = asyncio.run(_with_conn(TEST_DB_URL, _all_changes))
+        tables_at_f3 = asyncio.run(_with_conn(TEST_DB_URL, _public_tables))
+    finally:
+        command.upgrade(cfg, "head")
+    assert version == F3_WORLD
+    assert column == 0
+    assert list(at_f3) == before
+    assert tables_at_f3 == tables
+    assert asyncio.run(_with_conn(TEST_DB_URL, _changes_without_write_visibility)) == before
+    assert asyncio.run(_with_conn(TEST_DB_URL, lambda c: c.scalar(sa.text(
+        "SELECT count(*) FROM entity_changes WHERE write_visibility <> 'gm'")))) == 0

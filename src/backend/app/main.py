@@ -24,7 +24,7 @@ from app.services.chat_service import check_kobold_health
 from app.db.session import get_db
 from app.api.routes import (
     auth, campaigns, journals, tags, chat, ingest, npcs, quests, sources, share, billing, session_plans, feedback,
-    admin, shorthand, character_sheets, members, visibility, files, events, jobs,
+    admin, shorthand, character_sheets, members, visibility, files, events, entities, jobs,
 )
 from app.api.routes import settings as settings_routes
 from app.api.deps import account_gate, require_admin
@@ -165,6 +165,8 @@ def create_app() -> FastAPI:
     app.include_router(session_plans.router, prefix="/api/session-plans", tags=["session-plans"], dependencies=gate)
     app.include_router(shorthand.router,     prefix="/api/shorthand",     tags=["shorthand"],     dependencies=gate)
     app.include_router(character_sheets.router, prefix="/api/character-sheets", tags=["character-sheets"], dependencies=gate)
+    # E0-WorldCore.5: the World Model (GM writes through world_service.apply_change; Party reads).
+    app.include_router(entities.router,  prefix="/api/entities",  tags=["entities"],  dependencies=gate)
     # E0-Jobs.8: GET /{file_id}, access-checked, served by nginx via X-Accel-Redirect.
     app.include_router(files.router,     prefix="/api/files",     tags=["files"],     dependencies=gate)
     # E0-Jobs.7: Job detail, list, retry, cancel and the SSE stream (GET /stream).

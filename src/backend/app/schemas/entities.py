@@ -8,8 +8,8 @@ no Visibility columns, no provenance (`source_journal_id`, `actor_user_id`,
 
 `CanonChange` (E0-WorldCore.3) is the one write schema of the world: the
 discriminated union (on `op`) of the 19 public ops `world_service.apply_change`
-takes. The HTTP bodies (`EntityCreate`, `EntityPatch`) belong to
-E0-WorldCore.5. A CanonChange never carries a Visibility value: Visibility
+takes. The HTTP bodies at the end (`EntityCreate`, `EntityPatch`, ...) are
+E0-WorldCore.5's; the routes turn them into CanonChanges. A CanonChange never carries a Visibility value: Visibility
 reaches apply_change only through `access.set_visibility` (the registry
 writer). `migrated` is the F3-world copy's op and has no member.
 """
@@ -46,6 +46,10 @@ class EntityGMResponse(BaseModel):
     created_by_user_id: uuid.UUID | None
     created_at: datetime
     updated_at: datetime
+    # E0-WorldCore.5: the route fills these (each projected for ctx).
+    aliases: list["EntityAliasGMResponse"] = Field(default_factory=list)
+    steps: list["QuestStepGMResponse"] = Field(default_factory=list)
+    mention_count: int = 0
 
     model_config = _ORM
 
@@ -59,9 +63,13 @@ class EntityPartyResponse(BaseModel):
     description: str | None
     status: str
     attributes: dict[str, Any] = Field(default_factory=dict)
-    # No merged_into_id: the survivor may be GM-only.
-    created_at: datetime
-    updated_at: datetime
+    # No merged_into_id: the survivor may be GM-only. No created_at/updated_at
+    # (E0-WorldCore.5, privacy first): they would date GM-only edits (gm_notes,
+    # a hidden field, a Visibility change) and the time before publication.
+    # E0-WorldCore.5: a hidden `aliases` field renders [] (as unset).
+    aliases: list["EntityAliasPartyResponse"] = Field(default_factory=list)
+    steps: list["QuestStepPartyResponse"] = Field(default_factory=list)
+    mention_count: int = 0
 
     model_config = _ORM
 
@@ -222,6 +230,8 @@ class EntityChangeGMResponse(BaseModel):
     actor_user_id: uuid.UUID | None
     reverted_change_id: uuid.UUID | None
     created_at: datetime
+    # The audience the row was written for (E0-WorldCore.5).
+    write_visibility: Visibility
 
     model_config = _ORM
 
@@ -237,6 +247,10 @@ class EntityChangePartyResponse(BaseModel):
     created_at: datetime
 
     model_config = _ORM
+
+
+EntityGMResponse.model_rebuild()
+EntityPartyResponse.model_rebuild()
 
 
 # ── CanonChange (E0-WorldCore.3) ───────────────────────────────────────────
@@ -475,3 +489,152 @@ def parse_canon_change(data: Any) -> Any:
     if isinstance(data, CANON_CHANGE_TYPES):
         return data
     return CANON_CHANGE.validate_python(data)
+
+
+# ── HTTP bodies (E0-WorldCore.5, app/api/routes/entities.py) ───────────────
+#
+# None of them takes a Visibility value for an Entity field: Visibility is
+# changed only through the two visibility routes (access.set_visibility).
+
+MAX_BULK_IDS = 500
+MAX_PAGE = 200
+
+
+def _non_blank(value: str | None) -> str | None:
+    if value is not None and not value.strip():
+        raise ValueError("must not be blank")
+    return value
+
+
+class _Body(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class EntityCreate(_Body):
+    campaign_id: uuid.UUID
+    type: EntityType
+    kind: CharacterKind | None = None
+    name: str = Field(min_length=1)
+    description: str | None = None
+    status: str | None = None  # None: the type's default status
+    attributes: dict[str, Any] = Field(default_factory=dict)
+    gm_notes: str | None = None
+
+    @field_validator("name")
+    @classmethod
+    def _name_not_blank(cls, value: str | None) -> str | None:
+        return _non_blank(value)
+
+
+class EntityPatch(_Body):
+    """Only the fields given change (at least one), all in one transaction."""
+
+    name: str | None = Field(default=None, min_length=1)
+    description: str | None = None
+    gm_notes: str | None = None
+    status: str | None = None
+    kind: CharacterKind | None = None
+    attributes: dict[str, Any] | None = None
+
+    @field_validator("name")
+    @classmethod
+    def _name_not_blank(cls, value: str | None) -> str | None:
+        return _non_blank(value)
+
+    @model_validator(mode="after")
+    def _something(self) -> "EntityPatch":
+        given = self.model_fields_set & set(type(self).model_fields)
+        if not given:
+            raise ValueError("a patch needs at least one field")
+        for name in ("name", "status", "kind", "attributes"):
+            if name in given and getattr(self, name) is None:
+                raise ValueError(f"{name} cannot be null")
+        if "attributes" in given and not self.attributes:
+            raise ValueError("attributes needs at least one key")
+        return self
+
+
+class AliasCreate(_Body):
+    alias: str = Field(min_length=1)
+
+    @field_validator("alias")
+    @classmethod
+    def _alias_not_blank(cls, value: str | None) -> str | None:
+        return _non_blank(value)
+
+
+class StepCreate(_Body):
+    text: str = Field(min_length=1)
+    position: int | None = Field(default=None, ge=0, le=INT4_MAX)
+    done: bool = False
+
+    @field_validator("text")
+    @classmethod
+    def _text_not_blank(cls, value: str | None) -> str | None:
+        return _non_blank(value)
+
+
+class StepPatch(_Body):
+    """Only the fields given change (at least one)."""
+
+    text: str | None = Field(default=None, min_length=1)
+    done: bool | None = None
+    position: int | None = Field(default=None, ge=0, le=INT4_MAX)
+
+    @model_validator(mode="after")
+    def _something(self) -> "StepPatch":
+        given = self.model_fields_set & {"text", "done", "position"}
+        if not given:
+            raise ValueError("a step patch needs text, done or position")
+        if any(getattr(self, name) is None for name in given):
+            raise ValueError("text, done and position cannot be null")
+        return self
+
+
+class RevertRequest(_Body):
+    force: bool = False
+
+
+class EntityVisibilityRequest(_Body):
+    """One Entity, or one field of it (`description`, `status`, `attributes`, `aliases`)."""
+
+    visibility: Visibility
+    field: str | None = None
+
+
+class BulkEntityVisibilityRequest(_Body):
+    campaign_id: uuid.UUID
+    entity_ids: list[uuid.UUID] = Field(min_length=1, max_length=MAX_BULK_IDS)
+    visibility: Visibility
+
+
+class UpdatedResponse(BaseModel):
+    updated: int
+
+
+class EntityListGMResponse(BaseModel):
+    items: list[EntityGMResponse]
+    total: int
+    limit: int
+    offset: int
+
+
+class EntityListPartyResponse(BaseModel):
+    items: list[EntityPartyResponse]
+    total: int
+    limit: int
+    offset: int
+
+
+class EntityHistoryGMResponse(BaseModel):
+    items: list[EntityChangeGMResponse]
+    total: int
+    limit: int
+    offset: int
+
+
+class EntityHistoryPartyResponse(BaseModel):
+    items: list[EntityChangePartyResponse]
+    total: int
+    limit: int
+    offset: int

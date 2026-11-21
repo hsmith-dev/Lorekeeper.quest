@@ -17,7 +17,9 @@ unless one is named (Campaign: `PublicCampaignResponse`).
      cover ctx (stored / always_gm / membership), is `not_found()`. Derived
      rows (tags) are trusted from the scoped query that loaded them;
   3. the schema for ctx's Role;
-  4. the schema's fields read from the row;
+  4. the schema's fields read from the row, then the `extra` fields (counts,
+     `is_owner`, `share_kind`, an Entity's `aliases` and `steps`) merged in,
+     so pruning applies to them too;
   5. pruning: an entry's tag whose `journal_tags` link ctx may not see
      (`source_field=shorthand`) is dropped; a tag's `custom_category` ctx may
      not see (hidden, or of another Campaign) is None; a field hidden by
@@ -29,8 +31,15 @@ unless one is named (Campaign: `PublicCampaignResponse`).
      status row's `completed_at`), or a GM-only key (`gm_value_keys`:
      `journal_id`), is dropped, and a row whose field reveals a hidden one
      (`field_requires`: `attributes.completed_at` reveals `status`) shows
-     no values. `project_all` loads the Entity; without it, fail closed;
-  6. `extra` fields (counts, `is_owner`, `share_kind`) merged, then validated.
+     no values. `project_all` loads the Entity; without it, fail closed.
+     A non-GM never gets the id of an Entity it may not see (E0-WorldCore.5):
+     an Entity's ENTITY_REF attribute naming one is dropped, and in a history
+     row of an ENTITY_REF attribute (`attributes.location_entity_id`, ...)
+     every such id inside its values becomes None. `visible_entity_ids` is
+     the set of ids ctx may see; `project_all` loads it (`scoped_select`);
+     without it nothing counts as visible (fail closed). A hidden `aliases`
+     field renders `[]`, extra included;
+  6. validated.
 
 `project_all(db, rows, ctx)` takes one ctx or a `role_map` (a per-row
 `role_ctx` by the row's Campaign) and preloads the `journal_tags` links of
@@ -68,7 +77,7 @@ from app.access.write import can_write
 from app.domain import entity_types
 from app.access.registry import (
     REGISTRY, Derived, Stored, UnregisteredModel, audience_of, gm_fields, hidden_row_values, hidden_value_keys,
-    narrowed_audience, registration, scope_column,
+    narrowed_audience, registration, scope_column, scoped_select,
 )
 from app.access.sources import message_refs, visible_refs as _visible_refs
 from app.db.models.campaign import Campaign
@@ -365,7 +374,8 @@ def _render_entity_unset(obj: Entity, schema: type[BaseModel], data: dict[str, A
 
 def project(obj: Any, ctx: CampaignContext, *, variant: str | None = None,
             extra: Mapping[str, Any] | None = None, links: Mapping[uuid.UUID, JournalTag] | None = None,
-            visible_refs: Iterable[SourceRef] | None = None, parent: Any = None) -> BaseModel:
+            visible_refs: Iterable[SourceRef] | None = None, parent: Any = None,
+            visible_entity_ids: frozenset[uuid.UUID] | None = None) -> BaseModel:
     """`obj` as the response schema for ctx (see the module docstring for the
     order). `parent` is a derived row's first parent when its relationship is
     not loaded (`project_all` loads it); without either, a `value_fields` key
@@ -373,7 +383,9 @@ def project(obj: Any, ctx: CampaignContext, *, variant: str | None = None,
     for a non-GM entry with tags (`project_all` loads them). `visible_refs`
     are the SourceRefs ctx may see among a chat session's messages
     (`project_chat` computes them): a message citing anything else is
-    redacted (none given: every message with a ref is)."""
+    redacted (none given: every message with a ref is). `visible_entity_ids`
+    are the Entity ids ctx may see, for the ENTITY_REF redaction of an
+    Entity or a history row (none given: no id is visible to a non-GM)."""
     if not isinstance(ctx, CampaignContext):
         raise TypeError(f"project: ctx must be a CampaignContext, got {type(ctx).__name__} (use project_all "
                         "for a role_map)")
@@ -406,10 +418,99 @@ def project(obj: Any, ctx: CampaignContext, *, variant: str | None = None,
                     kept.append(tag)
             tags = kept
         data["tags"] = [_project_tag(t, ctx) for t in tags]
+    data.update(extra)
     _apply_field_visibility(obj, reg, schema, data, ctx)
     _redact_value_fields(obj, reg, data, ctx, parent)
-    data.update(extra)
+    if ctx.role != GM:
+        _redact_entity_refs(obj, data, visible_entity_ids or frozenset())
     return schema.model_validate(data, from_attributes=True)
+
+
+# ── ENTITY_REF ids (E0-WorldCore.5) ────────────────────────────────────────
+
+def _entity_ref_keys() -> frozenset[str]:
+    """Every attribute key that is an ENTITY_REF on any Entity Type."""
+    return frozenset(a.key for t in entity_types.REGISTRY.values() for a in t.attributes
+                     if a.value_kind is entity_types.ValueKind.ENTITY_REF)
+
+
+ENTITY_REF_KEYS = _entity_ref_keys()
+
+
+def _ref_field_key(obj: EntityChange) -> str | None:
+    """The ENTITY_REF key of a history row's `attributes.<key>` field, else None."""
+    name = getattr(obj, "field", None)
+    if not isinstance(name, str) or not name.startswith(_ATTRIBUTES_PREFIX):
+        return None
+    key = name[len(_ATTRIBUTES_PREFIX):]
+    return key if key in ENTITY_REF_KEYS else None
+
+
+def _as_uuid(value: Any) -> uuid.UUID | None:
+    if isinstance(value, uuid.UUID):
+        return value
+    if not isinstance(value, str) or len(value) not in (32, 36, 38):
+        return None
+    try:
+        return uuid.UUID(value)
+    except ValueError:
+        return None
+
+
+def _uuids_in(value: Any) -> Iterable[uuid.UUID]:
+    """Every UUID-shaped string (or UUID) inside a JSON value, at any depth."""
+    if isinstance(value, Mapping):
+        for v in value.values():
+            yield from _uuids_in(v)
+    elif isinstance(value, (list, tuple)):
+        for v in value:
+            yield from _uuids_in(v)
+    else:
+        found = _as_uuid(value)
+        if found is not None:
+            yield found
+
+
+def _null_hidden_ids(value: Any, visible: frozenset[uuid.UUID]) -> Any:
+    """A copy of a JSON value with every UUID-shaped string not in `visible` as None."""
+    if isinstance(value, Mapping):
+        return {k: _null_hidden_ids(v, visible) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_null_hidden_ids(v, visible) for v in value]
+    found = _as_uuid(value)
+    if found is not None and found not in visible:
+        return None
+    return value
+
+
+def entity_ref_ids(obj: Any) -> set[uuid.UUID]:
+    """The Entity ids an Entity's ENTITY_REF attributes, or a history row of
+    an ENTITY_REF attribute, name (what `project_all` checks visibility of)."""
+    if isinstance(obj, Entity):
+        attrs = obj.attributes or {}
+        keys = set(entity_types.attribute_keys(obj.type)) & ENTITY_REF_KEYS if obj.type else set()
+        return {u for k in keys if (u := _as_uuid(attrs.get(k))) is not None}
+    if isinstance(obj, EntityChange) and _ref_field_key(obj) is not None:
+        return {*_uuids_in(obj.old_value), *_uuids_in(obj.new_value)}
+    return set()
+
+
+def _redact_entity_refs(obj: Any, data: dict[str, Any], visible: frozenset[uuid.UUID]) -> None:
+    """Step 5 for a non-GM: no id of an Entity outside `visible`."""
+    if isinstance(obj, Entity):
+        attrs = data.get("attributes")
+        if not isinstance(attrs, Mapping):
+            return
+        keys = set(entity_types.attribute_keys(obj.type)) & ENTITY_REF_KEYS
+        kept = dict(attrs)
+        for key in keys:
+            if key in kept and _as_uuid(kept[key]) not in visible:
+                kept.pop(key)
+        data["attributes"] = kept
+    elif isinstance(obj, EntityChange) and _ref_field_key(obj) is not None:
+        for name in VALUE_COLUMNS:
+            if name in data:
+                data[name] = _null_hidden_ids(data[name], visible)
 
 
 # The JSON value columns of a history row (entity_changes).
@@ -515,12 +616,32 @@ async def project_all(db: AsyncSession, rows: Iterable[Any], ctx: CampaignContex
     entries = [r for r in rows if isinstance(r, JournalEntry)]
     links = await _entry_links(db, entries) if entries else {}
     parents = await _value_field_parents(db, rows)
+    ctxs = [_ctx_for_row(ctx, row) for row in rows]
+    visible = await _visible_entity_ids(db, rows, ctxs)
     out = []
-    for row in rows:
-        row_ctx = _ctx_for_row(ctx, row)
+    for row, row_ctx in zip(rows, ctxs):
         out.append(project(row, row_ctx, variant=variant, extra=extra(row) if extra else None,
                            links=links.get(row.id) if isinstance(row, JournalEntry) else None,
-                           parent=parents.get(id(row))))
+                           parent=parents.get(id(row)),
+                           visible_entity_ids=visible.get(row_ctx.campaign_id, frozenset())))
+    return out
+
+
+async def _visible_entity_ids(db: AsyncSession, rows: Sequence[Any],
+                              ctxs: Sequence[CampaignContext]) -> dict[uuid.UUID, frozenset[uuid.UUID]]:
+    """{campaign_id: the Entity ids its non-GM ctx may see} among the ids the
+    rows' ENTITY_REF values name (one scoped query per Campaign)."""
+    wanted: dict[uuid.UUID, tuple[CampaignContext, set[uuid.UUID]]] = {}
+    for row, row_ctx in zip(rows, ctxs):
+        if row_ctx.role == GM:
+            continue
+        ids = entity_ref_ids(row)
+        if ids:
+            wanted.setdefault(row_ctx.campaign_id, (row_ctx, set()))[1].update(ids)
+    out: dict[uuid.UUID, frozenset[uuid.UUID]] = {}
+    for campaign_id, (row_ctx, ids) in wanted.items():
+        stmt = scoped_select(Entity, row_ctx).where(Entity.id.in_(sorted(ids))).with_only_columns(Entity.id)
+        out[campaign_id] = frozenset((await db.execute(stmt)).scalars().all())
     return out
 
 
