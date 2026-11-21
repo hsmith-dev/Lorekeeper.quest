@@ -158,6 +158,6 @@ Status: done
 - **Follow-up review recommended:** false.
 - **Verification:**
   - First push: CI green. EV-4 probes=139, exemptions=12, pending=0, leaks=0. Backend 2569 passed.
-  - Second push (review fixes): see the PR.
+  - After the review fixes and the merge of main (E0-Platform.6, which added `GET /api/admin/sidecars`, now swept), CI is green on 5cc2f07. EV-4 probes=141, exemptions=11, pending=0, leaks=0. EV-4 suite 628 passed. Backend 2593 passed, 4 skipped.
   - The desktop was unreachable, so CI was the gate.
 - **Needs desktop verification:** none.
