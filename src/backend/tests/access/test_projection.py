@@ -2,6 +2,7 @@
 the Vary header and preview on the touched routes."""
 from __future__ import annotations
 
+from unittest.mock import AsyncMock
 import dataclasses
 import uuid
 from datetime import date, datetime, timedelta, timezone
@@ -592,8 +593,8 @@ async def test_generate_write_response_is_projected(client, scene, monkeypatch):
 
     monkeypatch.setattr(journal_routes, "check_hash", no_dup)
     monkeypatch.setattr(journal_service, "store_hash", noop)
-    monkeypatch.setattr(journal_service, "extract_tags", lambda _text: [])
-    monkeypatch.setattr(journal_service.embedding_service, "embed", lambda _text: None)
+    monkeypatch.setattr(journal_service, "extract_tags", AsyncMock(return_value=[]))
+    monkeypatch.setattr(journal_service.embedding_service, "embed", AsyncMock(return_value=None))
     ev4 = scene.ev4
     def body():
         return {"notes": "GM notes", "campaign_id": str(ev4.a.campaign_id), "entry_hash": uuid.uuid4().hex,

@@ -143,3 +143,11 @@ Stories were merged on green GitHub CI while the desktop was offline (owner deci
 ## E0-Access.12 — Members API and Roles (PR #74)
 - [ ] Unpaid Player (account gating ON) logs in → lands on `/dashboard`, browses Party content with no 402s from other dashboard calls
 - [ ] Timing-sensitive probe: `pytest tests/test_members_api.py tests/ev4/test_probes.py -k members` in `lorekeeper-backend-test` (with TEST_DATABASE_URL/DATABASE_URL/VALKEY_URL/VALKEY_TEST_URL) — `probe_demotion_closes_the_events_stream` passes reliably
+
+## E0-Platform.6 — Web and worker image without models (PR #76)
+- [ ] Worker RSS before/after, idle and boot peak (old: ~6.4 GB idle, 11.86 GiB peak) — commands in the spec's Auto Run Result
+- [ ] Boot to healthy < 10 s with `ml` and `stt` stopped
+- [ ] Re-run RETRIEVAL_EVAL with `--embeddings require` on the 12-entry seed (expect 14/16 hit@3, 5/5 gate-holds); update `docs/RETRIEVAL_EVAL.md`
+- [ ] Tag parity: sidecar spaCy 3.8 vs old in-process spaCy 3.7 on the seed entries
+- [ ] arm64 build of `Dockerfile.prod` with no compiler
+- [ ] Time NPC extract on CPU against real ml, campaign whose 15 newest entries exceed 20k chars, with a concurrent journal save (NER lock contention): `time curl -s -X POST -H "Authorization: Bearer $TOKEN" "https://<host>/api/npcs/extract?campaign_id=<uuid>"` → well under 120 s

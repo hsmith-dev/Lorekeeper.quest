@@ -530,6 +530,39 @@ export interface AdminJobStats {
   by_queue: Record<JobQueueName, Record<JobStatusName, number>>;
 }
 
+// GET /api/admin/sidecars (E0-Platform.6): the ml and stt sidecars' /v1/status.
+export type SidecarModelState = "not_loaded" | "loading" | "loaded" | "failed";
+
+export interface SidecarModel {
+  name: string;
+  kind: string;
+  state: SidecarModelState;
+  lazy: boolean;
+  cost_mb: number | null;
+}
+
+interface SidecarStatusBase {
+  reachable: boolean;
+  error: string | null;
+  models: SidecarModel[];
+  rss_bytes: number | null;
+}
+
+export interface MlSidecarStatus extends SidecarStatusBase {
+  resident_budget_mb: number | null;
+  lazy_resident_mb: number | null;
+}
+
+export interface SttSidecarStatus extends SidecarStatusBase {
+  compute_type: string | null;
+  device: string | null;
+}
+
+export interface AdminSidecars {
+  ml: MlSidecarStatus;
+  stt: SttSidecarStatus;
+}
+
 export interface RetrievalCandidate {
   id: string;
   shorthand?: string; // GM only

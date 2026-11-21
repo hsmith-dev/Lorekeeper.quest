@@ -189,12 +189,11 @@ FastAPI backend · React frontend · PostgreSQL + pgvector (embeddings & retriev
 
 ## Running tests
 
-The backend suite (`src/backend`) runs against a real pgvector Postgres. Install the dependencies and the spaCy model first:
+The backend suite (`src/backend`) runs against a real pgvector Postgres. Install the dependencies first (no model packages: under `ENVIRONMENT=test` the `ml` and `stt` sidecars are replaced by deterministic fakes):
 
 ```bash
 cd src/backend
 pip install -r requirements.txt -r requirements-dev.txt
-python -m spacy download en_core_web_trf
 ```
 
 By default the suite connects to:

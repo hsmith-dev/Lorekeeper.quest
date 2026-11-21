@@ -67,7 +67,7 @@ ADMIN_ROUTES = (
 
 # Admin routes exempted in exemptions.yaml (so not given a per-route probe
 # here) that the sweep still checks.
-SWEEP_ONLY = frozenset({"GET /api/admin/jobs/stats"})
+SWEEP_ONLY = frozenset({"GET /api/admin/jobs/stats", "GET /api/admin/sidecars"})
 
 
 @dataclass

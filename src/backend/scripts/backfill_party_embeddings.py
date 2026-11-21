@@ -22,7 +22,8 @@ A second run over a filled table changes nothing.
 
   python scripts/backfill_party_embeddings.py [--database-url URL] [--dry-run]
 
-Run inside the backend container (it has the embedding model):
+Run inside the backend container (embeddings come from the `ml` sidecar
+at ML_URL; with it down every row fails, stays NULL, and the run exits 1):
 
   docker compose -f docker-compose.prod.yml exec backend python scripts/backfill_party_embeddings.py
 """
@@ -33,7 +34,7 @@ import asyncio
 import os
 import sys
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -49,7 +50,7 @@ from app.db.models.journal import EMBEDDING_DIM, JournalEntry  # noqa: E402
 
 BATCH_SIZE = 50
 
-Embedder = Callable[[str], list[float]]
+Embedder = Callable[[str], Awaitable[list[float]]]
 
 
 @dataclass
@@ -80,10 +81,10 @@ def _stale_tsv():
     return or_(JournalEntry.party_tsv.is_(None), JournalEntry.party_tsv.is_distinct_from(expected))
 
 
-def _default_embed(text: str) -> list[float]:
+async def _default_embed(text: str) -> list[float]:
     from app.services import embedding_service
 
-    return embedding_service.embed(text)
+    return await embedding_service.embed(text)
 
 
 async def backfill(
@@ -129,7 +130,7 @@ async def backfill(
             break
         for entry_id, narrative in rows:
             try:
-                vector = list(embed_fn(narrative))
+                vector = list(await embed_fn(narrative))
                 if len(vector) != EMBEDDING_DIM:
                     raise ValueError(f"embedder returned {len(vector)} dims, expected {EMBEDDING_DIM}")
             except Exception:
@@ -159,25 +160,11 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def _load_model() -> None:
-    from app.services import embedding_service
-
-    if embedding_service._model is not None:
-        return
-    try:
-        embedding_service.load_embedding_model()
-    except Exception as exc:
-        print(f"warning: embedding model not loaded ({type(exc).__name__}: {exc}); "
-              "party_embedding rows will fail and stay NULL", file=sys.stderr)
-
-
 async def run(args: argparse.Namespace, *, embed: Embedder | None = None) -> BackfillResult:
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
     if not args.database_url:
         raise SystemExit("error: no database: pass --database-url or set DATABASE_URL")
-    if embed is None and not args.dry_run:
-        _load_model()
     engine = create_async_engine(args.database_url)
     try:
         async with async_sessionmaker(engine, expire_on_commit=False)() as session:

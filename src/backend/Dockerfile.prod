@@ -1,39 +1,21 @@
 FROM python:3.11-slim
 WORKDIR /app
 
-# System deps for spaCy/asyncpg. build-essential (not just gcc) — on x86_64
-# pip finds prebuilt manylinux wheels for spaCy's C extensions and never
-# compiles anything, so bare gcc went unnoticed; on ARM64 no prebuilt wheel
-# exists for this spaCy version, pip falls back to a source build, and that
-# needs full libc headers (stdlib.h etc.) that gcc alone doesn't pull in —
-# confirmed by an actual `docker buildx build --platform linux/arm64` run
-# failing with "fatal error: stdlib.h: No such file or directory" before this
-# fix.
 # Pango, HarfBuzz, fontconfig and DejaVu are WeasyPrint's system libraries and
 # font for the campaign PDF export (E0-QA.9). fonts-dejavu-extra has the
-# oblique faces: WeasyPrint does not synthesise italics.
+# oblique faces: WeasyPrint does not synthesise italics. No compiler and no
+# libpq: every requirement ships a binary wheel on amd64 and arm64, and
+# asyncpg speaks the Postgres protocol itself.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential libpq-dev \
         libpango-1.0-0 libpangoft2-1.0-0 libharfbuzz0b fontconfig fonts-dejavu-core fonts-dejavu-extra \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
-# CPU-only torch/torchvision first (E0-Platform.2): a plain PyPI resolve on
-# x86-64 pulls CUDA torch and ~15 NVIDIA-proprietary nvidia-*/cuda-* wheels.
-# The CPU index has +cpu wheels for amd64 and arm64 alike. Pins match
-# licenses/register.yaml; the requirements install then uses the same CPU
-# extra index as CI's licence job.
-RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu \
-        torch==2.15.0+cpu torchvision==0.29.2+cpu
-RUN pip install --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cpu \
-        -r requirements.txt
-
-# spaCy model — downloaded at build time so it's baked into the image
-RUN python -m spacy download en_core_web_trf
-
-# Fail the build if any earlier layer re-resolved torch to CUDA or added NVIDIA wheels
-RUN python -c "import torch, sys; sys.exit(torch.version.cuda is not None or torch.cuda.is_available())" \
-    && ! pip list --format=freeze | grep -iE '^(nvidia|cuda)[-_]'
+# No model packages (E0-Platform.6): embeddings, NER and OCR come from the ml
+# sidecar, speech from stt, so the web and worker processes load no model.
+# CI-3 (scripts/check_model_packages.py, also run on this image's pip list)
+# fails if torch, spaCy or another model package comes back.
+RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 

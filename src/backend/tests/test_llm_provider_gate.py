@@ -277,9 +277,10 @@ async def test_run_evaluation_names_base_model(backend, gate, monkeypatch):
     s = get_settings()
     record = {"instruction": "Expand the notes.", "input": "dragon", "output": "A dragon appeared."}
     monkeypatch.setattr(eval_service, "_load_validation_set", lambda: [record])
-    monkeypatch.setattr(eval_service, "_score", lambda ref, gen: {
-        "length": len(gen), "word_overlap": 0.0, "semantic_similarity": 0.0, "has_content": False,
-    })
+    async def score(ref, gen):
+        return {"length": len(gen), "word_overlap": 0.0, "semantic_similarity": 0.0, "has_content": False}
+
+    monkeypatch.setattr(eval_service, "_score", score)
     result = await eval_service.run_evaluation(platform_cfg(model=s.kobold_base_model), 1)
     assert result["error_count"] == 0
     assert [p["model"] for p in backend.payloads] == [s.kobold_base_model]

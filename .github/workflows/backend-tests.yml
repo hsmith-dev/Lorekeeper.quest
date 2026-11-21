@@ -70,21 +70,14 @@ jobs:
         working-directory: src/backend
         run: |
           python -m pip install --upgrade pip
-          # CPU-only torch, exactly as the shipped image installs it (E0-Platform.2).
-          # The PyPI default is the CUDA build: ~15 nvidia-* wheels, several GB,
-          # which filled the runner's disk and made the job fail before any test ran.
-          pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu \
-            torch==2.15.0+cpu torchvision==0.29.2+cpu
-          pip install --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cpu \
-            -r requirements.txt -r requirements-dev.txt
-          # Guard: fail fast if anything pulled a CUDA build back in.
-          if pip list 2>/dev/null | grep -iE '^(nvidia-|cuda-)'; then
-            echo "::error::CUDA/NVIDIA wheels installed in backend CI; use the CPU index"; exit 1
-          fi
+          # Plain PyPI, as both backend Dockerfiles install it: no model
+          # packages since E0-Platform.6 (CI-3 checks requirements.txt and the
+          # built image; tests use app.clients.fakes under ENVIRONMENT=test).
+          pip install --no-cache-dir -r requirements.txt -r requirements-dev.txt
 
       # Two heads would make `alembic upgrade head` fail on every boot.
       # tests/migrations/test_upgrade_snapshot.py checks this too; this step
-      # fails fast, before the spaCy model download and the test run. It reads
+      # fails fast, before the test run. It reads
       # only the scripts in migrations/versions (no database, no env.py).
       - name: Single Alembic head
         working-directory: src/backend
@@ -96,12 +89,6 @@ jobs:
             echo "$heads"
             exit 1
           fi
-
-      - name: Download spaCy model
-        # tests/test_nlp.py loads this directly (see its load_model fixture)
-        # — same model app/services/nlp_service.py uses in production.
-        working-directory: src/backend
-        run: python -m spacy download en_core_web_trf
 
       - name: Run tests
         working-directory: src/backend

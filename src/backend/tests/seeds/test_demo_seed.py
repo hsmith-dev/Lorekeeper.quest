@@ -2,19 +2,20 @@
 
 import copy
 import json
-import os
 import uuid
 
 import pytest
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from app.clients.errors import ModelServiceUnavailable
 from app.db.models.campaign import Campaign
 from app.db.models.journal import JournalEntry
 from app.db.models.npc import NpcEntry, NpcStatus
 from app.db.models.quest import Quest
 from app.db.models.user import User
 from app.schemas.share import PublicJournalResponse, PublicNpcResponse, PublicQuestResponse
+from app.services import embedding_service
 from scripts import seed_demo
 from scripts.eval_common import FakeEmbeddingModel
 from scripts.eval_retrieval import LABELED
@@ -25,8 +26,12 @@ SEED = seed_demo.read_seed(seed_demo.DEFAULT_SEED_PATH)
 FAKE = FakeEmbeddingModel()
 
 
-def fake_embedder(text: str) -> list[float]:
+def fake_vec(text: str) -> list[float]:
     return FAKE.encode(text).tolist()
+
+
+async def fake_embedder(text: str) -> list[float]:
+    return fake_vec(text)
 
 
 def _email() -> str:
@@ -146,45 +151,55 @@ def test_bad_seed_exits_1_before_touching_the_db(tmp_path, capsys):
     assert "duplicate seed_id" in capsys.readouterr().err
 
 
-# ── Embedding model, offline ────────────────────────────────────────────────
+# ── Embeddings via the ml sidecar ───────────────────────────────────────────
 
-class _Refuse:
-    calls: list = []
+class _DownClient:
+    """An ml client whose sidecar is unreachable."""
 
-    def __init__(self, name, **kwargs):
-        _Refuse.calls.append((name, kwargs))
-        raise OSError("not in cache")
+    def __init__(self) -> None:
+        self.calls = 0
 
-
-def test_offline_auto_warns_and_require_exits(monkeypatch, capsys):
-    import sentence_transformers
-
-    _Refuse.calls = []
-    monkeypatch.setattr(sentence_transformers, "SentenceTransformer", _Refuse)
-    monkeypatch.setenv("HF_HUB_OFFLINE", "0")  # restored after the test
-    monkeypatch.setenv("TRANSFORMERS_OFFLINE", "0")
-
-    assert seed_demo.load_embedder("auto") is None
-    assert "warning" in capsys.readouterr().err
-    assert _Refuse.calls == [(seed_demo.EMBEDDING_MODEL, {"local_files_only": True})]
-    assert os.environ["HF_HUB_OFFLINE"] == "1"
-
-    with pytest.raises(SeedError, match="not in the local cache"):
-        seed_demo.load_embedder("require")
-
-    _Refuse.calls = []
-    assert seed_demo.load_embedder("skip") is None
-    assert _Refuse.calls == []
+    async def embed(self, texts):
+        self.calls += 1
+        raise ModelServiceUnavailable("ml sidecar unreachable at http://ml.test:8001")
 
 
-def test_require_exits_1(monkeypatch, capsys):
-    import sentence_transformers
+@pytest.fixture
+def ml_down():
+    down = _DownClient()
+    embedding_service.use_client(down)
+    try:
+        yield down
+    finally:
+        embedding_service.use_client(None)
 
-    monkeypatch.setattr(sentence_transformers, "SentenceTransformer", _Refuse)
+
+async def test_ml_down_auto_warns_and_require_raises(ml_down, capsys):
+    assert await seed_demo.load_embedder("auto") is None
+    err = capsys.readouterr().err
+    assert "warning" in err and "embedding model unavailable" in err
+    assert ml_down.calls == 1
+
+    with pytest.raises(SeedError, match="embedding model unavailable"):
+        await seed_demo.load_embedder("require")
+
+    calls = ml_down.calls
+    assert await seed_demo.load_embedder("skip") is None
+    assert ml_down.calls == calls  # skip never calls ml
+
+
+async def test_ml_up_gives_the_service_embedder():
+    # ENVIRONMENT=test: embedding_service is on FakeMLClient.
+    embedder = await seed_demo.load_embedder("require")
+    assert embedder is embedding_service.embed
+    assert len(await embedder("Mira")) == seed_demo.EMBEDDING_DIM
+
+
+def test_require_exits_1(ml_down, capsys):
     rc = seed_demo.main(["--database-url", "postgresql+asyncpg://nobody:x@127.0.0.1:1/nothing_test",
                          "--embeddings", "require"])
     assert rc == 1
-    assert "not in the local cache" in capsys.readouterr().err
+    assert "embedding model unavailable" in capsys.readouterr().err
 
 
 # ── Against the test DB ─────────────────────────────────────────────────────
@@ -278,7 +293,7 @@ async def test_embeddings_filled_once_a_model_is_available(db):
 
     e01 = await db.scalar(sa.select(JournalEntry).where(
         JournalEntry.entry_hash == seed_demo.entry_hash(first.campaign_id, "e01-old-mill")))
-    expected = fake_embedder(seed_demo.entry_text(e01.shorthand, e01.narrative))
+    expected = fake_vec(seed_demo.entry_text(e01.shorthand, e01.narrative))
     assert list(e01.embedding) == pytest.approx(expected, abs=1e-6)
 
 
@@ -305,7 +320,7 @@ async def test_party_fields_cover_the_narrative_only(db):
     entries = (await db.scalars(sa.select(JournalEntry).where(JournalEntry.campaign_id == first.campaign_id)
                                 .execution_options(populate_existing=True))).all()
     for e in entries:
-        assert list(e.party_embedding) == pytest.approx(fake_embedder(e.narrative), abs=1e-6)
+        assert list(e.party_embedding) == pytest.approx(fake_vec(e.narrative), abs=1e-6)
 
     # Seeded fresh with a model: both vectors in one go, counted once.
     fresh = await _seed_in_new_session(owner_email=_email(), embedder=fake_embedder)

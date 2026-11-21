@@ -1,0 +1,198 @@
+---
+title: 'E0-Platform.6: Web and worker image without models: async client wrappers and lifespan cleanup'
+type: 'refactor'
+created: '2026-11-20'
+status: 'done'
+baseline_revision: '9b73f0bcdec1f75aec6b389349b9e1fdf893bba1'
+review_loop_iteration: 0
+followup_review_recommended: true
+context: []
+warnings: [oversized]
+deferred:
+  - summary: >-
+      No CI job runs the ml sidecar's real-model NER/Matcher or embedding-parity tests any more.
+    evidence: |-
+      Backend CI no longer installs spaCy/en_core_web_trf, so src/services/ml/tests/test_nlp.py (skipif
+      no spacy) skips through tests/test_ml_sidecar_suite.py, and test_embed_parity.py needs ML_REAL_MODELS=1.
+      Backend tests cover only the label mapping over canned entities. Owner: E0-QA's dedicated,
+      path-filtered `ml` CI job (named in test_ml_sidecar_suite.py) running the sidecar's own requirements.
+    location: >-
+      src/services/ml/tests/test_nlp.py; src/backend/tests/test_ml_sidecar_suite.py
+    severity: medium
+---
+
+<intent-contract>
+
+## Intent
+
+**Problem:** Every gunicorn worker (and every RQ worker) loads spaCy `en_core_web_trf` and MiniLM in-process at boot (`app/main.py` lifespan), about 6.4 GB idle and 11.9 GB peak for the web tier, and the CPU inference blocks the event loop. The backend image still carries CPU torch, spaCy, sentence-transformers and the spaCy model, although the `ml` sidecar (E0-Platform.3/4) already serves embeddings, NER and OCR and `stt` (E0-Platform.5) serves speech.
+
+**Approach:** `embedding_service` and `nlp_service` become `async def` wrappers over `app/clients/ml.py` (vision and transcription already are). Every caller awaits them. Lifespan loads no model. torch, torchvision, spaCy, sentence-transformers, the spaCy model and `build-essential`/`libpq-dev` leave `requirements.txt`, both Dockerfiles, backend CI and the CI-3 baseline (which becomes empty). The admin System tab shows the sidecars' `/v1/status`.
+
+## Boundaries & Constraints
+
+**Always:**
+- Journal save never blocks on AI. If `ml` is down, the entry saves with no tags, `embedding`/`party_embedding` NULL, and a WARNING is logged.
+- Tag mapping is unchanged: PERSON → character; GPE/LOC/FAC → location; ORG → faction; ITEM → item; QUEST → quest; dedupe on (lower(name), type); `name.title()`; in sidecar order (spaCy ents, then Matcher).
+- Embedding parity comes from the same MiniLM in `ml` (E0-Platform.3 measured cosine ≥ 0.9999). No re-embed and no change to `app/domain/embedding.py`.
+- Request paths that cannot do their job without `ml` return `503 {"detail": "<Model> unavailable"}`: source upload, journal reindex, NPC extract. Retrieval and canon context degrade to lexical-only or no canon, as they do today.
+- Scripts (`seed_demo`, `eval_common`, `eval_retrieval`, `backfill_party_embeddings`) embed through the same `embedding_service`. `--embeddings require` fails clearly when `ml` is unreachable.
+- Every removed package also leaves `licenses/register.yaml` for the `backend` image (rows only the backend used are deleted, shared rows lose `backend`).
+
+**Never:**
+- No new model package or `import` of one in `app/`. No baseline line is added anywhere (CI-3, CI-2 ratchet, CI-8).
+- No pooled httpx client bound to an event loop. The clients stay per-call, because the RQ worker runs `asyncio.run` once per Job.
+- No memory-limit changes (E0-Platform.7 owns `WEB_MEM_LIMIT`). No `journal.reembed` Job (E0-Journal). No edits to `lib/sse.ts`, the entities API or the members/analytics code (sibling stories).
+- Do not change the published RETRIEVAL_EVAL numbers without a real re-run.
+
+## I/O & Edge-Case Matrix
+
+| Scenario | Input / State | Expected Output / Behavior | Error Handling |
+|----------|--------------|---------------------------|----------------|
+| Save, ml up | POST journal | Tags from `/v1/ner`, both vectors from `/v1/embed` | none |
+| Save, ml down | `ModelServiceUnavailable` | 201; no tags; both vectors NULL | WARNING log, caught in service |
+| Chat retrieval, ml down | query | lexical-only hits | caught (existing) |
+| Source upload, ml down | PDF/text | 503 "Embedding model unavailable"; nothing committed | `ModelServiceError` → 503 |
+| Reindex, ml down | POST /reindex | 503; nothing committed | same |
+| NPC extract, ml down | POST extract | 503 "NER model unavailable" | same |
+| Admin sidecars | GET /api/admin/sidecars | `{ml:{reachable, error, models, rss_bytes,…}, stt:{…}}`; an unreachable one is `reachable:false` + error | never 5xx |
+| Boot, sidecars absent | app start | healthy, no model load | none |
+
+</intent-contract>
+
+## Code Map
+
+- `src/backend/app/main.py:23-24,46-47` -- drop the `load_nlp_model`/`load_embedding_model` imports and calls.
+- `src/backend/app/services/embedding_service.py` -- rewrite: `async embed(text)`, `async embed_many(texts)` over `get_ml_client()`. Add `use_client(client | None)` so scripts can install an override (the eval's bag-of-words fake, or a disabled client for `--embeddings skip`). Keep the `EMBEDDING_DIM`/`EMBEDDING_MODEL` re-export.
+- `src/backend/app/services/nlp_service.py` -- rewrite: keep `ExtractedTag` and the label mapping, plus `async extract_tags(text)` over `ml.ner`. ITEM/QUEST_PATTERNS now live only in the sidecar (`src/services/ml/ml_service/models.py:14`).
+- Callers to await: `app/services/journal_service.py:98,134` (wrap NER and embed in `except ModelServiceError` + `logger.warning`), `app/services/retrieval_service.py:172,307`, `app/services/source_service.py:56`, `app/services/eval_service.py:39-42` (make `_score` async or precompute), `app/api/routes/journals.py:373` (reindex), `app/api/routes/sources.py:18,94` (`embed_many(chunks)`), `app/api/routes/npcs.py:22,204`. `/api/ingest/image` (vision_service) is already async (E0-QA.9).
+- `src/backend/app/api/routes/admin.py` -- add `GET /sidecars` (router-level `require_admin`, `60/minute` on `user_or_ip`, like `/jobs/stats`), calling `get_ml_client().status()` and `get_stt_client().status()`. Schemas go in `app/schemas/admin.py`.
+- `src/backend/tests/ev4/exemptions.yaml` -- add an exemption for `GET /api/admin/sidecars` (admin-only, no Campaign data).
+- `src/frontend/src/{types/index.ts,services/api.ts,hooks/useAdmin.ts,pages/AdminPage.tsx}` -- a `SidecarStatusCard` in `SystemTab` beside `JobCountsCard`, styled the same way (semantic tokens only, `lint:tokens`).
+- Scripts: `src/backend/scripts/seed_demo.py:61,230-260,347-365` (the Embedder becomes async; `load_embedder(mode)` probes ml: auto warns and returns None, require raises SeedError, skip returns None; `EMBEDDING_MODEL` imported from `app.domain.embedding`), `scripts/eval_common.py:128-158,414-420` (`FakeEmbeddingModel` gets `async embed(texts)`; `install_embedding_model` → `embedding_service.use_client`), `scripts/eval_retrieval.py:57,105,197-225`, `scripts/backfill_party_embeddings.py:84-86,155-180` (async embed, drop `_load_model`).
+- Tests to update (a sync monkeypatched lambda breaks once the callee is awaited): `tests/test_party_retrieval.py:42,237,251-266,332`, `tests/access/test_projection.py:595-596`, `tests/access/test_campaign_permissions.py:399-400,430`, `tests/access/test_write_rules.py:247-248`, `tests/ev4/probes/retrieval.py:36-57`, `tests/test_eval_common.py:207-293`, `tests/seeds/test_demo_seed.py:150-190`, and any backfill test. Delete `tests/test_nlp.py` (its cases live in `src/services/ml/tests/test_nlp.py`). Replace `tests/test_ml_client.py:449-454` (the pattern-parity test) with a test of the label mapping. Conftest already sets `ENVIRONMENT=test`, so `FakeMLClient` serves every test.
+- `src/backend/requirements.txt` -- remove `spacy`, `sentence-transformers`. Keep `numpy<2.0` (pgvector). `uv pip compile --only-binary :all:` resolves the rest on x86_64 and aarch64 alike (72 packages), so no compiler is needed.
+- `src/backend/Dockerfile`, `Dockerfile.prod` -- drop the torch install, the spaCy download, the CUDA guard (there is no torch left to guard; CI-3 forbids its return) and `build-essential libpq-dev` (asyncpg needs no libpq). Use a plain `pip install -r requirements.txt`.
+- `scripts/model_packages_baseline.txt` -> header only. `scripts/test_check_model_packages.py:22` `FROZEN_BASELINE = frozenset()`.
+- `scripts/check_model_packages.py` -- add `--installed FILE` (a `pip list --format=freeze` / `pip freeze` dump, `-` for stdin) so the AC's "pip list in the image" check exists. Every forbidden package in it fails (no baseline). Add unit tests.
+- `src/backend/.importlinter` -- drop both `ignore_imports` lines (and the key). `scripts/test_import_ratchet.py` -- `FROZEN_IGNORES` empty; `TODAY` nlp/embedding import `app.clients`; `test_stale_ignore_line_fails` plants its own stale line in the copied config.
+- `.github/workflows/backend-tests.yml:69-104` -- plain install, delete the spaCy download step and the torch/CUDA guard (needed: spaCy is gone). `.github/workflows/license-check.yml` -- the backend job drops the CPU extra index. The image job prints the image size (`docker image inspect`) and, for `backend`, runs `pip list --format=freeze` in the image through `check_model_packages.py --installed -`. The comment about the several-GB backend image is refreshed.
+- `licenses/register.yaml` -- packages leaving backend (resolve diff): annotated-doc blis catalogue cloudpathlib cloudpickle confection cymem filelock fsspec hf-xet httpcore2 httpx2 huggingface-hub joblib langcodes markdown-it-py mdurl mpmath murmurhash narwhals networkx preshed pygments regex rich safetensors scikit-learn scipy sentence-transformers shellingham smart-open spacy spacy-legacy spacy-loggers srsly sympy thinc threadpoolctl tokenizers torch torchvision tqdm transformers truststore typer typer-slim wasabi weasel, plus spacy-curated-transformers/curated-* and the `en_core_web_trf` 3.7.3 model row. MiniLM's `images` → `[ml]`. Apt: the build-essential/libpq-dev closure (gcc*, g++*, cpp*, binutils*, make, dpkg-dev, libc6-dev, linux-libc-dev, lib*-dev, libasan8…libubsan1, libisl23, libmpc3, libmpfr6, libjansson4, libsframe1, libgprofng0, libctf*, rpcsvc-proto, patch, perl and libperl/perl-modules, libdpkg-perl, libgdbm*, libpq5 and its krb5/ldap/sasl deps). The image scan's `--emit-missing` re-adds anything still present. The header comment on CPU torch is updated.
+- `docker-compose.yml:103-104`, `docker-compose.prod.yml:193-212,257-262` -- refresh comments (nothing loads models in web/worker; the limit itself is E0-Platform.7's). README:197, docs/LICENSING.md:168 -- remove the spaCy download / "stays in the image" text.
+- `docs/RETRIEVAL_EVAL.md` -- reproduce text: embeddings come from `ml` (`ML_URL`); `require` fails without it. Results still awaiting the desktop re-run (12-entry seed plus sidecar).
+- `src/backend/tests/test_ml_sidecar_suite.py` docstring -- en_core_web_trf is no longer in backend CI, so the sidecar's `test_nlp.py` skips there.
+
+## Tasks & Acceptance
+
+**Execution:**
+- `.github/workflows/license-check.yml` + `scripts/check_model_packages.py --installed` (+ tests) -- DONE in commit a571095 (pushed, draft PR #76; it measures the "before" size). Do not redo. Do not commit or push: the orchestrator does that. Remaining work in this file is only the CPU-index flag in the `backend` job and the stale several-GB comment.
+- `app/services/{embedding,nlp}_service.py`, `app/main.py` -- async wrappers, lifespan.
+- All callers (Code Map), with the 503 mapping on the three routes and the warning on journal save.
+- Admin `/sidecars` route + schema + EV-4 exemption + frontend card.
+- Scripts: seed/eval/backfill.
+- Tests: update the monkeypatches, and add: journal save with ml down (no tags, NULL vectors, warning), the 503 for source upload/reindex/npc extract, the tag-mapping unit test over a stub client, the admin sidecars route (up via fake; down via a raising client), lifespan without model loading (`import app.main` pulls in no spacy/sentence_transformers), and check_model_packages `--installed`.
+- Image/CI/register/docs per Code Map.
+
+**Acceptance Criteria:**
+- Given the app starts, then lifespan calls only `init_valkey()` (and teardown), and `sys.modules` has no `spacy`/`sentence_transformers`/`torch` after `import app.main`.
+- Given `requirements.txt` and both Dockerfiles, `python scripts/check_model_packages.py` passes with an empty baseline, and the CI image job's `pip list` check of the built backend image passes.
+- Given ml is down, journal save returns 201 with no tags and NULL vectors, and logs a warning.
+- Given `GET /api/admin/sidecars` as admin, it returns both sidecars' status; non-admin gets 403.
+- Given the full backend suite, the gates and frontend CI, all are green in GitHub CI.
+
+## Spec Change Log
+
+## Review Triage Log
+
+### 2026-11-20 — Review pass
+- verdicts: 35 findings — high 0, medium 7, low 21, false 3, maybe-false 4
+- findings:
+  - `[low]` `[reject]` (blind) backend/worker do not depends_on ml — by design the AC wants boot healthy without sidecars, and every caller degrades or 503s; `service_started` would not wait for the model load anyway.
+  - `[medium]` `[patch]` (blind) /api/admin/sidecars calls both sidecars sequentially with full timeouts (stt 300 s) — asyncio.gather + 5 s wait_for each.
+  - `[medium]` `[patch]` (blind) journal save makes three sequential ml calls; a hanging ml blocks ~3×30 s — one embed_many for both vectors via party_vector, skip embed when NER found ml unavailable.
+  - `[low]` `[reject]` (blind) seed/backfill embed one text per call — script throughput only; batching restructures both loops.
+  - `[medium]` `[defer]` (blind) no CI runs real-model NER/embeddings — deferred to E0-QA's ml CI job (frontmatter).
+  - `[medium]` `[patch]` (blind) reindex/source success paths do not check stored vectors — grouped with the verification-gap rows below; tests extended.
+  - `[low]` `[patch]` (blind) sources.py plain zip drops chunks on a short override result — zip(strict=True).
+  - `[low]` `[patch]` (blind) NER truncation at MAX_NER_CHARS is silent — warning logged with the original length.
+  - `[low]` `[patch]` (blind) app/clients/ml.py docstring stale — updated.
+  - `[maybe-false]` `[reject]` (blind) license-policy toolchain allowlist entries now dead — the stt image may still need some GCC runtime rows; would only be low; settle with the stt image scan.
+  - `[low]` `[patch]` (blind) numpy<2.0 cap has no stated reason — comment added (pgvector depends on numpy).
+  - `[low]` `[reject]` (blind) RETRIEVAL_EVAL re-run not tracked — tracked under "Needs desktop verification" in the Auto Run Result and the PR.
+  - `[low]` `[reject]` (blind) image-size step has no ceiling — new gate complexity; CI-3's --installed check covers model packages.
+  - `[low]` `[reject]` (blind) test_dockerfile_no_models token list is a subset / "gcc" substring — no false positive on today's Dockerfiles; CI-3 is the authoritative gate.
+  - `[low]` `[reject]` (blind) frontend sidecar card untested, cost_mb not shown — no AdminPage test harness exists; display-only.
+  - `[low]` `[patch]` (blind) LICENSING.md parenthetical misplaced — moved after build-essential.
+  - `[medium]` `[patch]` (edge) admin status stalls — same root cause as the blind admin row.
+  - `[medium]` `[patch]` (edge) journal save hang ~90 s — same root cause as the blind journal row.
+  - `[low]` `[patch]` (edge) NPC extract over 100k chars drops names silently — same root cause as the truncation row (warning).
+  - `[false]` `[reject]` (edge) large reindex holds request for minutes — each 256-text batch has its own 30 s timeout; the old in-process path was slower per entry; not a new failure.
+  - `[low]` `[patch]` (edge) seed: ModelServiceError mid-seed escapes as a traceback — main() maps it to "error: embedding model unavailable", exit 1.
+  - `[low]` `[patch]` (edge) eval_retrieval: same — same fix.
+  - `[false]` `[reject]` (edge) --installed with a missing file raises a traceback — a loud failure of a CI step is correct; nothing passes silently.
+  - `[false]` `[reject]` (edge) editable `-e git+...#egg=torch` lines pass — `pip list --format=freeze` (what CI runs) prints `name==version` for editables, never `-e` lines.
+  - `[low]` `[patch]` (edge) license-check pip-list pipe lacks pipefail — `shell: bash` on the step.
+  - `[low]` `[reject]` (edge) CUDA/nvidia guard removed — no torch left to pull NVIDIA wheels; the image licence scan still fails on unregistered nvidia-* wheels.
+  - `[medium]` `[defer]` (verification-gap) real NER/Matcher unverified in CI — same as the blind defer row.
+  - `[low]` `[patch]` (verification-gap) source upload never checks chunk vectors — test asserts each embedding ≈ fake_vector(content) in chunk order.
+  - `[low]` `[patch]` (verification-gap) reindex never checks GM embedding — test asserts embedding ≈ fake_vector(shorthand + narrative).
+  - `[low]` `[patch]` (verification-gap) eval_service._score never runs in a test — new async test against FakeMLClient.
+  - `[maybe-false]` `[reject]` (intent) boot < 10 s not timed — lifespan does only init_valkey (tested) and an import probe shows no model package; timing listed for desktop verification.
+  - `[maybe-false]` `[reject]` (intent) built-image pip-list check not shown running — it runs in CI's image-licenses (backend) job; settled by that job's result on the PR.
+  - `[maybe-false]` `[reject]` (intent) 14/16 / 5/5 eval not reproduced — needs the desktop stack with ml; listed for desktop verification.
+  - `[low]` `[reject]` (intent) E0-QA workflow/import-linter files edited — the install steps and stale ignore lines had to change once the packages left; the image-size step was requested by the orchestrator for the before/after measurement.
+  - `[low]` `[reject]` (intent) additions beyond the ACs (admin sidecars, 503s, register pruning) — the admin status is in the story's technical notes, the 503s are the error contract for callers that cannot degrade, and the register must match what ships (licence rules).
+
+## Design Notes
+
+"Lifespan cleanup" is the removal of model loading. The `ml`/`stt` clients open one short-lived `httpx.AsyncClient` per call (E0-Platform.3's design), so they hold no pooled connection to close at shutdown. A process-wide pool would be bound to the first event loop and break in the RQ worker, which runs `asyncio.run` per Job. Batch work uses `embed_many` (one request per 256 texts), so the per-call connect is not a hot path.
+
+Eval override example:
+```python
+embedding_service.use_client(FakeEmbeddingModel())  # has async embed(texts)
+try: ... finally: embedding_service.use_client(None)
+```
+
+## Verification
+
+Environment: there is no Postgres or Valkey on this Mac, and you must not start one. Tests that need the DB run only in GitHub CI. A ready Python 3.11 venv with the slim backend requirements plus requirements-dev (no spaCy or torch) is at `/private/tmp/claude-501/-Users-harrisonsmith-Documents-GitHub-Lorekeeper-quest/a5524f3a-4ba6-4d29-8233-79940950d6ae/scratchpad/venv/bin/python`. Use it for every local run. Do not install anything globally.
+
+**Commands:**
+- `cd src/backend && <venv python> -m pytest -q <the non-DB test files you touched>` (e.g. tests/test_ml_client.py, the new mapping/lifespan tests) -- pass
+- `cd src/backend && PYTHONPATH=. <venv>/bin/lint-imports --no-cache` -- pass
+- `<venv python> -m compileall -q src/backend/app src/backend/scripts` -- pass
+- `python scripts/check_model_packages.py && python -m pytest -q scripts/test_check_model_packages.py scripts/test_import_ratchet.py` -- pass
+- `cd src/frontend && npx tsc --noEmit && npm run build && npm run lint:tokens` -- pass
+- GitHub CI: backend-tests, gates, frontend-ci, license-check (image-licenses backend prints the size) -- green
+
+## Auto Run Result
+
+Status: done. Draft PR #76 (branch `story/e0-platform-6-slim-backend-image`), commits a571095 (measurement), 73cd389 (implementation), ee8aff8 (review fixes). GitHub CI is fully green: backend-tests 2474 passed / 4 skipped; gates 516 passed plus 28 (DB gates); EV-4 probes=104 exemptions=3 pending=44 leaks=0; frontend, licences in both editions, and all four image scans pass.
+
+**Summary:** `embedding_service` (`embed`, `embed_many`, `use_client`) and `nlp_service` (`extract_tags`, label mapping) are async wrappers over `app/clients/ml.py`, and every caller awaits them. The lifespan only does Valkey setup and teardown. torch, torchvision, spaCy, sentence-transformers, en_core_web_trf, build-essential and libpq-dev left requirements.txt, both Dockerfiles and backend CI. The CI-3 baseline and the import-linter ignores are empty. `check_model_packages.py --installed` checks the built image's `pip list` in CI. Journal save with ml down saves with no tags and NULL vectors, and logs a warning. Source upload, reindex and NPC extract return 503. `GET /api/admin/sidecars` and the System tab card show both sidecars' status.
+
+**Measured (CI image-licenses job, `docker image inspect` Size, linux/amd64):** backend image 1,634,509,150 bytes (1.52 GiB) before, 147,023,523 bytes (141 MiB) after, about 91% smaller. The before run's `--installed` check listed en-core-web-trf, sentence-transformers, spacy, torch, torchvision and the transitive transformers. The after run lists none.
+
+**Files:** app services (embedding, nlp, journal, retrieval, source, eval), routes (journals, sources, npcs, admin), schemas/admin, main.py, scripts (seed_demo, eval_common, eval_retrieval, backfill_party_embeddings), tests (new test_ml_callers.py and test_dockerfile_no_models.py; test_nlp.py and test_dockerfile_cpu_torch.py removed; monkeypatches updated), frontend admin card, requirements and both Dockerfiles, the three workflows, .importlinter and the ratchet test, the CI-3 baseline and its script and test, licenses/register.yaml (about 100 backend-only rows pruned; libatomic1 restored for backend+stt after the scan), license-policy comments, compose comments, README, LICENSING.md, RETRIEVAL_EVAL.md.
+
+**Review:** 35 findings. Patched: 2 medium root causes (sidecar status serial timeouts; journal save making three serial ml calls) and the medium test-gap group (stored chunk, reindex and eval-score vectors), plus 9 low. Deferred: 1 (no CI job runs real-model NER, owned by E0-QA's ml job). Rejected: 3 false, 4 maybe-false and 12 low, each with its reason in the triage log. Follow-up review: recommended (3 medium entries patched). The named unverified risk is real-sidecar behaviour, which CI uses fakes for: spaCy 3.8/trf 3.8.0 tags compared with the old 3.7 output, and save latency against a hanging (not refusing) ml.
+
+**Residual risks:** the real-model NER and embedding checks run only on manual desktop runs until E0-QA adds an ml CI job. Apt rows removed from the register are judged only by the scan's "nothing missing" result; stale rows are not detected.
+
+### Needs desktop verification
+- Worker RSS before and after (main vs this branch), with 4 gunicorn workers plus the RQ worker, idle and at boot peak:
+  `docker compose -f docker-compose.prod.yml up -d --build backend worker ml stt && sleep 60 && docker stats --no-stream backend worker ml stt`, and `cat /sys/fs/cgroup/memory.peak` inside the backend container (old: ~6.4 GB idle, 11.86 GiB peak).
+- Boot to healthy in under 10 s with the sidecars stopped: `docker compose -f docker-compose.prod.yml stop ml stt && docker compose -f docker-compose.prod.yml restart backend && time (until docker inspect -f '{{.State.Health.Status}}' $(docker compose -f docker-compose.prod.yml ps -q backend) | grep -q healthy; do sleep 1; done)`. The healthcheck interval is 30 s, so either run `curl localhost:8000/api/health` in a loop from inside the container, or read the gunicorn "Application startup complete" timestamp.
+- RETRIEVAL_EVAL re-measure against the ml sidecar on the 12-entry seed (the docs/RETRIEVAL_EVAL.md "Reproducing" commands with `--embeddings require`). Expected hybrid@0.65 14/16 hit@3 and 5/5 gate-holds; if it differs, update the doc from the real run.
+- Tag parity: save the demo narratives and compare tags with main's in-process spaCy 3.7 output (ml runs spaCy 3.8.18 / en_core_web_trf 3.8.0).
+- arm64 build of `src/backend/Dockerfile.prod` with no compiler: `docker buildx build --platform linux/arm64 -f src/backend/Dockerfile.prod src/backend`.
+- NPC extract timing on a long campaign (15 entries over 20k chars) against the real ml sidecar on CPU: `time curl -s -X POST -H "Authorization: Bearer $TOKEN" "https://<host>/api/npcs/extract?campaign_id=<uuid>"`. It should finish well under ML_NER_TIMEOUT_S=120. Also watch `docker stats ml` for NER lock contention with a concurrent journal save.
+
+### Coordinator follow-up (2026-11-20)
+- `/api/admin/sidecars`: the response models are now built inside `_status()`'s try. A malformed status, such as a non-string model `state`, comes back as `reachable:false` with the error, not a 500. Tested.
+- `Pillow==13.0.0` is pinned directly. `auth.py` imports PIL, and it was otherwise only a weasyprint dependency. The register row (pillow 13.0.0, MIT-CMU, images [backend, ml]) matches.
+- NER timeout and extract cap. I chose both:
+  - New `ml_ner_timeout_s=120` (`ML_NER_TIMEOUT_S`). `MLClient.ner` uses it; every other call keeps `ml_timeout_s=30`.
+  - NPC extract now sends at most `NPC_EXTRACT_MAX_CHARS=20_000`: the newest entries first, stopping before the cap, with the newest one cut to the cap if needed. Before, it sent up to 100k chars.
+  - Reason: en_core_web_trf on CPU is slow, and the sidecar keeps holding its NER lock for a request the client abandoned (the existing ml lock-queue deferral from E0-Platform.5), so a smaller batch is safer than only a longer timeout. Journal save keeps the 100k `MAX_NER_CHARS` cut, since one narrative is short.
+  - Tested: the extract cap and newest-first order, and that ner uses its own timeout.

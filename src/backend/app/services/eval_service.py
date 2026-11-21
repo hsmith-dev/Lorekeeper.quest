@@ -23,7 +23,7 @@ def _load_validation_set() -> list[dict]:
     return records
 
 
-def _score(reference: str, generated: str) -> dict:
+async def _score(reference: str, generated: str) -> dict:
     ref_words = set(reference.lower().split())
     gen_words = set(generated.lower().split())
     overlap = len(ref_words & gen_words) / max(len(ref_words), 1)
@@ -36,9 +36,8 @@ def _score(reference: str, generated: str) -> dict:
     # reference means, which is what the fine-tune is actually for.
     semantic = 0.0
     try:
-        from app.services.embedding_service import embed
-        ref_vec = embed(reference)
-        gen_vec = embed(generated)
+        from app.services.embedding_service import embed_many
+        ref_vec, gen_vec = await embed_many([reference, generated])
         dot = sum(a * b for a, b in zip(ref_vec, gen_vec))
         norm_r = sum(a * a for a in ref_vec) ** 0.5
         norm_g = sum(b * b for b in gen_vec) ** 0.5
@@ -80,7 +79,7 @@ async def run_evaluation(config: LLMConfig, sample_size: int) -> dict:
             # task="narrative": the validation set is narrative generation,
             # and the Fine-Tuned/Base compare must keep each run's model.
             generated = await complete_messages(messages, config, max_tokens=400, timeout=90, task="narrative")
-            scores.append(_score(record["output"], generated))
+            scores.append(await _score(record["output"], generated))
         except Exception:
             errors += 1
 

@@ -7,13 +7,16 @@ never installs torch, spaCy, sentence-transformers, whisper, easyocr,
 onnxruntime or any TTS package. This scans what that image installs:
 
   * src/backend/requirements.txt (and any file it pulls in with -r);
-  * every `pip install` in src/backend/Dockerfile and Dockerfile.prod.
+  * every `pip install` in src/backend/Dockerfile and Dockerfile.prod;
+  * optionally (--installed FILE), the `pip list --format=freeze` of a built
+    image, which also catches a model package pulled in transitively. The
+    baseline does not apply there: an installed model package always fails.
 
 Names are compared in PEP 503 normalized form, so `Sentence_Transformers` and
 `sentence-transformers` are the same package.
 
-Today's image still carries five of them; they are listed, with a reason, in
-scripts/model_packages_baseline.txt. That baseline only shrinks:
+Since E0-Platform.6 the image carries none, so scripts/model_packages_baseline.txt
+is empty. The mechanism stays, and the baseline only shrinks:
   * a forbidden package not in the baseline fails (fix: move the model into a
     sidecar and call it through app/clients);
   * a baseline entry nothing installs any more fails (fix: remove it from the
@@ -21,6 +24,8 @@ scripts/model_packages_baseline.txt. That baseline only shrinks:
   * scripts/test_check_model_packages.py freezes the baseline's ceiling.
 
 Run: python scripts/check_model_packages.py   (stdlib only; exit 0 clean, 1 on failure)
+     docker run --rm --entrypoint pip <backend image> list --format=freeze \
+         | python scripts/check_model_packages.py --installed -
 """
 from __future__ import annotations
 
@@ -209,6 +214,20 @@ def scan_dockerfile(path: Path) -> list[Hit]:
     return hits
 
 
+def scan_installed(text: str, source: str = "pip list") -> list[str]:
+    """Errors for every forbidden package in `pip list --format=freeze` /
+    `pip freeze` output (`name==version` or `name @ url` per line)."""
+    errors: list[str] = []
+    for n, raw in enumerate(text.splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        name = requirement_name(line)
+        if name and is_forbidden(name):
+            errors.append(f"{source}:{n}: model package '{name}' is installed in the web/worker image ({line}); {FIX}")
+    return errors
+
+
 def load_baseline(path: Path) -> tuple[dict[str, str], list[str]]:
     """{package: reason} and format errors. Lines: `package: reason`."""
     entries: dict[str, str] = {}
@@ -260,9 +279,19 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--requirements", type=Path, nargs="*", default=REQUIREMENTS)
     ap.add_argument("--dockerfile", type=Path, nargs="*", default=DOCKERFILES)
     ap.add_argument("--baseline", type=Path, default=BASELINE)
+    ap.add_argument("--installed", metavar="FILE",
+                    help="also check a built image's `pip list --format=freeze` output ('-' reads stdin)")
     args = ap.parse_args(argv)
 
     errors = check(args.requirements, args.dockerfile, args.baseline)
+    if args.installed:
+        if args.installed == "-":
+            text, source = sys.stdin.read(), "pip list (stdin)"
+        else:
+            text, source = Path(args.installed).read_text(), args.installed
+        if not text.strip():
+            errors.append(f"{source}: empty package list; did `pip list` run in the image?")
+        errors += scan_installed(text, source)
     if errors:
         print("Model packages in the web/worker image (AD-1, CI-3):", file=sys.stderr)
         for e in errors:

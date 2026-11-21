@@ -1,9 +1,11 @@
 """Interim CI hook: run the `ml` sidecar's own test suite from backend CI.
 
 .github/workflows belong to E0-QA, and backend-tests.yml is the only runner
-that has fastapi, httpx, pytest and en_core_web_trf installed, so this runs
-src/services/ml/tests in a subprocess (its own rootdir and sys.path, never
-importing the backend `app`). Replace with a dedicated `ml` job, path-filtered
+that has fastapi, httpx and pytest installed, so this runs src/services/ml/tests
+in a subprocess (its own rootdir and sys.path, never importing the backend
+`app`). Since E0-Platform.6 backend CI installs no spaCy or en_core_web_trf,
+so the sidecar's real-model test_nlp.py (and test_embed_parity.py, which needs
+ML_REAL_MODELS=1) skip here; they run where the sidecar's models are. Replace with a dedicated `ml` job, path-filtered
 on src/services/ml/**, in E0-QA.
 """
 

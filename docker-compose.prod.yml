@@ -190,11 +190,14 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
-    # Measured live via `docker stats`: 4 gunicorn workers idle at ~6.4GB
-    # RAM combined — each worker independently loads its own copy of the
-    # spaCy transformer, sentence-transformers, and Whisper models at
-    # startup (load_nlp_model/load_embedding_model run per-process, not
-    # shared).
+    # Since E0-Platform.6 no gunicorn worker loads a model (embeddings, NER
+    # and OCR come from `ml`, speech from `stt`), so the history below no
+    # longer describes the process; the cap stays until E0-Platform.7 sizes
+    # it (WEB_MEM_LIMIT) from a fresh measurement.
+    #
+    # History: measured live via `docker stats`, 4 gunicorn workers idled at
+    # ~6.4GB RAM combined, each loading its own copy of the spaCy
+    # transformer and sentence-transformers models at startup.
     #
     # This was originally capped at 10g on that idle number alone, which
     # was wrong: it only covers steady state, not the concurrent *loading*
@@ -256,9 +259,10 @@ services:
   # Shared embeddings + NER sidecar (src/services/ml): one copy of MiniLM and
   # en_core_web_trf instead of one per gunicorn worker. Not exposed to the
   # host and no nginx route — only on the internal `models` network, where
-  # the backend reaches it at ML_URL (default http://ml:8000). Nothing calls
-  # it yet (E0-Platform.6 switches the callers over). Weights are baked into
-  # the image; it runs offline.
+  # the backend reaches it at ML_URL (default http://ml:8000). Since
+  # E0-Platform.6 the backend and worker call it for every embedding, NER and
+  # OCR request and load no model themselves. Weights are baked into the
+  # image; it runs offline.
   ml:
     # Tagged so scripts/sidecar_smoke.sh ml finds it by its default name.
     image: lorekeeper-ml:latest
