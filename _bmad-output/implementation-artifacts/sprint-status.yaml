@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 10-31-2026 23:30
-last_updated: 11-20-2026 20:23
+last_updated: 11-21-2026 11:50
 project: Lorekeeper.quest
 project_key: NOKEY
 tracking_system: file-system
@@ -88,7 +88,7 @@ development_status:
   3-4-ml-lazy-nli-and-ocr-under-a-resident-memory-budget: done
   3-5-stt-sidecar-with-faster-whisper-and-voice-upload-switched-to: done
   3-6-web-and-worker-image-without-models-async-client-wrappers-an: done
-  3-7-one-16-gb-profile-with-container-limits-gpu-override-and-sum: backlog
+  3-7-one-16-gb-profile-with-container-limits-gpu-override-and-sum: done
   3-8-per-user-rate-limit-keying-in-slowapi-and-nginx: done
   3-9-multi-arch-images-upgrade-safe-boot-and-oci-deploy: backlog
   3-10-spike-5-and-spike-6-re-run-on-the-remote-x86-desktop-limits: backlog
