@@ -204,9 +204,10 @@ async def create_entity(
         .order_by(Entity.created_at, Entity.id))
     existing = next((e for e in live if normalize_name(e.name) == key), None)
     if existing is not None:
+        existing_id = str(existing.id)  # read before the rollback expires the row
         await db.rollback()  # releases the lock
         return JSONResponse(status_code=409, content={"detail": "An Entity with this name exists",
-                                                      "code": "duplicate", "existing_id": str(existing.id)})
+                                                      "code": "duplicate", "existing_id": existing_id})
     change = {"op": "create_entity", **body.model_dump(exclude={"campaign_id"}, mode="json")}
 
     async def work():
