@@ -23,7 +23,6 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Iterable
 
 import httpx
-import pytest
 
 from tests.ev4.fixtures import CANARIES, Actor, find_canaries
 from tests.ev4.report import note_family_call, record_leak
@@ -218,17 +217,50 @@ def _captured_text(captured: Any) -> str:
         return repr(captured)
 
 
+def _captured_calls(captured: Any) -> list | None:
+    """The captured calls as a list (None when ``captured`` holds none)."""
+    for attr in ("calls", "messages", "records"):
+        value = getattr(captured, attr, None)
+        if value is not None and not callable(value):
+            return list(value)
+    return list(captured) if isinstance(captured, (list, tuple)) else None
+
+
+def _prompt_text(captured: Any) -> str:
+    """The captured prompts as plain text for the ``forbidden`` substring
+    check: message contents unescaped (no JSON escapes for newlines or
+    non-ASCII), so a marker matches exactly as the prompt builder writes it."""
+    calls = _captured_calls(captured)
+    if calls is None:
+        return _captured_text(captured)
+    parts: list[str] = []
+    for call in calls:
+        messages = call.get("messages", call) if isinstance(call, dict) else getattr(call, "messages", call)
+        if isinstance(messages, list):
+            parts += [str(m.get("content", "")) if isinstance(m, dict) else str(m) for m in messages]
+        else:
+            parts.append(str(messages))
+    return "\n".join(parts)
+
+
 async def assert_captured_context_clean(actor: Actor, run: Callable[[], Awaitable[Any] | Any], *,
-                                        label: str | None = None) -> Any:
+                                        label: str | None = None, forbidden: Iterable[str] = (),
+                                        min_calls: int = 0) -> Any:
     """Every prompt sent to the LLM while ``run()`` executes on ``actor``'s
-    behalf holds no canary ``actor`` may not see. Needs llm_provider.capture()
-    (E0-LLM.5); skips until it exists. Returns run()'s result."""
+    behalf holds no canary ``actor`` may not see, and none of the
+    ``forbidden`` substrings (context markers such as the glossary block, and
+    plain secret text): each one found is a leak. Needs
+    llm_provider.capture() (E0-LLM.5); without it the check fails, EV-4
+    never skips. Fewer than ``min_calls`` captured calls is probe misuse
+    (ValueError): a check over no prompt would pass vacuously. Returns
+    run()'s result."""
     note_family_call()
     from app.services import llm_provider
 
     capture = getattr(llm_provider, "capture", None)
     if capture is None:
-        pytest.skip("llm_provider.capture() not available yet (E0-LLM.5)")
+        raise RuntimeError("EV-4: llm_provider.capture() is missing (E0-LLM.5), so the captured-context "
+                           "check cannot run; EV-4 never skips a check")
     cm = capture()
     if hasattr(cm, "__aenter__"):
         async with cm as captured:
@@ -238,10 +270,18 @@ async def assert_captured_context_clean(actor: Actor, run: Callable[[], Awaitabl
             result = await _maybe_await(run())
     if captured is None:
         raise TypeError("capture() yielded nothing to scan")
+    if min_calls:
+        calls = _captured_calls(captured)
+        n = len(calls) if calls is not None else 0
+        if n < min_calls:
+            raise ValueError(f"assert_captured_context_clean: {label or 'run()'} made {n} LLM call(s); the "
+                             f"check needs at least {min_calls} (fix the probe's request or actor)")
     hits = canary_hits(actor, _captured_text(captured))
+    text = _prompt_text(captured)
+    hits += [f"forbidden marker {m!r}" for m in dict.fromkeys(forbidden) if m and m in text]
     if hits:
         record_leak(f"EV-4 leak: the LLM context built for {actor.name} in {label or 'run()'} holds "
-                    f"{len(hits)} canary token(s)", hits, count=len(hits))
+                    f"{len(hits)} canary token(s) or forbidden marker(s)", hits, count=len(hits))
     return result
 
 

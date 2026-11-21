@@ -438,6 +438,94 @@ async def test_retry_conflicts(client, world, rq_conn):
     assert Queue("interactive", connection=rq_conn).job_ids == []
 
 
+_VOLATILE = {"date", "x-response-time", "server"}
+
+
+def _shape(r: httpx.Response, job_id) -> tuple:
+    """A retry answer with its own Job id taken out: status, body, headers."""
+    body = r.text.replace(str(job_id), "<id>")
+    return r.status_code, body, sorted((k, v) for k, v in r.headers.multi_items() if k.lower() not in _VOLATILE)
+
+
+async def test_retry_behind_a_hidden_holder_answers_like_a_free_key(client, world, rq_conn):
+    """E0-QA.14: the Owner's queued Job (hidden from the Player) holds the
+    key. A 409 would reveal it exists, so the Player's retry answers exactly
+    like one whose key is free; the row waits behind the holder, unpushed,
+    on a per-retry key, and the holder is untouched."""
+    key = f"test-jr:{uuid.uuid4().hex}"
+    own = await world.job(world.player, status="failed", key=key)
+    holder = await world.job(world.owner, status="queued", key=key)
+    free = await world.job(world.player, status="failed")
+    r_free = await client.post(f"/api/jobs/{free}/retry", headers=bearer(world.player))
+    r_held = await client.post(f"/api/jobs/{own}/retry", headers=bearer(world.player))
+    assert r_held.status_code == 202 and r_held.json() == {"job_id": str(own)}, r_held.text
+    assert _shape(r_held, own) == _shape(r_free, free)
+    row = await world.row(own)
+    assert row.status == JobStatus.QUEUED and row.attempts == 0
+    assert row.idempotency_key == f"{key}{control.RETRY_KEY_MARK}{own}"
+    assert row.depends_on_job_id == holder
+    assert Queue("interactive", connection=rq_conn).job_ids == [str(free)]  # the held row is not pushed
+    held = await world.row(holder)
+    assert held.status == JobStatus.QUEUED and held.idempotency_key == key and held.depends_on_job_id is None
+    # The Player's view of their Job: queued, no trace of the holder.
+    r = await client.get(f"/api/jobs/{own}", headers=bearer(world.player))
+    assert r.status_code == 200 and r.json()["status"] == "queued", r.text
+    assert str(holder) not in r.text and "depends_on" not in r.text
+    # Released when the holder ends.
+    await cancel_job(world.db, await world.ctx(world.owner), holder)
+    assert str(own) in Queue("interactive", connection=rq_conn).job_ids
+
+
+async def test_retry_behind_a_holder_in_another_campaign_is_held(client, world, rq_conn):
+    """A GM of this Campaign cannot see another Campaign's Job either: held,
+    then released when that Job ends (here, it fails in the worker's way: an
+    ORM write of a terminal status)."""
+    key = f"test-jr:{uuid.uuid4().hex}"
+    own = await world.job(world.owner, status="failed", key=key)
+    holder = await world.job(world.other_owner, status="running", key=key, campaign_id=world.other_cid,
+                             ctx_kind="gm")
+    r = await client.post(f"/api/jobs/{own}/retry", headers=bearer(world.owner))
+    assert r.status_code == 202 and r.json() == {"job_id": str(own)}, r.text
+    row = await world.row(own)
+    assert row.status == JobStatus.QUEUED and row.depends_on_job_id == holder
+    assert Queue("interactive", connection=rq_conn).job_ids == []
+    assert await worker._claim(world.db, own, "w-held") is None  # not runnable while the holder runs
+    await world.db.rollback()
+    held = await world.row(holder)
+    held.status = JobStatus.FAILED
+    held.finished_at = datetime.now(timezone.utc)
+    await world.db.commit()
+    assert Queue("interactive", connection=rq_conn).job_ids == [str(own)]
+    # Failed again, then retried with the key free: the original key comes back.
+    row = await world.row(own)
+    row.status = JobStatus.FAILED
+    await world.db.commit()
+    r = await client.post(f"/api/jobs/{own}/retry", headers=bearer(world.owner))
+    assert r.status_code == 202, r.text
+    row = await world.row(own)
+    assert row.idempotency_key == key and row.depends_on_job_id is None
+
+
+async def test_retry_behind_a_visible_holder_is_409(client, world, rq_conn):
+    """A holder the ctx can see is still the 409: the actor's own active Job,
+    or (for a GM) any Job of the Campaign."""
+    key = f"test-jr:{uuid.uuid4().hex}"
+    own = await world.job(world.player, status="failed", key=key)
+    await world.job(world.player, status="running", key=key)
+    r = await client.post(f"/api/jobs/{own}/retry", headers=bearer(world.player))
+    assert r.status_code == 409 and r.json() == {"detail": control.KEY_IN_USE}
+    await world.db.commit()
+    key2 = f"test-jr:{uuid.uuid4().hex}"
+    theirs = await world.job(world.player2, status="failed", key=key2)
+    await world.job(world.owner, status="queued", key=key2)
+    r = await client.post(f"/api/jobs/{theirs}/retry", headers=bearer(world.co_gm))
+    assert r.status_code == 409 and r.json() == {"detail": control.KEY_IN_USE}
+    await world.db.commit()
+    assert (await world.row(own)).status == JobStatus.FAILED
+    assert (await world.row(theirs)).status == JobStatus.FAILED
+    assert Queue("interactive", connection=rq_conn).job_ids == []
+
+
 async def test_retry_hidden_or_preview_is_404(client, world, rq_conn):
     gm_job = await world.job(world.owner, status="failed")
     r = await client.post(f"/api/jobs/{gm_job}/retry", headers=bearer(world.player))

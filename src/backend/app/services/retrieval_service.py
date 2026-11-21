@@ -150,6 +150,28 @@ async def hybrid_search_own_journals(
     return await _search(db, query_text, base_filter, party=False, limit=limit, max_distance=max_distance)
 
 
+async def own_canon_context(
+    db: AsyncSession,
+    query_text: str,
+    *,
+    roles: Mapping[uuid.UUID, str],
+    user_id: uuid.UUID | None = None,
+    limit: int = 3,
+    max_distance: float = RAG_RELEVANCE_MAX_DISTANCE,
+) -> tuple[str | None, list[str]]:
+    """Canon (source document chunks) for a chat with no Campaign selected,
+    mirroring `hybrid_search_own_journals`: the user's own uploads with no
+    Campaign, or in the Campaigns where `roles` (an `access.role_map`) makes
+    them GM now. A source uploaded as a Co-GM stops being read the moment
+    the grant is demoted or removed. `user_id` defaults to `roles.user_id`."""
+    uid = user_id if user_id is not None else getattr(roles, "user_id", None)
+    if uid is None:
+        raise ValueError("own_canon_context: needs the user_id (a role_map carries it)")
+    gm_ids = [cid for cid, role in roles.items() if role == GM]
+    return await source_service.retrieve_canon_context(db, query_text, uid, None, limit=limit,
+                                                       max_distance=max_distance, campaign_ids=gm_ids)
+
+
 async def _search(
     db: AsyncSession,
     query_text: str,
