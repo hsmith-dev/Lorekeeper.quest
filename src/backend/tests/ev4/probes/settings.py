@@ -110,17 +110,56 @@ async def probe_put_settings(ev4, actor):
         record_leak(f"EV-4 leak: {actor.name}'s settings write changed another user's settings", [str(other)])
 
 
+@contextmanager
+def spy_connection_test():
+    """Record the LLMConfig Test Connection hands to the provider (and answer
+    without one)."""
+    from app.api.routes import settings as route
+
+    real = route.test_provider_connection
+    seen: list = []
+
+    async def fake(cfg):
+        seen.append(cfg)
+        return "OK"
+
+    route.test_provider_connection = fake
+    try:
+        yield seen
+    finally:
+        route.test_provider_connection = real
+
+
 @ev4_probe("POST", "/api/settings/test")
 async def probe_test_connection(ev4, actor):
     """No URL or key in the body: the route falls back to the caller's own
-    saved settings (none here), never another user's canary URL or key."""
+    saved URL and key, never another user's (canaries). Checked on the config
+    actually handed to the provider, with and without saved settings of the
+    caller's own."""
+    from app.db.models.user_settings import UserSettings
+
     await other_user(ev4)
-    r = await actor.post("/api/settings/test", json={"llm_provider": "fake"})
+    with spy_connection_test() as seen:
+        r = await actor.post("/api/settings/test", json={"llm_provider": "openai"})
     if not authenticated(actor):
         check_denial(actor, r, "POST /api/settings/test")
+        assert seen == [], "a refused Test Connection reached the provider"
         return
     assert_no_canary(actor, r)
     assert r.status_code == 200, r.text
+    ev4.db.add(UserSettings(user_id=actor.user_id, llm_provider="openai", llm_api_url="http://mine.example",
+                            llm_api_key="my-own-key"))
+    await ev4.db.commit()
+    with spy_connection_test() as seen_own:
+        r = await actor.post("/api/settings/test", json={"llm_provider": "openai"})
+    assert_no_canary(actor, r)
+    assert r.status_code == 200, r.text
+    note_family_call()
+    used = [(c.api_url, c.api_key) for c in seen + seen_own]
+    if used != [(None, None), ("http://mine.example", "my-own-key")]:
+        record_leak(f"EV-4 leak: {actor.name}'s Test Connection did not use only its own saved settings",
+                    [repr(u)[:200] for u in used])
+    assert_no_canary(actor, repr(used), label="the config handed to the provider")
 
 
 @contextmanager

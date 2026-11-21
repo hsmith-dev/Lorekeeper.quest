@@ -1,9 +1,9 @@
 """EV-4 probes for api/routes/auth.py's per-user reads and writes
-(E0-QA.13): `GET /api/auth/me` and `PUT /api/auth/me/avatar` answer only
-about the caller. Another user (canary display name and avatar) never shows
-up, and their account is never changed. The anonymous credential routes
-(register, login, password reset) and tutorial-complete are exempted in
-exemptions.yaml.
+(E0-QA.13): `GET /api/auth/me`, `PUT /api/auth/me/avatar` and
+`POST /api/auth/tutorial-complete` answer only about the caller. Another
+user (canary display name and avatar) never shows up, and their account is
+never changed. The anonymous credential routes (register, login, password
+reset) are exempted in exemptions.yaml.
 """
 from __future__ import annotations
 
@@ -89,6 +89,24 @@ async def probe_avatar(ev4, actor):
     else:
         _check_self(actor, r, "PUT /api/auth/me/avatar")
         assert r.json()["avatar_data"].startswith("data:image/jpeg;base64,"), r.text
+        # Non-vacuous: the caller's own row holds the new avatar.
+        assert (await _user_row(ev4, actor.user_id))[1] == r.json()["avatar_data"]
     note_family_call()
     if await _user_row(ev4, other) != before:
         record_leak(f"EV-4 leak: {actor.name}'s avatar upload changed another user's account", [str(other)])
+
+
+@ev4_probe("POST", "/api/auth/tutorial-complete")
+async def probe_tutorial_complete(ev4, actor):
+    other = await other_user(ev4)
+    before = await _user_row(ev4, other)
+    r = await actor.post("/api/auth/tutorial-complete")
+    if not authenticated(actor):
+        check_denial(actor, r, "POST /api/auth/tutorial-complete")
+    else:
+        _check_self(actor, r, "POST /api/auth/tutorial-complete")
+        assert r.json()["has_completed_tutorial"] is True, r.text
+        assert (await _user_row(ev4, actor.user_id))[2] is True
+    note_family_call()
+    if await _user_row(ev4, other) != before:
+        record_leak(f"EV-4 leak: {actor.name}'s tutorial-complete changed another user's account", [str(other)])

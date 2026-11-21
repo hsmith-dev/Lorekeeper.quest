@@ -1,9 +1,11 @@
 """EV-4 coverage gate (CI-12): every route is probed, exempted or pending,
 and every route reaches nginx's API locations.
 
-The pending baseline only shrinks: FROZEN_PENDING below is the ceiling, the
-routes that existed when the harness landed (E0-QA.11). Never add to it.
-Deleting a line from pending_baseline.txt needs no change here.
+The pending baseline is empty since E0-QA.13 and must stay empty
+(test_pending_baseline_is_empty). FROZEN_PENDING below is the historical
+ceiling, the routes that existed when the harness landed (E0-QA.11), kept so
+the coverage gate's message for an added pending line stays specific.
+Never add to it.
 """
 from __future__ import annotations
 

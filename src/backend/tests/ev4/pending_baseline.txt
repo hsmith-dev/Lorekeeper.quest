@@ -1,13 +1,10 @@
-# EV-4 pending baseline: routes that existed when the harness landed
-# (E0-QA.11) and have no probe or exemption yet. E0-QA.13 / E0-QA.14 and the
-# feature epics write the probes; delete a route's line in the PR that probes
-# or exempts it (tests/ev4/test_coverage.py fails until you do).
+# EV-4 pending baseline: EMPTY, and it must stay empty.
 #
-# This file only shrinks. test_coverage.py holds the frozen ceiling
-# (FROZEN_PENDING); a new route never goes here, it gets a probe in
-# tests/ev4/probes/<feature>.py or a reasoned exemption in exemptions.yaml.
+# E0-QA.11 listed here the routes that existed when the harness landed;
+# E0-QA.13 probed or exempted every one of them. A new route never goes
+# here: it gets a probe in tests/ev4/probes/<feature>.py or a reasoned
+# exemption in exemptions.yaml. tests/ev4/test_coverage.py fails on any line
+# (test_pending_baseline_is_empty).
 #
-# Format: METHOD PATH (the route template exactly as FastAPI registers it)
-#
-# Empty since E0-QA.13: every route is probed or exempted
-# (tests/ev4/test_coverage.py::test_pending_baseline_is_empty).
+# Format (kept for the loader): METHOD PATH, the route template exactly as
+# FastAPI registers it.

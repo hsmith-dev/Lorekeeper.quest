@@ -41,6 +41,38 @@ def _stable(body: dict) -> dict:
     return {k: v for k, v in body.items() if k not in ("id", "created_at")}
 
 
+async def _former_member_campaign(ev4, actor) -> uuid.UUID:
+    """A seeded Campaign the actor was a Player in and has been removed from
+    (the case the old "still submittable" comment was about)."""
+    import sqlalchemy as sa
+
+    from app.db.models.campaign_member import CampaignMember
+    from app.db.models.user import User
+
+    left = await outsider(ev4)
+    await ev4.make_member("player", campaign_id=left.campaign_id, user=await ev4.db.get(User, actor.user_id))
+    await ev4.db.execute(sa.delete(CampaignMember).where(CampaignMember.campaign_id == left.campaign_id,
+                                                         CampaignMember.user_id == actor.user_id))
+    await ev4.db.commit()
+    return left.campaign_id
+
+
+def _same_submit(actor, hidden, missing, label: str) -> list[str]:
+    """Hidden vs missing for two submits whose bodies differ only in the new
+    row's id and timestamp: same status, same body otherwise, same headers."""
+    from tests.ev4.families import _headers
+
+    diffs = []
+    if hidden.status_code != missing.status_code:
+        diffs.append(f"{label} status: hidden {hidden.status_code} vs missing {missing.status_code}")
+    elif hidden.status_code < 400 and _stable(hidden.json()) != _stable(missing.json()):
+        diffs.append(f"{label} body: hidden {hidden.text[:200]!r} vs missing {missing.text[:200]!r}")
+    skip = frozenset({"content-length"})
+    if _headers(hidden, skip) != _headers(missing, skip):
+        diffs.append(f"{label} headers differ")
+    return diffs
+
+
 @ev4_probe("POST", "/api/feedback/")
 async def probe_submit_feedback(ev4, actor):
     from app.db.models.feedback import Feedback
@@ -50,19 +82,22 @@ async def probe_submit_feedback(ev4, actor):
     r_hidden = await actor.post("/api/feedback/", json={**body, "campaign_id": str(hidden_cid)})
     r_missing = await actor.post("/api/feedback/", json={**body, "campaign_id": MISSING})
     if not authenticated(actor):
+        check_denial(actor, r_hidden, "POST /api/feedback/")
         assert_same_answer(actor, r_hidden, r_missing, "feedback Campaign")
         assert await row_count(ev4, Feedback, Feedback.message == body["message"]) == 0
         return
     note_family_call()
     assert_no_canary(actor, r_hidden)
     assert_no_canary(actor, r_missing)
-    diffs = []
-    if r_hidden.status_code != r_missing.status_code:
-        diffs.append(f"status: hidden {r_hidden.status_code} vs missing {r_missing.status_code}")
-    elif r_hidden.status_code < 400 and _stable(r_hidden.json()) != _stable(r_missing.json()):
-        diffs.append(f"body: hidden {r_hidden.text[:200]!r} vs missing {r_missing.text[:200]!r}")
-    if await row_count(ev4, Feedback, Feedback.campaign_id == hidden_cid, Feedback.user_id == actor.user_id):
-        diffs.append("the hidden Campaign was stored as the feedback's pointer")
+    diffs = _same_submit(actor, r_hidden, r_missing, "never a Member")
+    left_cid = await _former_member_campaign(ev4, actor)
+    r_left = await actor.post("/api/feedback/", json={**body, "campaign_id": str(left_cid)})
+    assert_no_canary(actor, r_left)
+    diffs += _same_submit(actor, r_left, await actor.post("/api/feedback/", json={**body, "campaign_id": MISSING}),
+                          "removed Member")
+    for cid in (hidden_cid, left_cid):
+        if await row_count(ev4, Feedback, Feedback.campaign_id == cid, Feedback.user_id == actor.user_id):
+            diffs.append(f"the unreachable Campaign {cid} was stored as the feedback's pointer")
     if diffs:
         record_leak(f"EV-4 leak: {actor.name} can tell a hidden Campaign from a missing one via feedback", diffs)
     assert r_hidden.status_code == 201 and r_hidden.json()["campaign_id"] is None, r_hidden.text

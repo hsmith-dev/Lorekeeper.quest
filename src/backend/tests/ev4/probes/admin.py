@@ -16,6 +16,7 @@ cannot ship outside the gate unnoticed.
 from __future__ import annotations
 
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 import httpx
@@ -64,6 +65,11 @@ ADMIN_ROUTES = (
 )
 
 
+# Admin routes exempted in exemptions.yaml (so not given a per-route probe
+# here) that the sweep still checks.
+SWEEP_ONLY = frozenset({"GET /api/admin/jobs/stats"})
+
+
 @dataclass
 class Targets:
     user_id: uuid.UUID
@@ -71,6 +77,7 @@ class Targets:
     promo_note: str
     open_access: bool
     promo_count: int
+    user_row: tuple
 
 
 async def admin_targets(ev4) -> Targets:
@@ -89,7 +96,18 @@ async def admin_targets(ev4) -> Targets:
     ev4.db.add(promo)
     await ev4.db.commit()
     return Targets(user.id, promo.id, note, await is_open_access(ev4.db),
-                   await _count(ev4, PromoCode))
+                   await _count(ev4, PromoCode), await _user_row(ev4, user.id))
+
+
+async def _user_row(ev4, user_id):
+    """Every user field an admin route can change (None once deleted)."""
+    from app.db.models.user import User
+
+    row = (await ev4.db.execute(sa.select(
+        User.is_suspended, User.suspended_reason, User.is_admin, User.access_granted, User.access_source,
+        User.display_name, User.email,
+    ).where(User.id == user_id))).one_or_none()
+    return None if row is None else tuple(row)
 
 
 async def _count(ev4, model, *where) -> int:
@@ -100,19 +118,17 @@ async def _assert_untouched(ev4, t: Targets, label: str) -> None:
     """Nothing an admin route could change has changed."""
     from app.db.models.admin_message import AdminMessage
     from app.db.models.promo_code import PromoCode
-    from app.db.models.user import User
     from app.services.app_config_service import is_open_access
 
     note_family_call()
-    row = (await ev4.db.execute(sa.select(User.is_suspended, User.is_admin, User.access_granted)
-                                .where(User.id == t.user_id))).one_or_none()
+    row = await _user_row(ev4, t.user_id)
     promo = (await ev4.db.execute(sa.select(PromoCode.active, PromoCode.note)
                                   .where(PromoCode.id == t.promo_id))).one_or_none()
     diffs = []
     if row is None:
         diffs.append("the target user was deleted")
-    elif tuple(row) != (False, False, True):
-        diffs.append(f"the target user changed: suspended/admin/access = {tuple(row)}")
+    elif row != t.user_row:
+        diffs.append(f"the target user changed: {t.user_row!r} -> {row!r}")
     if await _count(ev4, AdminMessage, AdminMessage.user_id == t.user_id):
         diffs.append("an admin message was sent to the target user")
     if promo is None:
@@ -149,14 +165,54 @@ async def _probe_admin_route(ev4, actor: Actor, method: str, path: str) -> None:
     reference = await uniform_denial(actor)
     body = BODIES.get(key)
     kwargs = {"json": body} if body is not None else {}
-    real = path.format(user_id=targets.user_id, promo_id=targets.promo_id)
+    real = _fill(path, targets)
     missing = path.format(user_id=MISSING, promo_id=MISSING)
-    r_real = await actor.request(method, real, **kwargs)
+    with model_server_spy() as calls:
+        r_real = await actor.request(method, real, **kwargs)
+        r_missing = await actor.request(method, missing, **kwargs) if real != missing else None
+    _check_no_model_calls(calls, key)
     check_denial(actor, r_real, key)
-    if real != missing:
-        assert_same_answer(actor, r_real, await actor.request(method, missing, **kwargs), f"admin target of {key}")
+    if r_missing is not None:
+        assert_same_answer(actor, r_real, r_missing, f"admin target of {key}")
     assert_same_answer(actor, r_real, reference, f"{key} vs the uniform admin denial")
     await _assert_untouched(ev4, targets, f"{actor.name} {key}")
+
+
+@contextmanager
+def model_server_spy():
+    """Record any call into the model server an admin route would make
+    (the model library status, a model install), refusing it. A refused
+    request must never reach these, so any call is a leak."""
+    from app.services import ollama_service
+
+    calls: list[str] = []
+    real = {name: getattr(ollama_service, name) for name in ("install_model_events", "ollama_status")}
+
+    def spy(name):
+        def refuse(*args, **kwargs):
+            calls.append(name)
+            raise RuntimeError(f"EV-4: a refused admin request reached ollama_service.{name}")
+        return refuse
+
+    for name in real:
+        setattr(ollama_service, name, spy(name))
+    try:
+        yield calls
+    finally:
+        for name, fn in real.items():
+            setattr(ollama_service, name, fn)
+
+
+def _check_no_model_calls(calls: list[str], label: str) -> None:
+    note_family_call()
+    if calls:
+        record_leak(f"EV-4 leak: a non-admin request ({label}) reached the model server", calls)
+
+
+def _fill(path: str, t: Targets) -> str:
+    """`path` with the real targets for {user_id}/{promo_id} and a sample id
+    for any other parameter."""
+    return sample_path(path.replace("{user_id}", str(t.user_id)).replace("{promo_id}", str(t.promo_id)))
 
 
 def _register(method: str, path: str) -> None:
@@ -179,14 +235,19 @@ async def probe_every_admin_route(ev4, actor):
 
     targets = await admin_targets(ev4)
     reference = await uniform_denial(actor)
-    swept = 0
-    for route in api_routes(app):
-        if route.method == WS or not (route.path == "/api/admin" or route.path.startswith("/api/admin/")):
-            continue
-        body = BODIES.get(route.key)
-        r = await actor.request(route.method, sample_path(route.path), **({"json": body} if body else {}))
+    swept: set[str] = set()
+    with model_server_spy() as calls:
+        responses = [(route, await actor.request(route.method, _fill(route.path, targets),
+                                                 **({"json": BODIES[route.key]} if route.key in BODIES else {})))
+                     for route in api_routes(app)
+                     if route.method != WS and (route.path == "/api/admin" or route.path.startswith("/api/admin/"))]
+    _check_no_model_calls(calls, "sweep")
+    for route, r in responses:
         check_denial(actor, r, route.key)
         assert_same_answer(actor, r, reference, f"{route.key} vs the uniform admin denial")
-        swept += 1
-    assert swept >= len(ADMIN_ROUTES), f"only {swept} admin routes found"
+        swept.add(route.key)
+    # A new, renamed or removed admin route must be listed here (and get its
+    # own per-route probe with a real target and body) before it ships.
+    expected = {route_key(m, p) for m, p in ADMIN_ROUTES} | SWEEP_ONLY
+    assert swept == expected, f"admin routes drifted: new {sorted(swept - expected)}, gone {sorted(expected - swept)}"
     await _assert_untouched(ev4, targets, f"{actor.name} sweep")

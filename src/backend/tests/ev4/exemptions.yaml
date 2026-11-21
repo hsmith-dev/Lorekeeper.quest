@@ -9,9 +9,11 @@
   reason: "Reports only whether the local LLM backend answers ({ai_online: bool}); reads no Campaign, session or user data."
 - route: "GET /api/admin/jobs/stats"
   reason: "Admin-only (router-level require_admin): Job counts by status and queue across every Campaign; no kind, payload, Campaign id or other Campaign data."
-# E0-QA.13: the account routes that read no Campaign data. GET /api/auth/me
-# and PUT /api/auth/me/avatar are probed (probes/auth.py), and so is
-# GET /api/billing/status (probes/billing.py).
+# E0-QA.13: anonymous credential routes, Stripe hand-offs and the liveness
+# check, none of which reads Campaign data or another user's account. The
+# per-user account routes are probed instead: auth me / avatar /
+# tutorial-complete (probes/auth.py), billing status and redeem-promo
+# (probes/billing.py), settings (probes/settings.py).
 - route: "POST /api/auth/register"
   reason: "Anonymous account creation: reads no Campaign, session or other user's data; answers with the new account's own token. Email enumeration and rate limits are covered by tests/test_auth.py, not a spoiler-leak concern."
 - route: "POST /api/auth/login"
@@ -20,15 +22,11 @@
   reason: "Anonymous; always returns the same fixed message whether or not the email exists; reads no Campaign data."
 - route: "POST /api/auth/reset-password"
   reason: "Anonymous; consumes a reset token and changes only that token's account password; answers with a fixed message; no Campaign data."
-- route: "POST /api/auth/tutorial-complete"
-  reason: "Sets the caller's own has_completed_tutorial flag and returns the caller's own MeResponse (the same shape GET /api/auth/me returns, which probes/auth.py probes for cross-user leakage); no Campaign data."
 - route: "POST /api/billing/checkout"
   reason: "Starts a Stripe checkout for the caller's own account (or 503 when Stripe is not configured); reads no Campaign data and no other user's billing."
 - route: "POST /api/billing/portal"
   reason: "Opens the Stripe customer portal for the caller's own Stripe customer; reads no Campaign data and no other user's billing."
-- route: "POST /api/billing/redeem-promo"
-  reason: "Redeems a promo code onto the caller's own account and returns the caller's own billing status (probed in probes/billing.py); no Campaign data."
 - route: "POST /api/billing/webhook"
-  reason: "Stripe server-to-server webhook, authenticated by the Stripe signature, not a user; returns {received: true} only; no Campaign data."
+  reason: "Stripe server-to-server webhook, not a user request: with Stripe or STRIPE_WEBHOOK_SECRET unset it answers 503 before verifying anything (billing_service.handle_webhook_event); otherwise a missing or wrong Stripe signature is 400; a verified event answers {received: true} only. No Campaign data."
 - route: "GET /api/health"
   reason: "Unauthenticated liveness check: reports only whether the database and the local LLM backend answer (status/db/kobold booleans); reads no Campaign, session or user data."

@@ -2,7 +2,9 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
+from app.access import role_map
 from app.db.session import get_db
 from app.db.models.user import User
 from app.db.models.campaign import Campaign
@@ -17,7 +19,6 @@ from app.schemas.feedback import (
     FeedbackAdminResponse,
     FeedbackContextResponse,
 )
-from app.access import NotFound, ctx_for
 from app.api.deps import get_current_user, require_admin
 
 router = APIRouter()
@@ -35,21 +36,31 @@ async def submit_feedback(
     # the access layer). A Campaign they cannot reach is dropped exactly like
     # one that does not exist (EV-4, E0-QA.13): before this, a hidden id
     # answered 201 while a missing one failed the foreign key (a 500), so the
-    # endpoint told anyone which Campaign ids exist.
-    campaign_id = body.campaign_id
-    if campaign_id is not None:
-        try:
-            await ctx_for(db, user, campaign_id)
-        except NotFound:
-            campaign_id = None
-    feedback = Feedback(
-        user_id=user.id,
-        campaign_id=campaign_id,
-        category=body.category,
-        message=body.message.strip(),
-    )
+    # endpoint told anyone which Campaign ids exist. The check reads the
+    # caller's whole Role map (the same two queries whatever id was sent),
+    # so neither the answer nor its timing depends on whether a Campaign the
+    # caller cannot reach exists.
+    user_id = user.id
+    reachable = await role_map(db, user)
+    campaign_id = body.campaign_id if body.campaign_id in reachable else None
+
+    def row(cid):
+        return Feedback(user_id=user_id, campaign_id=cid, category=body.category, message=body.message.strip())
+
+    feedback = row(campaign_id)
     db.add(feedback)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        if campaign_id is None:
+            raise
+        # The Campaign was deleted between the check and the insert: keep
+        # the feedback, without the pointer (the FK is SET NULL on delete
+        # anyway).
+        await db.rollback()
+        feedback = row(None)
+        db.add(feedback)
+        await db.commit()
     await db.refresh(feedback)
     return feedback
 
