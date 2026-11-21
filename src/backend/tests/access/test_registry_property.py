@@ -69,7 +69,7 @@ ref_fields = st.sampled_from([None, "narrative", "shorthand", "gm_notes"])
 # F3-world: a Visibility floor (NULL is none), per-field Visibilities, and the
 # entity_changes.field values the field rule distinguishes.
 floors = st.one_of(st.none(), visibilities)
-FIELD_NAMES = ["description", "status", "name", "attributes", "attributes.region"]
+FIELD_NAMES = ["description", "status", "name", "attributes", "attributes.region", "aliases"]
 field_visibilities = st.dictionaries(st.sampled_from(FIELD_NAMES), visibilities.map(lambda v: v.value), max_size=3)
 change_fields = st.sampled_from([None, *FIELD_NAMES, "gm_notes", "field_visibility", "field_visibility.status",
                                  "visibility_floor", "visibility"])
@@ -182,8 +182,10 @@ SPECS = {
     EntityMention: st.fixed_dictionaries({"entity": entity_spec, "entry": st.one_of(st.none(), entry_spec),
                                           "source_field": st.sampled_from(list(MentionSourceField)),
                                           "floor": floors}),
+    # E0-WorldCore.5: write_visibility is a floor (the audience the row was written for).
     EntityChange: st.fixed_dictionaries({"entity": entity_spec, "field": change_fields,
-                                         "op": st.sampled_from(["update_field", "migrated", "create_entity"])}),
+                                         "op": st.sampled_from(["update_field", "migrated", "create_entity"]),
+                                         "write": visibilities}),
 }
 
 
@@ -273,7 +275,8 @@ async def _build_world(db, w: World, model, s: dict) -> Built | None:
         elif model is QuestStep:
             row = QuestStep(campaign_id=e.campaign_id, quest_entity_id=e.id, position=0, text="t")
         else:
-            row = EntityChange(campaign_id=e.campaign_id, entity_id=e.id, op=s["op"], field=s["field"])
+            row = EntityChange(campaign_id=e.campaign_id, entity_id=e.id, op=s["op"], field=s["field"],
+                               write_visibility=s["write"])
         db.add(row)
         await db.flush()
         return Built(row, e.campaign_id == w.a, [e])

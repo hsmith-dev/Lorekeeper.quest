@@ -187,10 +187,14 @@ async def test_loaded_rows_project_and_narrow(ev4, db, world):
     assert shown_id in seen
     assert hidden_edge_id not in seen and floored_id not in seen
 
-    for model in (EntityAlias, EntityMention, EntityChange):
+    for model in (EntityAlias, EntityMention):
         rows = await _loaded(db, player, model)
         assert rows and all(_parents(model, r)[-1].id == published_id for r in rows), model.__name__
         for row in rows:
             assert audience_of(row) == audience_of(row, parents=_parents(model, row))
             project(row, player)
     assert await _loaded(db, player, QuestStep) == []  # its Quest stayed GM-only
+    # E0-WorldCore.5 (owner decision, round 4): the copy's `migrated` rows were
+    # written while every copy was GM-only (write_visibility gm), so publishing
+    # the Entity does not show them to a Player.
+    assert await _loaded(db, player, EntityChange) == []

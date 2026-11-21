@@ -447,6 +447,8 @@ PARTY_READ_ROUTES = {
     "GET /api/quests/{quest_id}/entries", "GET /api/sources/", "GET /api/session-plans/",
     "GET /api/session-plans/{plan_id}", "GET /api/shorthand/", "GET /api/character-sheets/templates",
     "GET /api/character-sheets/", "GET /api/character-sheets/{sheet_id}",
+    # E0-WorldCore.5.
+    "GET /api/entities/", "GET /api/entities/{entity_id}", "GET /api/entities/{entity_id}/history",
 }
 
 

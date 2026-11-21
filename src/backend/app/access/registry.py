@@ -18,7 +18,8 @@ Each model registers exactly one class:
     `gm_when` are nullable columns any of which, set, makes the row GM
     (a soft-deleted or merged Entity). `register_writer(model, fn)` sets
     `writer` after the fact (world_service registers `apply_change`'s).
-  * `derived(derive_from=[...], field=None, floor=None, field_rule="audience")`:
+  * `derived(derive_from=[...], field=None, floor=None, field_rule="audience",
+    as_parent_field=None)`:
     the row's Audience comes from other rows, through `parent(...)` links
     (the most restrictive parent, plus a `field=` rule such as
     `journal_tags.source_field`, plus a `floor`), or through
@@ -29,7 +30,13 @@ Each model registers exactly one class:
     `visibility_floor` are GM; otherwise the parent's
     `field_visibility[field]` and `field_visibility[<field up to its first
     '.'>]`, when set, narrow the row. A NULL field is GM unless the row's
-    `op_field` is in `public_null_ops`. A derived row with
+    `op_field` is in `public_null_ops`. `as_parent_field="aliases"` makes the
+    row a part of one field of its first (stored) parent: it is narrowed by
+    `parent_field_audience(parent, "aliases")`, the parent's
+    `field_visibility["aliases"]` (entity_aliases, E0-WorldCore.5). A
+    `floor` may name any nullable or NOT NULL Visibility column of the row:
+    entity_changes' `write_visibility` (E0-WorldCore.5) is the audience the
+    row was written for. A derived row with
     a NULL parent link (an orphan: entity_mentions.journal_id after its
     entry was deleted) is GM.
   * `always_gm(owner_field=None)`: GM only (npcs and quests until F3-world,
@@ -44,7 +51,8 @@ Each model registers exactly one class:
     table of the ctx's Campaign; management rules stay in the routes.
 
 `visible_clause(Model, ctx)` (SQL) and `audience_of(obj)` (Python) are both
-read from the same registration; tests/access/test_registry_property.py
+read from the same registration (`audience_of(obj, floor=False)` skips the
+row's own floor; world_service uses it to compute `write_visibility`); tests/access/test_registry_property.py
 (CI-11) proves they agree. `scoped_select` adds the Campaign scope.
 
 `DERIVED_REGISTRY` lists derived types (file or not: E0-Jobs' derived
@@ -207,6 +215,10 @@ class Derived:
     # only a GM sees, whatever the field (provenance: a `source_deleted` row's
     # `journal_id`, which the Party schema leaves out as `source_journal_id`).
     gm_value_keys: tuple[str, ...] = ()
+    # The row is part of this field of its first parent (a stored model with
+    # field_visibility): it is narrowed by `parent_field_audience(parent,
+    # as_parent_field)`. entity_aliases: the Entity's `aliases` field.
+    as_parent_field: str | None = None
 
     def __post_init__(self) -> None:
         if not self.derive_from:
@@ -224,6 +236,10 @@ class Derived:
         if (self.value_fields or self.field_requires or self.gm_value_keys) and \
                 self.field_rule != FIELD_RULE_PARENT_FIELD:
             raise ValueError("derived: value_fields, field_requires and gm_value_keys need field_rule='parent_field'")
+        if self.as_parent_field is not None and (
+                not isinstance(self.derive_from[0], Parent) or not isinstance(self.as_parent_field, str)
+                or not self.as_parent_field or "." in self.as_parent_field):
+            raise ValueError("derived: as_parent_field needs a parent(...) link and a plain field name")
 
 
 @dataclass(frozen=True)
@@ -273,10 +289,11 @@ def derived(derive_from: Sequence[Parent | ReachedThrough], *, field: str | None
             gm_fields: Iterable[str] = (), floor: str | None = None,
             field_rule: str = FIELD_RULE_AUDIENCE, op_field: str | None = None,
             public_null_ops: Iterable[str] = (), value_fields: Mapping[str, str] | None = None,
-            field_requires: Mapping[str, str] | None = None, gm_value_keys: Iterable[str] = ()) -> Derived:
+            field_requires: Mapping[str, str] | None = None, gm_value_keys: Iterable[str] = (),
+            as_parent_field: str | None = None) -> Derived:
     return Derived(tuple(derive_from), field, tuple(gm_fields), floor, field_rule, op_field,
                    tuple(public_null_ops), tuple(sorted((value_fields or {}).items())),
-                   tuple(sorted((field_requires or {}).items())), tuple(gm_value_keys))
+                   tuple(sorted((field_requires or {}).items())), tuple(gm_value_keys), as_parent_field)
 
 
 def always_gm(*, owner_field: str | None = None, gm_fields: Iterable[str] = ()) -> AlwaysGM:
@@ -331,7 +348,10 @@ REGISTRY: dict[type, Registration] = {
     ]),
     # A Campaign's relationship vocabulary, like character_sheet_templates.
     RelationshipType: membership(PUBLIC),
-    EntityAlias: derived([parent(Entity, "entity_id", attr="entity")], floor=VISIBILITY_FLOOR),
+    # An alias is part of its Entity's `aliases` field (E0-WorldCore.5): hiding
+    # that field hides every alias row too.
+    EntityAlias: derived([parent(Entity, "entity_id", attr="entity")], floor=VISIBILITY_FLOOR,
+                         as_parent_field="aliases"),
     QuestStep: derived([parent(Entity, "quest_entity_id", attr="quest")]),
     # AD-12: most_restrictive(entry, entity, field_aud(source_field), visibility_floor).
     EntityMention: derived([parent(JournalEntry, "journal_id", attr="journal"),
@@ -339,8 +359,10 @@ REGISTRY: dict[type, Registration] = {
                            field="source_field", floor=VISIBILITY_FLOOR),
     # The Entity's Audience, narrowed by the changed field's own Visibility.
     # A change with no field (create, delete, merge snapshots may hold gm_notes)
-    # is GM, except the content-free `migrated` row.
-    EntityChange: derived([parent(Entity, "entity_id", attr="entity")], field="field",
+    # is GM, except the content-free `migrated` row. The floor is the audience
+    # the row was written for (E0-WorldCore.5, owner decision round 4): a row
+    # written while its Entity or field was hidden stays hidden after publication.
+    EntityChange: derived([parent(Entity, "entity_id", attr="entity")], field="field", floor="write_visibility",
                           field_rule=FIELD_RULE_PARENT_FIELD, op_field="op", public_null_ops=("migrated",),
                           # A Quest's status rows hold {status, completed_at} (E0-WorldCore.3).
                           value_fields={"completed_at": "attributes.completed_at"},
@@ -497,6 +519,21 @@ def _parent_field_clause(model: type, reg: Derived, target: type, viewer: Audien
     return sa.or_(sa.and_(f.is_(None), null_ok), sa.and_(f.isnot(None), *allowed))
 
 
+def _as_parent_field_clause(model: type, reg: Derived, target: type, viewer: Audience):
+    """`as_parent_field`, inside the first parent's EXISTS (SQL twin of
+    `parent_field_audience(target, parent, reg.as_parent_field)`): the
+    parent's `field_visibility[name]` is unset or covers the viewer."""
+    if viewer.level is AudienceLevel.GM:
+        return sa.true()
+    preg = registration(target)
+    if not isinstance(preg, Stored) or not preg.field_visibility:
+        raise TypeError(f"{model.__name__}: as_parent_field needs a stored parent with field_visibility")
+    owner_col = _col(target, preg.owner_field) if preg.owner_field is not None else None
+    kind_col = _col(target, preg.kind_field) if preg.kind_field is not None else None
+    per_field = _col(target, preg.field_visibility).op("->>")(sa.literal(reg.as_parent_field, sa.Text()))
+    return sa.or_(per_field.is_(None), _vis_clause(per_field, owner_col, kind_col, viewer))
+
+
 def _derived_clause(model: type, reg: Derived, ctx: "CampaignContext"):
     clauses = []
     own_scope = scope_column(model) is not None
@@ -505,6 +542,8 @@ def _derived_clause(model: type, reg: Derived, ctx: "CampaignContext"):
             extra = []
             if i == 0 and reg.field_rule == FIELD_RULE_PARENT_FIELD:
                 extra.append(_parent_field_clause(model, reg, link.model, ctx.audience))
+            if i == 0 and reg.as_parent_field is not None:
+                extra.append(_as_parent_field_clause(model, reg, link.model, ctx.audience))
             clause = _parent_exists(model, link, ctx, extra)
             fk = _col(model, link.fk)
             if ctx.audience.level is AudienceLevel.GM and own_scope and sa.inspect(model).columns[link.fk].nullable:
@@ -827,11 +866,14 @@ def _as_audience(value: Any) -> Audience | AnyOf:
     return audience_of(value)
 
 
-def audience_of(obj: Any, *, parents: Any = None) -> Audience | AnyOf:
+def audience_of(obj: Any, *, parents: Any = None, floor: bool = True) -> Audience | AnyOf:
     """The Audience of `obj` from its registration (the Python twin of
     `visible_clause`). Derived rows read their parents from `parents=`
     (objects or Audiences, one per `parent(...)` link, or the reaching
-    children for `reached_through`) or from a loaded relationship."""
+    children for `reached_through`) or from a loaded relationship; a
+    `parent_field` rule or `as_parent_field` needs the parent row itself.
+    `floor=False` leaves out a derived row's own floor (world_service computes
+    `entity_changes.write_visibility` with it; never use it to authorize a read)."""
     reg = REGISTRY.get(type(obj))
     if reg is None:
         if hasattr(obj, "derived_type"):
@@ -872,7 +914,12 @@ def audience_of(obj: Any, *, parents: Any = None) -> Audience | AnyOf:
             auds.append(_parent_field_audience(obj, reg, links[0].model, given[0]))
         else:
             auds.append(field_audience(getattr(obj, reg.field)))
-    if reg.floor is not None:
+    if reg.as_parent_field is not None:
+        if isinstance(given[0], (Audience, AnyOf)):
+            raise ValueError(f"audience_of: {type(obj).__name__} needs its parent row (not an Audience) for its "
+                             f"{reg.as_parent_field!r} field rule")
+        auds.append(parent_field_audience(links[0].model, given[0], reg.as_parent_field))
+    if reg.floor is not None and floor:
         auds.append(floor_audience(getattr(obj, reg.floor)))
     return most_restrictive(auds)
 
@@ -1047,6 +1094,17 @@ def _check_complete() -> None:
         if isinstance(reg, Derived) and reg.field_rule == FIELD_RULE_PARENT_FIELD and not isinstance(
                 REGISTRY.get(reg.derive_from[0].model), Stored):
             raise RuntimeError(f"app/access/registry.py: {model.__name__}'s parent_field rule needs a stored parent")
+        if isinstance(reg, Derived) and reg.as_parent_field is not None:
+            preg = REGISTRY.get(reg.derive_from[0].model)
+            if not isinstance(preg, Stored) or not preg.field_visibility:
+                raise RuntimeError(f"app/access/registry.py: {model.__name__}'s as_parent_field needs a stored parent "
+                                   "with field_visibility")
+            if reg.as_parent_field in _parent_gm_change_fields(preg):
+                # Always GM there: the SQL twin only reads field_visibility.
+                raise RuntimeError(f"app/access/registry.py: {model.__name__}'s as_parent_field "
+                                   f"{reg.as_parent_field!r} is a GM field of its parent")
+        if isinstance(reg, Derived) and reg.floor is not None and reg.floor not in sa.inspect(model).columns:
+            raise RuntimeError(f"app/access/registry.py: {model.__name__}'s floor {reg.floor!r} is not a column")
         # A global table may only be always_gm; scoped_select refuses it.
         if scope_column(model) is None and not isinstance(reg, (Derived, AlwaysGM)):
             raise RuntimeError(f"app/access/registry.py: {model.__name__} has no Campaign scope column")
