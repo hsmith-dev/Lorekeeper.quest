@@ -2,10 +2,15 @@
 """Seed the demo Campaign from seeds/demo_campaign.json.
 
 Writes one owner (if missing), the Campaign, its 12 journal entries, NPCs,
-factions and quests through the ORM. Idempotent: a second run creates
-nothing and prints the same Campaign id. The only updates it ever makes are
-filling an entry's NULL embedding / party_embedding once the embedding model
-is available, and setting a NULL or stale party_tsv (E0-Access.7).
+factions and quests through the ORM. Journal entries go through
+journal_service (E0-Journal.2: `create_journal_entry(..., hooks=False,
+tags=False)`, then `reindex_entry` for the vectors), the only writer of their
+text and index columns; no hook runs and no tag is derived. An entry is
+found again by (Campaign, author, Shorthand). Idempotent: a second run
+creates nothing and prints the same Campaign id. The only updates it ever
+makes are filling an entry's NULL embedding / party_embedding once the
+embedding model is available, and setting a NULL or stale party_tsv
+(E0-Access.7).
 
 Offline (NFR-1): it talks to nothing but --database-url and, for
 embeddings, the local `ml` sidecar (ML_URL; E0-Platform.6). No Redis, no
@@ -30,7 +35,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import hashlib
 import json
 import os
 import secrets
@@ -44,10 +48,11 @@ _BACKEND_DIR = Path(__file__).resolve().parents[1]
 if str(_BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(_BACKEND_DIR))
 
-from sqlalchemy import func, select, text  # noqa: E402
+from sqlalchemy import func, select  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
 
 import app.db.models  # noqa: E402,F401  (registers every mapper)
+from app.access import ctx_for  # noqa: E402
 from app.clients.errors import ModelServiceError  # noqa: E402
 from app.db.models.campaign import Campaign, Genre  # noqa: E402
 from app.domain.embedding import EMBEDDING_MODEL  # noqa: E402,F401  (re-exported for the eval report)
@@ -271,10 +276,6 @@ class SeedResult:
         )
 
 
-def entry_hash(campaign_id, seed_id: str) -> str:
-    return hashlib.sha256(f"lorekeeper-seed:{campaign_id}:{seed_id}".encode()).hexdigest()
-
-
 def entry_text(shorthand: str, narrative: str) -> str:
     """What the tsv and the embedding cover (journal_service, migration a3e7c1f9d258)."""
     return f"{shorthand} {narrative}"
@@ -320,44 +321,31 @@ async def seed_campaign(
     result = SeedResult(campaign_id=campaign.id, owner_id=user.id,
                         user_created=user_created, campaign_created=campaign_created)
 
+    from app.services import journal_service
+
+    ctx = await ctx_for(session, user.id, campaign.id)  # the Owner's (GM) ctx
+    embed_many = _embed_many(embedder) if embedder is not None else None
     for e in seed["entries"]:
-        h = entry_hash(campaign.id, e["seed_id"])
-        doc = entry_text(e["shorthand"], e["narrative"])
-        entry = await session.scalar(select(JournalEntry).where(JournalEntry.entry_hash == h))
+        entry = await session.scalar(select(JournalEntry).where(
+            JournalEntry.campaign_id == campaign.id, JournalEntry.user_id == user.id,
+            JournalEntry.shorthand == e["shorthand"],
+        ))
         if entry is None:
-            entry = JournalEntry(
-                user_id=user.id, campaign_id=campaign.id,
-                shorthand=e["shorthand"], narrative=e["narrative"], entry_hash=h,
-                session_date=date.fromisoformat(e["session_date"]),
-            )
-            if embedder is not None:
-                entry.embedding = _checked(await embedder(doc))
-                entry.party_embedding = _checked(await embedder(e["narrative"]))
-                result.embedded += 1
-            session.add(entry)
-            await session.flush()
-            await session.execute(
-                text("UPDATE journal_entries SET narrative_tsv = to_tsvector('english', :doc) WHERE id = :id"),
-                {"doc": doc, "id": str(entry.id)},
+            # No hooks (a bulk load, no request), no tags and no ml here: the
+            # vectors, if any, come from the reindex below (strict, so an
+            # embedder failing mid-run still fails the seed).
+            entry = await journal_service.create_journal_entry(
+                session, ctx, e["shorthand"], date.fromisoformat(e["session_date"]), narrative=e["narrative"],
+                hooks=False, tags=False, embed=False, commit=False,
             )
             result.created["entries"] += 1
-        else:
-            # `embedded` counts entries that got any vector this run, once each.
-            filled = False
-            if entry.embedding is None and embedder is not None:
-                entry.embedding = _checked(await embedder(doc))
-                filled = True
-            if entry.party_embedding is None and embedder is not None:
-                entry.party_embedding = _checked(await embedder(entry.narrative))
-                filled = True
-            result.embedded += int(filled)
-        # Party search fields (E0-Access.7): the Narrative alone, never the Shorthand.
-        await session.execute(
-            text("UPDATE journal_entries SET party_tsv = to_tsvector('english', narrative) "
-                 "WHERE id = :id AND party_tsv IS DISTINCT FROM to_tsvector('english', narrative)"),
-            {"id": str(entry.id)},
-        )
+        # `embedded` counts entries that got any vector this run, once each.
+        if embed_many is not None and (entry.embedding is None or entry.party_embedding is None):
+            await journal_service.reindex_entry(session, entry, strict=True, embed=embed_many, tags=False)
+            result.embedded += 1
         result.entry_ids[e["seed_id"]] = entry.id
+    # Party search fields (E0-Access.7): the Narrative alone, never the Shorthand.
+    await journal_service.refresh_party_tsv(session, JournalEntry.campaign_id == campaign.id)
 
     for n in seed["npcs"]:
         exists = await session.scalar(
@@ -392,6 +380,14 @@ def _checked(vec) -> list[float]:
     if len(vec) != EMBEDDING_DIM:
         raise SeedError(f"embedder returned {len(vec)} dims, expected {EMBEDDING_DIM}")
     return vec
+
+
+def _embed_many(embedder: Embedder):
+    """journal_service's `embed=` form (texts -> vectors) of a one-text embedder."""
+    async def embed_many(texts: list[str]) -> list[list[float]]:
+        return [_checked(await embedder(t)) for t in texts]
+
+    return embed_many
 
 
 # ── CLI ─────────────────────────────────────────────────────────────────────

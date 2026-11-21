@@ -8,7 +8,13 @@ class GenerateRequest(BaseModel):
     notes: str
     campaign_id: uuid.UUID
     session_date: date | None = None
-    entry_hash: str
+    # Ignored (E0-Journal.2): the server computes the hash from the Shorthand
+    # (journal_service.compute_entry_hash). Still accepted so older clients,
+    # which send utils/hashNotes.ts's value, keep working.
+    entry_hash: str | None = None
+    # True from the offline sync queue: an unattended save nobody reviewed,
+    # so it lands visibility=gm (as does any save with no narrative).
+    offline: bool = False
     # If set — the normal interactive path now — this is the (possibly
     # user-edited) narrative from a prior POST /generate-draft call, and
     # gets saved as-is with no further LLM call. If omitted, the narrative is

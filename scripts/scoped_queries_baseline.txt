@@ -54,11 +54,8 @@ app/api/routes/chat.py::list_sessions select:ChatSession
 app/api/routes/share.py::join_campaign get:Campaign
 app/api/routes/share.py::join_campaign select:CampaignMember
 
-# Services called with a Campaign the route already checked; E0-Journal
-# (journal writes, reindex_entry) and E0-WorldCore move them onto a ctx.
-app/services/journal_service.py::create_journal_entry raw_sql:journal_entries
-app/services/journal_service.py::create_journal_entry select:JournalEntry
-app/services/journal_service.py::create_journal_entry select:Tag
+# Services called with a Campaign the route already checked; E0-WorldCore
+# moves them onto a ctx (E0-Journal.2 moved the journal writers).
 app/services/journal_service.py::generate_draft_narrative select:Campaign
 app/services/retrieval_service.py::_search select:JournalEntry
 app/services/retrieval_service.py::_search select:JournalEntry

@@ -20,3 +20,9 @@ async def check_hash(campaign_id: uuid.UUID | str, user_id: uuid.UUID | str, ent
 async def store_hash(campaign_id: uuid.UUID | str, user_id: uuid.UUID | str, entry_hash: str) -> None:
     valkey = get_valkey()
     await valkey.set(_key(campaign_id, user_id, entry_hash), "1", ex=DEDUP_TTL)
+
+
+async def drop_hash(campaign_id: uuid.UUID | str, user_id: uuid.UUID | str, entry_hash: str) -> None:
+    """Forget a hash (its entry was deleted, or edited to other notes)."""
+    valkey = get_valkey()
+    await valkey.delete(_key(campaign_id, user_id, entry_hash))

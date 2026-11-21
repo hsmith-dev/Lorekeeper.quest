@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Iterable, Mapping
 import uuid
 
-from sqlalchemy import and_, false, select, func, update, Integer
+from sqlalchemy import and_, false, select, func, Integer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.access import GM, CampaignContext, visible_clause
@@ -313,33 +313,13 @@ async def index_party_fields(
     db: AsyncSession, entry: JournalEntry, *, party_vector: list[float] | None = None,
     skip_embed: bool = False,
 ) -> None:
-    """Set `entry`'s Party search fields from its stored Narrative, in the
-    caller's transaction (the caller commits): `party_tsv =
-    to_tsvector('english', narrative)` in SQL, and `party_embedding =
-    embed(narrative)`. An embedding failure leaves `party_embedding` NULL
-    (clearing a stale vector) and never raises, so it never blocks a save.
+    """Deprecated alias of `journal_service.index_party_fields` (E0-Journal.2
+    made journal_service the only writer of the index columns; the EV-4
+    probes still import it from here). Imported lazily: journal_service
+    imports the services this module serves."""
+    from app.services import journal_service
 
-    Called from every journal write and reindex path (journal_service,
-    journals.reindex). E0-Journal moves it into `reindex_entry`.
-    `party_vector`, when given, is embed(narrative) already computed by the
-    caller (reindex embeds a whole Campaign in one batch first);
-    `skip_embed` leaves `party_embedding` NULL without calling ml (the
-    caller already knows the sidecar failed)."""
-    await db.flush()  # the row exists and the stored narrative is the current one
-    await db.execute(
-        update(JournalEntry)
-        .where(JournalEntry.id == entry.id)
-        .values(party_tsv=func.to_tsvector("english", JournalEntry.narrative))
-        .execution_options(synchronize_session=False)
-    )
-    if party_vector is not None or skip_embed:
-        entry.party_embedding = party_vector
-        return
-    try:
-        vector = await embedding_service.embed(entry.narrative)
-    except Exception:
-        vector = None  # ml sidecar down / failure: non-GM vector search skips the row
-    entry.party_embedding = vector
+    await journal_service.index_party_fields(db, entry, party_vector=party_vector, skip_embed=skip_embed)
 
 
 # ── Source providers ───────────────────────────────────────────────────────

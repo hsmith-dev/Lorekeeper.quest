@@ -34,6 +34,7 @@ export function useOfflineQueue() {
             campaign_id: note.campaign_id,
             session_date: note.session_date ?? undefined,
             entry_hash: hash,
+            offline: true,
           });
           storeHash(hash);
           await removeQueuedNote(note.id);
