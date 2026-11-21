@@ -151,3 +151,11 @@ Stories were merged on green GitHub CI while the desktop was offline (owner deci
 - [ ] Tag parity: sidecar spaCy 3.8 vs old in-process spaCy 3.7 on the seed entries
 - [ ] arm64 build of `Dockerfile.prod` with no compiler
 - [ ] Time NPC extract on CPU against real ml, campaign whose 15 newest entries exceed 20k chars, with a concurrent journal save (NER lock contention): `time curl -s -X POST -H "Authorization: Bearer $TOKEN" "https://<host>/api/npcs/extract?campaign_id=<uuid>"` → well under 120 s
+
+## E0-Platform.7 — 16 GB profile, limits, GPU override (PR #79) — exact commands in the spec's Auto Run Result
+- [ ] `docker compose -f docker-compose.prod.yml -f docker-compose.gpu.yml config` diffed against the prod-only render
+- [ ] **Upgrade path:** from a v1.1 install, `up -d --build --remove-orphans` → old 14g `backend` container is gone, `web` is up, nginx reaches it
+- [ ] `docker stats` + each container's `/sys/fs/cgroup/memory.peak` at idle and under load (heavy Job, chat answer, extraction_300 prompt), each vs its limit (ollama 5.25g, ml 2.5g, tts 2.5g, stt 1.25g, web 1g, worker 1g, postgres 768m, valkey 128m, nginx 128m)
+- [ ] Ollama OOM-killed at 5.25g on extraction_300? (default no-CPU-cap config — E0-Platform.10 follow-up)
+- [ ] GPU: `ollama ps` shows 100% GPU; stt reports device `cuda`; stt memory.peak vs 1.25g
+- [ ] `KOBOLD_URL=http://host.docker.internal:11434` with bundled Ollama at 0 replicas → `web` reaches the host model
