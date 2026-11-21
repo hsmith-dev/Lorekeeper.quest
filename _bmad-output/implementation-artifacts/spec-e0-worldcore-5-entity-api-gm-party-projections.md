@@ -2,7 +2,7 @@
 title: 'E0-WorldCore.5: Entity API with GM and Party projections'
 type: 'feature'
 created: '2026-11-20'
-status: 'in-review'
+status: 'done'
 baseline_revision: '0d71955bfb4845679b134717f820267a0d79656d'
 review_loop_iteration: 0
 followup_review_recommended: false
@@ -213,3 +213,19 @@ Backend root: `src/backend/`. Tests run against Postgres (CI); `tests/conftest.p
   - `[maybe-false]` `[reject]` (intent) one prefix nginx block vs per-route lines — every route resolves to it in zone api; low if true.
   - `[maybe-false]` `[reject]` (intent) (d) deferral not in the diff — recorded in this spec and PR #75 (the audit saw a code-only diff).
 - CI follow-up: the first run failed `tests/ev4/test_world_rows.py::test_loaded_rows_project_and_narrow`, which expected a Player to see the F3 `migrated` rows after publication; updated to assert they stay GM-only (owner decision).
+
+## Auto Run Result
+
+Status: done (PR #75, draft; CI green on ec641c2).
+
+**Summary:** 13 Entity routes in `api/routes/entities.py` over apply_change / set_visibility / scoped reads / project_all. History records its write-time visibility (`entity_changes.write_visibility`, migration 0f1c3b194a4b, every existing row backfilled `gm`), applied as a registry floor, so pre-publish history stays GM-only. `aliases` is hideable and alias rows follow it (`as_parent_field`). ENTITY_REF ids are redacted in Entity bodies, reference-attribute history and `entity_field` citations. The `entity_field` resolver is registered. Relationship-type defaults for new Campaigns are left to E3.1 (lazy seeding on the GM's first read).
+
+**Files:** migration `0f1c3b194a4b_entity_changes_write_visibility.py`; `app/db/models/entity.py`; `app/access/{registry,projection,sources,visibility,__init__}.py`; `app/services/world_service.py`; `app/schemas/entities.py`; `app/api/routes/entities.py` (new); `app/main.py`; `nginx/locations.conf`; tests: `tests/ev4/probes/entities.py`, `tests/ev4/test_entity_api_history.py`, `tests/test_entities_api.py` (new), plus updates to the world_service, registry, property, snapshot, world_rows and write_rules tests.
+
+**Review:** 32 findings. 15 patch rows (resolver visible-id set and ref dropping, GM-only visibility filter, duplicate `code`, empty-attributes 422, visibility-kind re-registration guard, tests for mention_count, hidden attributes citations and the Player status filter). 5 deferred (3 frontmatter items: null-valued history rows of hidden refs, O(Campaign) non-GM filtering with q capped at 100, duplicate-check race). 12 rejected with reasons in the triage log.
+
+**Follow-up review recommended:** true. 6 medium entries patched (0 high). The risk that remains unverified by an independent pass is the `entity_field` resolver rewrite (async, db-loaded visible ids).
+
+**Verification:** GitHub CI on ec641c2: Backend tests 2555 passed and 4 skipped; Structural gates green (CI-2, CI-3, CI-7, CI-8, CI-10, CI-11; EV-4 117 probes with 0 leaks); Frontend CI and Dependency licences green. CI caught 3 failures, all fixed in tests: the world_rows expectation that the migrated row is Party-visible, the `ev4` fixture registration, and a test-helper argument shadowing.
+
+**Residual risks:** the data-safety review of the migration is still pending (orchestrator). By design, Players no longer see the F3 `migrated` history row after publication.
