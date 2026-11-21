@@ -7,14 +7,14 @@ nothing and prints the same Campaign id. The only updates it ever makes are
 filling an entry's NULL embedding / party_embedding once the embedding model
 is available, and setting a NULL or stale party_tsv (E0-Access.7).
 
-Offline (NFR-1): it talks to nothing but --database-url. No Redis, no spaCy,
-no LLM. The embedding model is loaded from the local Hugging Face cache only
-(HF_HUB_OFFLINE=1, local_files_only=True):
+Offline (NFR-1): it talks to nothing but --database-url and, for
+embeddings, the local `ml` sidecar (ML_URL; E0-Platform.6). No Redis, no
+LLM, no model in this process:
 
-  --embeddings auto     (default) embed if the model is cached, otherwise
+  --embeddings auto     (default) embed if the ml sidecar answers, otherwise
                         leave `embedding` NULL and warn
-  --embeddings require  exit 1 if the model is not cached
-  --embeddings skip     never load the model
+  --embeddings require  exit 1 if the ml sidecar does not answer
+  --embeddings skip     never call the ml sidecar
 
 Run inside the backend container (the repo's seeds/ is not in the image, so
 copy the file in first):
@@ -35,14 +35,10 @@ import json
 import os
 import secrets
 import sys
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
-
-# Before anything imports huggingface_hub (it reads these at import time).
-os.environ.setdefault("HF_HUB_OFFLINE", "1")
-os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
 _BACKEND_DIR = Path(__file__).resolve().parents[1]
 if str(_BACKEND_DIR) not in sys.path:
@@ -52,13 +48,14 @@ from sqlalchemy import func, select, text  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
 
 import app.db.models  # noqa: E402,F401  (registers every mapper)
+from app.clients.errors import ModelServiceError  # noqa: E402
 from app.db.models.campaign import Campaign, Genre  # noqa: E402
+from app.domain.embedding import EMBEDDING_MODEL  # noqa: E402,F401  (re-exported for the eval report)
 from app.db.models.journal import EMBEDDING_DIM, JournalEntry  # noqa: E402
 from app.db.models.npc import NpcEntry, NpcRole, NpcStatus  # noqa: E402
 from app.db.models.quest import Quest, QuestStatus  # noqa: E402
 from app.db.models.user import User  # noqa: E402
 
-EMBEDDING_MODEL = "all-MiniLM-L6-v2"  # same as app/services/embedding_service.py
 FORMAT_VERSION = 1
 EMBEDDING_MODES = ("auto", "require", "skip")
 
@@ -82,7 +79,7 @@ class SeedError(Exception):
     """The seed file is malformed, or a required resource is missing."""
 
 
-Embedder = Callable[[str], list[float]]
+Embedder = Callable[[str], Awaitable[list[float]]]
 
 
 # ── Reading and validating ──────────────────────────────────────────────────
@@ -227,37 +224,26 @@ def validate_seed(seed: dict) -> None:
 
 # ── Embeddings ──────────────────────────────────────────────────────────────
 
-def load_embedding_model(mode: str = "auto"):
-    """The SentenceTransformer from the local cache, or None.
+async def load_embedder(mode: str = "auto") -> Embedder | None:
+    """embedding_service.embed once the ml sidecar has answered a probe, or None.
 
-    auto: None (with a warning on stderr) if the model is not cached.
-    require: SeedError if it is not cached. skip: None, never loads."""
+    auto: None (with a warning on stderr) if ml does not answer.
+    require: SeedError if it does not. skip: None, never calls ml."""
     if mode not in EMBEDDING_MODES:
         raise SeedError(f"--embeddings must be one of {EMBEDDING_MODES}, got {mode!r}")
     if mode == "skip":
         return None
-    os.environ["HF_HUB_OFFLINE"] = "1"
-    os.environ["TRANSFORMERS_OFFLINE"] = "1"
-    try:
-        from sentence_transformers import SentenceTransformer
+    from app.services import embedding_service
 
-        return SentenceTransformer(EMBEDDING_MODEL, local_files_only=True)
-    except Exception as exc:  # not cached, or a broken cache
-        msg = f"embedding model {EMBEDDING_MODEL!r} is not in the local cache ({type(exc).__name__}: {exc})"
+    try:
+        await embedding_service.embed("probe")
+    except ModelServiceError as exc:
+        msg = f"embedding model unavailable: the ml sidecar did not answer ({type(exc).__name__}: {exc})"
         if mode == "require":
             raise SeedError(msg) from None
         print(f"warning: {msg}; embeddings left NULL", file=sys.stderr)
         return None
-
-
-def embedder_from_model(model) -> Embedder | None:
-    if model is None:
-        return None
-    return lambda t: model.encode(t, normalize_embeddings=True).tolist()
-
-
-def load_embedder(mode: str = "auto") -> Embedder | None:
-    return embedder_from_model(load_embedding_model(mode))
+    return embedding_service.embed
 
 
 # ── Seeding ─────────────────────────────────────────────────────────────────
@@ -345,8 +331,8 @@ async def seed_campaign(
                 session_date=date.fromisoformat(e["session_date"]),
             )
             if embedder is not None:
-                entry.embedding = _checked(embedder(doc))
-                entry.party_embedding = _checked(embedder(e["narrative"]))
+                entry.embedding = _checked(await embedder(doc))
+                entry.party_embedding = _checked(await embedder(e["narrative"]))
                 result.embedded += 1
             session.add(entry)
             await session.flush()
@@ -359,10 +345,10 @@ async def seed_campaign(
             # `embedded` counts entries that got any vector this run, once each.
             filled = False
             if entry.embedding is None and embedder is not None:
-                entry.embedding = _checked(embedder(doc))
+                entry.embedding = _checked(await embedder(doc))
                 filled = True
             if entry.party_embedding is None and embedder is not None:
-                entry.party_embedding = _checked(embedder(entry.narrative))
+                entry.party_embedding = _checked(await embedder(entry.narrative))
                 filled = True
             result.embedded += int(filled)
         # Party search fields (E0-Access.7): the Narrative alone, never the Shorthand.
@@ -427,7 +413,7 @@ async def run(args: argparse.Namespace) -> SeedResult:
     seed = read_seed(args.seed)  # validated before anything connects
     if not args.database_url:
         raise SeedError("no database: pass --database-url or set DATABASE_URL")
-    embedder = load_embedder(args.embeddings)
+    embedder = await load_embedder(args.embeddings)
     engine = create_async_engine(args.database_url)
     try:
         async with async_sessionmaker(engine, expire_on_commit=False)() as session:
@@ -442,6 +428,9 @@ def main(argv: list[str] | None = None) -> int:
         result = asyncio.run(run(args))
     except SeedError as exc:
         print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except ModelServiceError as exc:  # ml answered the probe, then failed mid-run
+        print(f"error: embedding model unavailable: {exc}", file=sys.stderr)
         return 1
     print(result.summary())
     return 0

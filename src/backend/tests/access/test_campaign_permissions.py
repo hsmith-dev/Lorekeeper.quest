@@ -8,6 +8,7 @@ is the one 404.
 """
 from __future__ import annotations
 
+from unittest.mock import AsyncMock
 import uuid
 from datetime import date
 
@@ -507,8 +508,8 @@ async def test_drafts_are_gm_only_and_gms_keep_gm_context(client, db, ev4, monke
 
     monkeypatch.setattr(journal_routes, "check_hash", no_dup)
     monkeypatch.setattr(journal_service, "store_hash", noop)
-    monkeypatch.setattr(journal_service, "extract_tags", lambda _text: [])
-    monkeypatch.setattr(journal_service.embedding_service, "embed", lambda _text: None)
+    monkeypatch.setattr(journal_service, "extract_tags", AsyncMock(return_value=[]))
+    monkeypatch.setattr(journal_service.embedding_service, "embed", AsyncMock(return_value=None))
     term = ev4.a.canary("TERM").token  # the seeded (gm) glossary term
     a = str(ev4.a.campaign_id)
 
@@ -538,7 +539,7 @@ async def test_gm_ai_helpers_run_for_a_co_gm(client, ev4, monkeypatch):
     from app.api.routes import npcs as npc_routes
     from tests.ev4.probes.retrieval import use_fake_llm
 
-    monkeypatch.setattr(npc_routes, "extract_tags", lambda _text: [])
+    monkeypatch.setattr(npc_routes, "extract_tags", AsyncMock(return_value=[]))
     a = ev4.a.campaign_id
     co_gm, player = await ev4.actor("co_gm"), await ev4.actor("player")
     for actor in (co_gm, player):

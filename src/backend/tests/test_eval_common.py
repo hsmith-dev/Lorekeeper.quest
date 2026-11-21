@@ -204,7 +204,7 @@ async def test_ollama_llm_calls_custom_provider_ungated(monkeypatch):
 # ── End to end ──────────────────────────────────────────────────────────────
 
 async def test_eval_retrieval_end_to_end(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr(embedding_service, "_model", None)  # restored after the test
+    monkeypatch.setattr(embedding_service, "_override", None)  # restored after the test
     out = tmp_path / "RETRIEVAL_X_EVAL.md"
     email = f"eval_{uuid.uuid4().hex[:10]}@example.com"
 
@@ -250,7 +250,7 @@ async def test_eval_retrieval_end_to_end(tmp_path, monkeypatch, capsys):
 
 
 async def test_eval_retrieval_without_embeddings_is_lexical_only(monkeypatch, capsys):
-    monkeypatch.setattr(embedding_service, "_model", None)
+    monkeypatch.setattr(embedding_service, "_override", None)
     args = eval_retrieval.build_parser().parse_args([
         "--database-url", TEST_DB_URL, "--owner-email", f"lex_{uuid.uuid4().hex[:10]}@example.com",
         "--fake-llm", "--embeddings", "skip",
@@ -290,7 +290,7 @@ async def test_load_campaign_orders_entries_by_session(db):
 
 
 async def test_smoke_run(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr(embedding_service, "_model", None)
+    monkeypatch.setattr(embedding_service, "_override", None)
     out = tmp_path / "SMOKE_EVAL.md"
     args = eval_common.build_parser().parse_args([
         "--database-url", TEST_DB_URL, "--owner-email", f"smoke_{uuid.uuid4().hex[:10]}@example.com",

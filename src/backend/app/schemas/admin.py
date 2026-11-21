@@ -132,3 +132,39 @@ class LogsResponse(BaseModel):
     # append to) or "memory" (this worker's ring buffer, dev fallback).
     source: Literal["file", "memory"]
     lines: list[str]
+
+
+# ── Sidecars (E0-Platform.6) ────────────────────────────────────────────────
+
+class SidecarModelState(BaseModel):
+    name: str
+    kind: str
+    state: str  # not_loaded | loading | loaded | failed
+    lazy: bool = False
+    cost_mb: int | None = None
+
+
+class MLSidecarStatus(BaseModel):
+    """The ml sidecar's /v1/status. Unreachable: reachable false, error
+    set, models empty and the numbers null."""
+
+    reachable: bool
+    error: str | None = None
+    models: list[SidecarModelState] = []
+    rss_bytes: int | None = None
+    resident_budget_mb: int | None = None
+    lazy_resident_mb: int | None = None
+
+
+class STTSidecarStatus(BaseModel):
+    reachable: bool
+    error: str | None = None
+    models: list[SidecarModelState] = []
+    rss_bytes: int | None = None
+    compute_type: str | None = None
+    device: str | None = None
+
+
+class SidecarsResponse(BaseModel):
+    ml: MLSidecarStatus
+    stt: STTSidecarStatus

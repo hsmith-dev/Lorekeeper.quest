@@ -1,13 +1,7 @@
 # Model packages the web/worker image (src/backend) still installs, read by
-# scripts/check_model_packages.py (CI-3, AD-1). This list only shrinks: delete
-# a line in the PR that stops installing the package (the check fails until
-# you do). Never add one; a new model goes into a sidecar behind app/clients.
-# scripts/test_check_model_packages.py holds the frozen ceiling.
+# scripts/check_model_packages.py (CI-3, AD-1). Empty since E0-Platform.6: the
+# backend image installs no model package. Never add a line; a new model goes
+# into a sidecar behind app/clients. scripts/test_check_model_packages.py holds
+# the frozen (empty) ceiling.
 #
 # Format: <package>: <reason, and the story that removes it>
-
-torch: Dockerfile(.prod) installs CPU torch for in-process sentence-transformers; E0-Platform.6 removes it with those wrappers
-torchvision: Dockerfile(.prod) installs it next to CPU torch (nothing imports it since EasyOCR left, E0-QA.9); E0-Platform.6 removes it with torch
-spacy: nlp_service runs en_core_web_trf NER in-process; E0-Platform.6 switches it to the ml sidecar's /v1/ner
-sentence-transformers: embedding_service embeds in-process; E0-Platform.6 switches it to the ml sidecar's /v1/embed
-en-core-web-trf: Dockerfile(.prod) `python -m spacy download en_core_web_trf` installs the pipeline for in-process NER; E0-Platform.6 removes it with spacy

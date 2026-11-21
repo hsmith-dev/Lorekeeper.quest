@@ -11,6 +11,7 @@ write rules are enforced.
 """
 from __future__ import annotations
 
+from unittest.mock import AsyncMock
 import inspect
 import secrets
 import uuid
@@ -244,8 +245,8 @@ async def test_co_gm_still_reaches_the_gm_routes(client, ev4, monkeypatch):
 
     monkeypatch.setattr(journal_routes, "check_hash", no_dup)
     monkeypatch.setattr(journal_service, "store_hash", noop)
-    monkeypatch.setattr(journal_service, "extract_tags", lambda _text: [])
-    monkeypatch.setattr(journal_service.embedding_service, "embed", lambda _text: None)
+    monkeypatch.setattr(journal_service, "extract_tags", AsyncMock(return_value=[]))
+    monkeypatch.setattr(journal_service.embedding_service, "embed", AsyncMock(return_value=None))
     a = str(ev4.a.campaign_id)
     co_gm = await ev4.actor("co_gm")
     await use_fake_llm(ev4, co_gm)
