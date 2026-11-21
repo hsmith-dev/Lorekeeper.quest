@@ -6,7 +6,7 @@
 # DESTRUCTIVE: drops and replaces every table in the target database with
 # whatever's in the dump file, and replaces everything on the `files_data`
 # volume (stored files, E0-Jobs.8) with the matching files archive. Stops the
-# backend and the worker first (so nothing writes mid-restore), asks for
+# web and worker services first (so nothing writes mid-restore), asks for
 # explicit confirmation, then restarts them after.
 #
 # Usage:
@@ -60,7 +60,7 @@ if [[ -n "$FILES_ARCHIVE" ]]; then
 else
   echo "No stored-files archive matches this dump: the files_data volume is left untouched."
 fi
-echo "The backend and the worker will be stopped for the duration and restarted afterward."
+echo "The web and worker services will be stopped for the duration and restarted afterward."
 read -r -p "Type 'yes' to continue: " CONFIRM
 if [[ "$CONFIRM" != "yes" ]]; then
   echo "Aborted — nothing was touched."
@@ -68,28 +68,28 @@ if [[ "$CONFIRM" != "yes" ]]; then
 fi
 
 # Whatever happens from here (a failed restore under set -e included), the
-# backend and the worker are started again on exit.
+# web and worker services are started again on exit.
 restart_services() {
-  echo "Restarting backend and worker..."
-  docker compose -f docker-compose.prod.yml start backend worker
+  echo "Restarting web and worker..."
+  docker compose -f docker-compose.prod.yml start web worker
 }
 trap restart_services EXIT
 
-echo "Stopping backend and worker..."
-docker compose -f docker-compose.prod.yml stop backend worker
+echo "Stopping web and worker..."
+docker compose -f docker-compose.prod.yml stop web worker
 
 echo "Restoring the database..."
 docker compose -f docker-compose.prod.yml exec -T postgres \
   pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB" --clean --if-exists --no-owner < "$DUMP_FILE"
 
 if [[ -n "$FILES_ARCHIVE" ]]; then
-  # A one-off backend container (same image, user and volume) while the
+  # A one-off web container (same image, user and volume) while the
   # service is stopped: empty the volume, then unpack the archive into it.
   # Each Campaign's live_audio/ is kept: backup-db.sh leaves kept Live audio
   # out unless the GM opted in, so the archive cannot replace it (an opted-in
   # one in the archive still overwrites it on extract).
   echo "Restoring stored files..."
-  docker compose -f docker-compose.prod.yml run --rm --no-deps -T backend sh -c \
+  docker compose -f docker-compose.prod.yml run --rm --no-deps -T web sh -c \
     'set -e
      find /data/files -mindepth 1 -path "/data/files/*/live_audio" -prune -o ! -type d -exec rm -f {} +
      find /data/files -mindepth 1 -depth -type d -empty -delete
@@ -98,4 +98,4 @@ fi
 
 echo
 echo "Done. Verify with:"
-echo "  docker compose -f docker-compose.prod.yml logs backend --tail 30"
+echo "  docker compose -f docker-compose.prod.yml logs web --tail 30"

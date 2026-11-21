@@ -161,7 +161,8 @@ os_aggregate_allowlist = [
   # (geoip; libgcrypt via libxslt; libidn2 via libcurl); not linked by Lorekeeper
   "^geoip$", "^libintl$", "^libgcrypt$", "^libgpg-error$", "^libidn2$", "^libunistring$",
   "^xz-libs$",
-  # --- Debian (backend image: python:3.11-slim + build-essential + libpq-dev) ---
+  # --- Debian (backend image: python:3.11-slim + WeasyPrint's libraries; build-essential
+  # and libpq-dev until E0-Platform.6) ---
   # Debian's DEP-5 copyright files list every licence in the SOURCE package
   # (build scripts, docs, tests), so nearly every package reads as GPL/LGPL.
   # shells, core utilities, login and init helpers
@@ -176,8 +177,9 @@ os_aggregate_allowlist = [
   # C library, compiler runtime (GCC Runtime Library Exception) and kernel headers
   "^libc6(-dev)?$", "^libc-(bin|dev-bin)$", "^libcrypt(1|-dev)$", "^linux-libc-dev$",
   "^rpcsvc-proto$", "^gcc-\\d+-base$", "^libgcc-s\\d+$", "^libstdc\\+\\+\\d+$",
-  # build-essential toolchain (only needed for the arm64 spaCy source build;
-  # a multi-stage Dockerfile.prod would drop all of these, docs/LICENSING.md)
+  # build-essential toolchain: no shipped image installs it since E0-Platform.6
+  # (it was there for the arm64 spaCy source build). The GCC runtime libraries
+  # (libgomp, libquadmath) stay in use by the stt image's ffmpeg closure.
   "^build-essential$", "^(gcc|g\\+\\+|cpp)(-\\d+)?(-x86-64-linux-gnu|-aarch64-linux-gnu)?$",
   "^binutils(-common|-x86-64-linux-gnu|-aarch64-linux-gnu)?$", "^libbinutils$",
   "^libctf(-nobfd)?\\d+$", "^libsframe\\d+$", "^libgprofng\\d+$", "^libjansson\\d+$",
@@ -238,10 +240,10 @@ roots = ["site", "src", "nginx", "models", "assets"]
 # package (name or glob, e.g. "nvidia-*"), tracking (owning story), reason,
 # optional images (only scans with that --artifact use the entry).
 #
-# CUDA torch's NVIDIA wheels: E0-Platform.2 moved the shipped backend images
-# to CPU torch, so the backend scan carries none of these and must keep
-# failing if one comes back (no `backend` here, and the Dockerfile guard
-# fails the build too). They remain a known gap only for the GPU override
+# CUDA torch's NVIDIA wheels: the backend image has carried no torch since
+# E0-Platform.6 (CPU torch before that, E0-Platform.2), so the backend scan
+# carries none of these and must keep failing if one comes back (no `backend`
+# here; CI-3 also fails on torch in the image's pip list). They remain a known gap only for the GPU override
 # image AD-1 plans for `ml` (`ml-gpu`), whose redistribution under the NVIDIA
 # EULA is an open owner decision (docs/LICENSING.md).
 

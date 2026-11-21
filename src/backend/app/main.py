@@ -20,8 +20,6 @@ from app.core.errors import LLMError, llm_exception_handler
 from app.core.logging import configure_logging
 from app.core.valkey_client import init_valkey, close_valkey
 from app.core import pubsub
-from app.services.nlp_service import load_nlp_model
-from app.services.embedding_service import load_embedding_model
 from app.services.chat_service import check_kobold_health
 from app.db.session import get_db
 from app.api.routes import (
@@ -42,9 +40,9 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     configure_logging(settings.log_level, settings.log_file)
     logger.info("Starting Lorekeeper API", extra={"env": settings.environment})
+    # No model loads here: embeddings, NER and OCR come from the ml sidecar
+    # and speech from stt, over per-call HTTP clients (E0-Platform.6).
     await init_valkey()
-    load_nlp_model()
-    load_embedding_model()
     yield
     logger.info("Shutting down Lorekeeper API")
     # Let after-commit hook handlers (they only enqueue) finish first.

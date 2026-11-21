@@ -474,3 +474,6 @@ export const getSupportBundle = () =>
 
 // Admin — background Job counts by status and queue (E0-Jobs.7)
 export const getAdminJobStats = () => api.get<import("../types").AdminJobStats>("/api/admin/jobs/stats");
+
+// Admin — the ml and stt sidecars' status (E0-Platform.6)
+export const getAdminSidecars = () => api.get<import("../types").AdminSidecars>("/api/admin/sidecars");

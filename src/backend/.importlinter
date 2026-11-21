@@ -6,10 +6,9 @@
 # app.hooks in E0-Journal.1. A package the spine adds later joins them in the
 # PR that creates it: a contract cannot name a package that does not exist yet.
 #
-# Exceptions go in a contract's ignore_imports, each under a "# ratchet:" line
-# saying why it is there and which story removes it. The list only shrinks:
-# scripts/test_import_ratchet.py holds a frozen ceiling, and import-linter
-# fails on an ignore_imports line that no longer matches an import (remove it).
+# No contract has exceptions (E0-Platform.6 removed the last two, the
+# in-process spaCy and MiniLM imports). scripts/test_import_ratchet.py freezes
+# that empty ceiling: never add an ignore_imports line; fix the import instead.
 
 [importlinter]
 root_package = app
@@ -124,8 +123,3 @@ forbidden_modules =
     espeakng_loader
 allow_indirect_imports = True
 unmatched_ignore_imports_alerting = error
-ignore_imports =
-    # ratchet: in-process spaCy NER; E0-Platform.6 turns nlp_service into an ml-client wrapper (AD-1 Wrappers)
-    app.services.nlp_service -> spacy
-    # ratchet: in-process MiniLM embeddings; E0-Platform.6 routes embed() through app.clients.ml
-    app.services.embedding_service -> sentence_transformers

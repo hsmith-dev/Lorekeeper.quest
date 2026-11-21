@@ -53,7 +53,7 @@ async def retrieve_canon_context(
     do with the question, polluting the prompt with (and crediting sources
     for) unrelated canon."""
     try:
-        query_embedding = embedding_service.embed(query_text)
+        query_embedding = await embedding_service.embed(query_text)
     except Exception:
         return None, []
 

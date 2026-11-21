@@ -14,15 +14,17 @@ rq==2.12.0
 croniter==6.2.4
 python-dateutil==4.0.0
 httpx==0.27.2
-spacy==3.7.6
 python-multipart==0.0.12
 slowapi==0.1.9
 # Fuzzy Entity name candidates (E0-WorldCore.4)
 rapidfuzz==3.14.6
 pgvector==0.4.2
-sentence-transformers==5.5.1
+# pgvector depends on numpy; the 1.x pin stays until pgvector is checked
+# against numpy 2 (torch and spaCy, which needed it, are gone).
 numpy<2.0
 pypdf==6.14.2
 weasyprint==70.0
+# Avatar resize (app/api/routes/auth.py imports PIL directly); same version weasyprint resolves.
+Pillow==13.0.0
 Jinja2==3.1.6
 stripe==15.4.0

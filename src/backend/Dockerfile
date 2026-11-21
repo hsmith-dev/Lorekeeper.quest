@@ -6,18 +6,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libpango-1.0-0 libpangoft2-1.0-0 libharfbuzz0b fontconfig fonts-dejavu-core fonts-dejavu-extra \
     && rm -rf /var/lib/apt/lists/*
 COPY requirements.txt .
-# CPU-only torch/torchvision first (E0-Platform.2): a plain PyPI resolve on
-# x86-64 pulls CUDA torch and ~15 NVIDIA-proprietary nvidia-*/cuda-* wheels.
-# The CPU index has +cpu wheels for amd64 and arm64 alike. Pins match
-# licenses/register.yaml; the requirements install then uses the same CPU
-# extra index as CI's licence job.
-RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu \
-        torch==2.15.0+cpu torchvision==0.29.2+cpu
-RUN pip install --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cpu \
-        -r requirements.txt
-RUN python -m spacy download en_core_web_trf
-# Fail the build if any earlier layer re-resolved torch to CUDA or added NVIDIA wheels
-RUN python -c "import torch, sys; sys.exit(torch.version.cuda is not None or torch.cuda.is_available())" \
-    && ! pip list --format=freeze | grep -iE '^(nvidia|cuda)[-_]'
+# No model packages (E0-Platform.6): embeddings, NER and OCR come from the ml
+# sidecar, speech from stt. Every requirement has a binary wheel on amd64 and
+# arm64, so no compiler is needed. CI-3 (scripts/check_model_packages.py)
+# fails if torch, spaCy or another model package comes back.
+RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

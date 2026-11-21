@@ -16,7 +16,21 @@ Everything runs on your own machine. No OpenAI/Anthropic key needed (though brin
 
 **Requirements:** [Docker](https://docs.docker.com/get-docker/) with Compose (Docker Desktop on Windows/macOS, docker engine + compose plugin on Linux) · **16 GB RAM recommended** · ~15 GB free disk (images + one model) · **PostgreSQL 15+ (16 recommended; bundled)**: the compose stack ships `pgvector/pgvector:pg16`; if you point `DATABASE_URL` at your own server, it must be PostgreSQL 15 or newer with the `vector` extension, or the upgrade stops at boot (see [docs/UPGRADING.md](./docs/UPGRADING.md)). An NVIDIA GPU is optional but makes generation much faster — see [CPU vs GPU speed](#cpu-vs-gpu-speed) below.
 
-Why 16 GB: measured on a running v1.1 stack, the backend (4 workers + embedding model) sits around 4 GB and the model server around 5 GB once the 7B model is loaded, so ~9 GB steady. Both spike during generation and at startup (backend ~8 GB, model server ~9 GB at peak), so the combined worst case is ~17 GB. The two peaks don't usually line up, so 16 GB (ideally with some swap) is the practical baseline; 8 GB is not enough. The newer `worker` and `ml` services (capped at 1 GB and 2.5 GB by `WORKER_MEM_LIMIT` and `ML_MEM_LIMIT`) haven't been re-measured yet; that comes with the memory-budget work (E0-Platform.7).
+Why 16 GB: there is one profile, and every container in `docker-compose.prod.yml` has a memory limit set in `.env.example`. The limits add up to 14.5 GB, which leaves 1.5 GB for the OS and Docker, and CI fails if they go over. (These are Docker's binary units: 1 GB here is 1 GiB = 1024 MB, and the sum is 14.5 GiB.)
+
+| Container | Limit | Holds |
+|---|---|---|
+| `ollama` | 5.25 GB | one 7B Q4 model at a 4096-token context |
+| `ml` | 2.5 GB | embeddings, NER, NLI and OCR models (one copy) |
+| `tts` | 2.5 GB | reserved for narrated recaps (AGPL build, not added yet) |
+| `stt` | 1.25 GB | faster-whisper speech-to-text |
+| `web` | 1 GB | the API, 4 gunicorn workers with no models |
+| `worker` | 1 GB | background Jobs |
+| `postgres` | 768 MB | the database (`shared_buffers` 192 MB) |
+| `valkey` | 128 MB | queues and caches (`maxmemory` 96 MB) |
+| `nginx` | 128 MB | the frontend and the proxy |
+
+8 GB is not enough. A GPU makes things faster but doesn't change the budget (see [GPU](#gpu-optional-big-speedup)). To raise one limit in your `.env`, lower another by the same amount. A `memory:` limit you set in your own `docker-compose.override.yml` is outside this budget and outside the CI check, so change the `*_MEM_LIMIT` lines instead.
 
 ### 1 · Clone and configure
 
@@ -39,7 +53,7 @@ Open `.env` in any editor. Only **two values** need changing (the file walks you
 docker compose -f docker-compose.prod.yml up -d --build
 ```
 
-The first build takes a few minutes (downloads base images, builds the frontend, installs Python deps). When it finishes, `docker compose -f docker-compose.prod.yml ps` should show every service `Up`, with postgres/valkey/ollama/backend `(healthy)`.
+The first build takes a few minutes (downloads base images, builds the frontend, installs Python deps). When it finishes, `docker compose -f docker-compose.prod.yml ps` should show every service `Up`, with postgres/valkey/ollama/web/ml/stt `(healthy)`. Upgrading an install from before the `backend` → `web` rename? Add `--remove-orphans` once (see [docs/UPGRADING.md](./docs/UPGRADING.md)).
 
 ### 3 · Create your admin account
 
@@ -89,7 +103,7 @@ Prefer a different model entirely? Any instruct GGUF works — `ollama cp` any p
 
 - **Admin → System** shows whether the model server is reachable and which models are installed, has a live view of recent backend logs, and a **Download support bundle** button — a zip of recent logs plus a sanitized snapshot of the deployment's state (no secrets). Send that zip to **hello@harrisonsmith.ai** or attach it when [opening an issue](../../issues).
 - "AI model unavailable" or chat errors while Test Connection looks fine usually means no model is installed under the expected name — the Model Library shows this at a glance, and Test Connection will now tell you exactly that.
-- Raw container logs: `docker compose -f docker-compose.prod.yml logs backend --tail 200` (also `nginx`, `ollama`, `postgres`, `valkey`).
+- Raw container logs: `docker compose -f docker-compose.prod.yml logs web --tail 200` (also `worker`, `ml`, `stt`, `nginx`, `ollama`, `postgres`, `valkey`).
 
 ### Upgrading from Redis to Valkey
 
@@ -124,26 +138,28 @@ Out of the box the stack generates a **self-signed certificate** at startup (bro
 | Chat answer | 585 s | 76 s |
 | Journal entry | 379 s | 64 s |
 
-The old fixed 3-core cap generated about 0.7 tokens/s (E0-QA.15), which is what pushed long answers past the old 10-minute timeout. On a shared machine you can still cap the model server with `OLLAMA_CPUS` in `.env` (e.g. `OLLAMA_CPUS=6`), at the cost of proportionally slower replies; leave it unset, empty or `0` for no cap. Requests time out after `KOBOLD_TIMEOUT_SECONDS` (default 1200 s, with nginx's proxy timeout just above at 1260 s); raise both if slow hardware hits that. With a GPU, see below: answers take seconds.
+The old fixed 3-core cap generated about 0.7 tokens/s (E0-QA.15), which is what pushed long answers past the old 10-minute timeout. On a shared machine you can still cap the model server with `OLLAMA_CPUS` in `.env` (e.g. `OLLAMA_CPUS=6`), at the cost of proportionally slower replies; leave it unset, empty or `0` for no cap. **A cap needs a matching thread count:** Ollama starts one thread per host core whatever the container is allowed, and throttled threads stall each other, so with `OLLAMA_CPUS=6` re-create the model with `PARAMETER num_thread 6` in its Modelfile. Requests time out after `KOBOLD_TIMEOUT_SECONDS` (default 1200 s, with nginx's proxy timeout just above at 1260 s); raise both if slow hardware hits that. With a GPU, see below: answers take seconds.
 
 ### GPU (optional, big speedup)
 
-With an NVIDIA GPU (and the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) on the host), add a compose override giving the `ollama` service a device reservation:
+With an NVIDIA GPU (and the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) on the host), add the bundled GPU override:
+
+```bash
+docker compose -f docker-compose.prod.yml -f docker-compose.gpu.yml up -d --build
+```
+
+It gives `ollama` and `stt` a GPU, and builds `stt`'s local `gpu` image (it carries NVIDIA's CUDA libraries, so it is built on your machine and never published). It changes no other service and no memory limit. Verify with `docker compose -f docker-compose.prod.yml -f docker-compose.gpu.yml exec ollama ollama ps` (should read `100% GPU`). A 7B Q4 model needs ~5 GB VRAM, and speech-to-text on the GPU needs roughly 1 GB more, so plan on 6–8 GB; generations drop from a minute or more (CPU) to seconds. If the model doesn't fit in VRAM, Ollama runs part of it on the CPU, which is slower and uses more of the `ollama` container's RAM.
+
+**Ollama already running on the host** (e.g. a GPU desktop with a native Ollama): set `KOBOLD_URL=http://host.docker.internal:11434` in `.env`. `web` and `worker` reach the host through `host.docker.internal` (mapped to the host gateway in the compose file, so it works on Linux too). Keep the bundled one off on every `up`, not just once: `--scale ollama=0` is forgotten by the next plain `up -d`, so put this in `docker-compose.override.yml` and pass that file each time:
 
 ```yaml
-# docker-compose.override.yml
 services:
   ollama:
     deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
+      replicas: 0
 ```
 
-then start with both files: `docker compose -f docker-compose.prod.yml -f docker-compose.override.yml up -d`. Verify with `docker compose -f docker-compose.prod.yml exec ollama ollama ps` (should read `100% GPU`). A 7B Q4 model needs ~5 GB VRAM; generations drop from a minute or more (CPU) to seconds.
+Give the host Ollama the same settings the stack would (`OLLAMA_CONTEXT_LENGTH=4096`, `OLLAMA_NUM_PARALLEL=1`, `OLLAMA_MAX_LOADED_MODELS=1`): the app's prompt budget and LLM queue assume them. The `ollama` row's 5.25 GB still counts toward your 16 GB: the host's Ollama uses that memory instead, and nothing in the stack caps it.
 
 ### Changing nginx's ports or bind address
 
@@ -158,7 +174,7 @@ services:
       - "100.x.y.z:8443:443"
 ```
 
-`!override` needs Docker Compose v2.24 or newer. Check the result with `docker compose -f docker-compose.prod.yml -f docker-compose.override.yml config nginx` before `up -d`. The same file can hold the GPU section above.
+`!override` needs Docker Compose v2.24 or newer. Check the result with `docker compose -f docker-compose.prod.yml -f docker-compose.override.yml config nginx` before `up -d`. To combine it with the GPU override, pass all three files (`-f docker-compose.prod.yml -f docker-compose.gpu.yml -f docker-compose.override.yml`).
 
 ### Known limitations
 
@@ -189,12 +205,11 @@ FastAPI backend · React frontend · PostgreSQL + pgvector (embeddings & retriev
 
 ## Running tests
 
-The backend suite (`src/backend`) runs against a real pgvector Postgres. Install the dependencies and the spaCy model first:
+The backend suite (`src/backend`) runs against a real pgvector Postgres. Install the dependencies first (no model packages: under `ENVIRONMENT=test` the `ml` and `stt` sidecars are replaced by deterministic fakes):
 
 ```bash
 cd src/backend
 pip install -r requirements.txt -r requirements-dev.txt
-python -m spacy download en_core_web_trf
 ```
 
 By default the suite connects to:

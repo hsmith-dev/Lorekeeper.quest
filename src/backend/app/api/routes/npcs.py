@@ -1,5 +1,7 @@
+import logging
 import uuid
-from fastapi import APIRouter, Depends, Request
+
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import or_
 from sqlalchemy.orm import selectinload
@@ -10,6 +12,7 @@ from app.access import (
     require_campaign_for,
     scoped_get, scoped_select,
 )
+from app.clients.errors import ModelServiceError
 from app.db.session import get_db
 from app.db.models.user import User
 from app.db.models.npc import NpcEntry
@@ -25,7 +28,15 @@ from app.services.llm_provider import LLMConfig
 from app.services import llm_config_service
 from app.db.models.tag import TagType
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter()
+
+# NPC extract reads at most this much of the newest entries: en_core_web_trf
+# on a CPU-only box gets through roughly this in well under ML_NER_TIMEOUT_S,
+# and the sidecar keeps working on (and holding its NER lock for) a request
+# the client has given up on, so a smaller batch beats a timeout.
+NPC_EXTRACT_MAX_CHARS = 20_000
 
 # NPCs are always_gm until F3-world (Decision B1-D4): a Player (or a GM in
 # member preview) lists none and gets the one 404 for every item route and
@@ -188,7 +199,7 @@ async def extract_npcs_from_journals(
     ctx: CampaignContext = Depends(require_campaign("gm")),
     db: AsyncSession = Depends(get_db),
 ) -> NpcExtractResponse:
-    """Run spaCy NER over recent journal entries (`campaign_id` query
+    """Run NER (the ml sidecar's spaCy) over recent journal entries (`campaign_id` query
     parameter) and return PERSON entity names. GM only: it reads Shorthand
     and the NPC list (always_gm)."""
     entries_result = await db.execute(
@@ -200,8 +211,22 @@ async def extract_npcs_from_journals(
     if not rows:
         return NpcExtractResponse(suggestions=[])
 
-    combined = " ".join(f"{r.shorthand} {r.narrative}" for r in rows)
-    tags = extract_tags(combined)
+    # Newest first (the query order), stopping before the cap; at least the
+    # newest entry, cut to the cap.
+    parts: list[str] = []
+    used = 0
+    for r in rows:
+        part = f"{r.shorthand} {r.narrative}"
+        if parts and used + len(part) + 1 > NPC_EXTRACT_MAX_CHARS:
+            break
+        parts.append(part)
+        used += len(part) + 1
+    combined = " ".join(parts)[:NPC_EXTRACT_MAX_CHARS]
+    try:
+        tags = await extract_tags(combined)
+    except ModelServiceError as exc:
+        logger.warning("NPC extract failed, ml sidecar: %s", exc)
+        raise HTTPException(status_code=503, detail="NER model unavailable")
     names = [t.name for t in tags if t.tag_type == TagType.character]
 
     # Exclude names already in the wiki for this campaign

@@ -50,7 +50,7 @@ margin over vector-only is largest (+4 queries, all proper-noun rescues).
 ## The retrieval architecture these numbers validate
 
 1. **Dense retriever**: pgvector cosine distance over sentence-transformer
-   embeddings, top-10 pool.
+   embeddings (MiniLM, served by the `ml` sidecar), top-10 pool.
 2. **Lexical retriever**: per-content-word full-text matching against the
    GIN-indexed tsv column, top-10 pool, ranked by matched-word count.
 3. **Reciprocal Rank Fusion** (K=60) merges the two rankings.
@@ -92,22 +92,26 @@ generated; `--out` rewrites only those and leaves the prose alone.
 ```bash
 # 1. Seed the demo campaign (idempotent; prints the campaign id). The image
 #    does not contain the repo's seeds/, so copy the file in first.
-docker compose -f docker-compose.prod.yml cp seeds/demo_campaign.json backend:/tmp/demo_campaign.json
-docker compose -f docker-compose.prod.yml exec backend \
+docker compose -f docker-compose.prod.yml cp seeds/demo_campaign.json web:/tmp/demo_campaign.json
+docker compose -f docker-compose.prod.yml exec web \
     python scripts/seed_demo.py --seed /tmp/demo_campaign.json --embeddings require
 
 # 2. Sweep (default thresholds 0.55,0.65,0.75; hybrid@0.65 marked). The
 #    image has no docs/, so copy this report in, update it there, copy it back.
-docker compose -f docker-compose.prod.yml cp docs/RETRIEVAL_EVAL.md backend:/tmp/RETRIEVAL_EVAL.md
-docker compose -f docker-compose.prod.yml exec backend \
+docker compose -f docker-compose.prod.yml cp docs/RETRIEVAL_EVAL.md web:/tmp/RETRIEVAL_EVAL.md
+docker compose -f docker-compose.prod.yml exec web \
     python scripts/eval_retrieval.py --campaign-id <campaign-uuid> \
     --embeddings require --out /tmp/RETRIEVAL_EVAL.md
-docker compose -f docker-compose.prod.yml cp backend:/tmp/RETRIEVAL_EVAL.md docs/RETRIEVAL_EVAL.md
+docker compose -f docker-compose.prod.yml cp web:/tmp/RETRIEVAL_EVAL.md docs/RETRIEVAL_EVAL.md
 ```
 
-From a checkout with a local Postgres, run the same two scripts from
-`src/backend/` without the `docker compose` prefix (`--seed` defaults to
-`seeds/demo_campaign.json`, `--out docs/RETRIEVAL_EVAL.md` updates this file).
-Without a cached embedding model, `--embeddings auto` still runs: vector-only
-scores 0 and hybrid is lexical-only, so only `require` reproduces the numbers
-above.
+Embeddings come from the `ml` sidecar at `ML_URL` (default `http://ml:8000`;
+the backend loads no model since E0-Platform.6), so `ml` must be up. From a
+checkout with a local Postgres, run the same two scripts from `src/backend/`
+without the `docker compose` prefix, with `ML_URL` pointing at a running `ml`
+(`--seed` defaults to `seeds/demo_campaign.json`, `--out docs/RETRIEVAL_EVAL.md`
+updates this file). `--embeddings require` fails with a clear error when `ml`
+is unreachable. `--embeddings auto` warns and still runs without it:
+vector-only scores 0 and hybrid is lexical-only, so only `require` reproduces
+the numbers above. The published results still await a re-run on the desktop
+with the 12-entry seed and the sidecar.
