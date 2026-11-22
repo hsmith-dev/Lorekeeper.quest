@@ -103,7 +103,7 @@ def _parse_job_id(value: Any) -> uuid.UUID:
         raise ValueError("enqueue: unknown dependency") from None
 
 
-# A retry held behind a Job its ctx cannot see takes `{key}#retry:{job id}`
+# A retry held behind a Job its ctx cannot see takes `{key}#retry:{starter id}`
 # (app/jobs/control.py retry_job); it still holds `key` for dedup.
 RETRY_KEY_MARK = "#retry:"
 

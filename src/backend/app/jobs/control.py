@@ -30,7 +30,7 @@ idempotency key must be free of Jobs the ctx can see: an active Job holding
 it that `scoped_select(Job, ctx)` returns is a 409. A holder the ctx cannot
 see (another starter's Job, or one in another Campaign) must not be revealed
 (E0-QA.14, EV-4): the retry answers exactly like a free key, but the row
-takes a per-retry key `{key}#retry:{id}` (the partial unique index stays
+takes a per-retry key `{key}#retry:{starter id}` (the partial unique index stays
 satisfied), `depends_on_job_id` = the holder (locked FOR SHARE), stays
 `queued` and is not pushed; the outbox releases it when the holder ends
 (the work runs again then: kinds are idempotent on content-derived keys).
@@ -59,7 +59,7 @@ from app.access.policy import not_found
 from app.db.models.job import ACTIVE_STATUSES, Job
 from app.domain.enums import JobQueue, JobStatus
 from app.jobs import outbox
-from app.jobs.enqueue import RETRY_KEY_MARK  # a held retry's `{key}#retry:{job id}`; enqueue dedups on it
+from app.jobs.enqueue import RETRY_KEY_MARK, _like_escape  # a held retry's `{key}#retry:{starter}`; enqueue dedups on it
 from app.jobs.registry import get_kind
 
 ONLY_QUEUED = "Only queued Jobs can be cancelled"
@@ -102,28 +102,44 @@ async def cancel_job(db: AsyncSession, ctx: CampaignContext, job_id: Any) -> Job
 
 
 def _base_key(job: Job) -> str:
-    """The Job's idempotency key without the per-retry suffix a hidden-holder
-    retry gave it."""
-    suffix = f"{RETRY_KEY_MARK}{job.id}"
+    """The Job's idempotency key without the per-retry suffix
+    (`{key}#retry:{starter}`) a hidden-holder retry gave it."""
     key = job.idempotency_key
-    return key[: -len(suffix)] if key.endswith(suffix) else key
+    cut = key.rfind(RETRY_KEY_MARK)
+    return key[:cut] if cut >= 0 else key
 
 
-async def _key_holder(db: AsyncSession, ctx: CampaignContext, job_id: uuid.UUID,
-                      key: str) -> tuple[uuid.UUID, bool] | None:
-    """The active Job (other than `job_id`) holding `key`, locked FOR SHARE
-    (a worker finishing it waits for this transaction, so its after-commit
-    release sees a dependent written here), and whether ctx may see it
-    (`scoped_select`). None when the key is free."""
-    holder = await db.scalar(
-        sa.select(Job.id).where(Job.idempotency_key == key, Job.id != job_id,
-                                Job.status.in_([s.value for s in ACTIVE_STATUSES]))
-        .limit(1).with_for_update(read=True)
-    )
-    if holder is None:
-        return None
-    visible = await db.scalar(scoped_select(Job, ctx).where(Job.id == holder).with_only_columns(Job.id))
-    return holder, visible is not None
+def _held_key(base: str, job: Job, ctx: CampaignContext) -> str:
+    """The key a retry held behind a hidden Job takes: one per (starter,
+    original key). The partial unique index on active keys then allows one
+    held copy per starter, so a second retry (sequential or racing) by the
+    starter or a GM, who can both see every Job of that starter, finds or
+    collides with the first and answers 409 instead of queueing the work
+    twice."""
+    return f"{base}{RETRY_KEY_MARK}{job.ctx_user_id or ctx.user_id}"
+
+
+async def _key_holders(db: AsyncSession, ctx: CampaignContext, job_id: uuid.UUID,
+                       key: str) -> tuple[uuid.UUID | None, bool]:
+    """(a hidden active Job holding `key` to wait behind, whether ctx can see
+    any active holder). Holders are the active Jobs other than `job_id`
+    whose key is `key` or a held retry's `{key}#retry:...`; they are locked
+    FOR SHARE (a worker finishing one waits for this transaction, so its
+    after-commit release sees a dependent written here). The exact-key
+    holder is preferred to wait behind. (None, False) when the key is free."""
+    exact = Job.idempotency_key == key
+    rows = (await db.execute(
+        sa.select(Job.id, exact.label("exact")).where(
+            sa.or_(exact, Job.idempotency_key.like(f"{_like_escape(key)}{RETRY_KEY_MARK}%", escape="\\")),
+            Job.id != job_id, Job.status.in_([s.value for s in ACTIVE_STATUSES]))
+        .order_by(sa.case((exact, 0), else_=1), Job.created_at, Job.id)
+        .with_for_update(read=True)
+    )).all()
+    if not rows:
+        return None, False
+    ids = [r.id for r in rows]
+    visible = await db.scalar(scoped_select(Job, ctx).where(Job.id.in_(ids)).with_only_columns(Job.id).limit(1))
+    return ids[0], visible is not None
 
 
 async def retry_job(db: AsyncSession, ctx: CampaignContext, job_id: Any) -> uuid.UUID:
@@ -144,10 +160,9 @@ async def retry_job(db: AsyncSession, ctx: CampaignContext, job_id: Any) -> uuid
         raise JobConflict(UNKNOWN_KIND) from None
     job_pk, base = job.id, _base_key(job)
     for _ in range(_RETRY_ATTEMPTS):
-        holder = await _key_holder(db, ctx, job_pk, base)
-        if holder is not None and holder[1]:
-            raise JobConflict(KEY_IN_USE)  # the ctx can see the Job holding the key
-        hidden_holder = holder[0] if holder is not None else None
+        hidden_holder, seen = await _key_holders(db, ctx, job_pk, base)
+        if seen:
+            raise JobConflict(KEY_IN_USE)  # the ctx can see a Job holding the key
         try:
             # A concurrent enqueue may take the key between the check and here:
             # the partial unique index decides. The savepoint opens BEFORE the
@@ -174,7 +189,7 @@ async def retry_job(db: AsyncSession, ctx: CampaignContext, job_id: Any) -> uuid
                     # Held behind a Job the ctx cannot see: a key of its own
                     # (the partial unique index holds), released by the
                     # outbox when the holder ends. Answered like any retry.
-                    job.idempotency_key = f"{base}{RETRY_KEY_MARK}{job_pk}"
+                    job.idempotency_key = _held_key(base, job, ctx)
                     job.depends_on_job_id = hidden_holder
                 await db.flush()
         except IntegrityError as exc:
