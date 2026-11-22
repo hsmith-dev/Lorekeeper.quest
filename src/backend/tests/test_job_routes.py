@@ -463,7 +463,7 @@ async def test_retry_behind_a_hidden_holder_answers_like_a_free_key(client, worl
     assert _shape(r_held, own) == _shape(r_free, free)
     row = await world.row(own)
     assert row.status == JobStatus.QUEUED and row.attempts == 0
-    assert row.idempotency_key == f"{key}{control.RETRY_KEY_MARK}{world.player.id}"
+    assert row.idempotency_key == f"{key}{control.RETRY_KEY_MARK}{world.cid}:{world.player.id}"
     assert row.depends_on_job_id == holder
     assert Queue("interactive", connection=rq_conn).job_ids == [str(free)]  # the held row is not pushed
     held = await world.row(holder)
@@ -574,7 +574,7 @@ async def test_a_lost_race_to_a_hidden_holder_reruns_the_check_and_holds(client,
     (holder,) = raced
     row = await world.row(own)
     assert row.status == JobStatus.QUEUED and row.depends_on_job_id == holder
-    assert row.idempotency_key == f"{key}{control.RETRY_KEY_MARK}{player_id}"
+    assert row.idempotency_key == f"{key}{control.RETRY_KEY_MARK}{world.cid}:{player_id}"
     assert Queue("interactive", connection=rq_conn).job_ids == []
     assert (await world.row(holder)).status == JobStatus.QUEUED
 
@@ -684,6 +684,48 @@ async def test_a_retry_after_the_hidden_holder_ends_queues_one_copy(client, worl
     assert await _active_copies(world, key, player_id) == [b]
     row = await world.row(b)
     assert row.idempotency_key == key and row.depends_on_job_id is None
+
+
+async def test_held_copies_of_one_starter_in_two_campaigns_do_not_collide(client, world, rq_conn):
+    """The same user retries the same work in two Campaigns they GM, each
+    behind a Job in a third Campaign they cannot see: both answer like a free
+    key (a collision would be a 409 revealing the hidden Job), one held copy
+    per Campaign. Enqueue in the hidden Job's Campaign is not blocked by the
+    held copies once that Job ends (they hold the key only in their own
+    Campaign)."""
+    from app.jobs.enqueue import enqueue
+
+    owner_h, owner_id = bearer(world.owner), world.owner.id
+    cid2 = uuid.uuid4()
+    world.db.add(Campaign(id=cid2, user_id=owner_id, name="Second", genre=Genre("fantasy")))
+    await world.db.commit()
+    key = f"test-jr:{uuid.uuid4().hex}"
+    holder = await world.job(world.other_owner, status="running", key=key, campaign_id=world.other_cid,
+                             ctx_kind="gm")
+    a = await world.job(world.owner, status="failed", key=key)
+    b = await world.job(world.owner, status="failed", key=key, campaign_id=cid2)
+    for job_id in (a, b):
+        r = await client.post(f"/api/jobs/{job_id}/retry", headers=owner_h)
+        assert r.status_code == 202 and r.json() == {"job_id": str(job_id)}, r.text
+    assert (await world.row(a)).idempotency_key == f"{key}{control.RETRY_KEY_MARK}{world.cid}:{owner_id}"
+    assert (await world.row(b)).idempotency_key == f"{key}{control.RETRY_KEY_MARK}{cid2}:{owner_id}"
+    assert (await world.row(a)).depends_on_job_id == holder == (await world.row(b)).depends_on_job_id
+    row = await world.row(holder)
+    row.status = JobStatus.DONE
+    row.finished_at = datetime.now(timezone.utc)
+    await world.db.commit()
+    other_ctx = await ctx_for(world.db, world.other_owner.id, world.other_cid)
+    fresh = await enqueue(world.db, other_ctx, "system.noop", {}, idempotency_key=key)
+    await world.db.commit()
+    assert fresh not in (a, b, holder)
+
+
+async def test_enqueue_refuses_the_reserved_retry_mark(world):
+    from app.jobs.enqueue import enqueue
+
+    with pytest.raises(ValueError, match="reserved"):
+        await enqueue(world.db, await world.ctx(world.owner), "system.noop", {},
+                      idempotency_key=f"x{control.RETRY_KEY_MARK}y")
 
 
 async def test_retry_hidden_or_preview_is_404(client, world, rq_conn):

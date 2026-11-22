@@ -30,6 +30,20 @@ deferred:
     location: >-
       docs/SPOILER_EVAL.md
     severity: medium
+  - summary: >-
+      A retry held behind a hidden Job overwrites depends_on_job_id, so the handler later sees the hidden holder's terminal status as dependency_status, and an original dependency is lost.
+    evidence: |-
+      No registered kind reads dependency_status today. A clean fix needs a separate hold column (a migration). E1 adds the first dependent kinds and should split "held behind" from "depends on".
+    location: >-
+      src/backend/app/jobs/control.py retry_job; src/backend/app/jobs/worker.py _claim
+    severity: low
+  - summary: >-
+      The held-copy prefix LIKE can't use the btree key index outside the C locale.
+    evidence: |-
+      The scan is limited to active Jobs, so it is cheap today. A text_pattern_ops partial index on active keys would fix it, but it needs a migration.
+    location: >-
+      src/backend/app/jobs/enqueue.py _active_with_key; src/backend/app/jobs/control.py _key_holders
+    severity: low
 ---
 
 <intent-contract>
@@ -128,6 +142,29 @@ deferred:
 
 ## Spec Change Log
 
+### 2026-11-22: coordinator follow-up (duplicate work behind a hidden holder)
+- **Trigger:** the known gap from the first pass, raised by the coordinator. A second retry against a held row (sequential, racing, or after the hidden holder ends) could queue the same work twice. Keys are idempotency keys, so that is a correctness bug.
+- **Amended (code):**
+  - The held key is now deterministic: `{key}#retry:{campaign}:{starter or 'none'}` (it used to be `…#retry:{job id}`).
+  - The holder check (`control._key_holders`) matches the exact key, in any Campaign, plus held copies in the Job's own Campaign. Any holder the caller can see means 409.
+  - `enqueue` de-duplicates against held copies in its own Campaign only.
+  - `enqueue` now refuses caller keys that contain `#retry:`, which is reserved.
+- **Why one copy holds:** the existing partial unique index on active keys allows one held copy per (Campaign, starter, key). The racing loser gets an IntegrityError and re-runs the check. The winner is always visible to the loser, because the caller is that starter or a GM of the Campaign, so the loser gets an honest 409. The Campaign is in the key so the same user's held copies in two Campaigns don't collide, since that 409 would reveal the hidden Job.
+- **Data safety:** no migration and no schema change. Rows written with the old `#retry:{job id}` suffix existed only on this unmerged branch, so no deployed data has them. `_base_key` strips a suffix only when it starts with the row's own Campaign id, so any other key is left alone.
+- **KEEP:**
+  - A visible holder means 409.
+  - A hidden holder answers 202 exactly like a free retry, and the row waits on `depends_on_job_id`, unpushed.
+  - FOR SHARE on the holders.
+  - The lost-race re-check.
+- **Tests:** in `tests/test_job_routes.py`:
+  - two sequential retries;
+  - two racing retries in real concurrent transactions;
+  - a retry after the hidden holder ends;
+  - the same starter in two Campaigns;
+  - the reserved mark.
+
+  Each checks exactly one queued or running copy.
+
 ## Review Triage Log
 
 ### 2026-11-21 — Review pass (blind, edge-case, verification-gap, intent-alignment)
@@ -171,6 +208,28 @@ deferred:
   - `[false]` `[reject]` (intent) The gates.yml step command is unchanged. The step already runs `pytest tests/ev4` on PRs and main; the hard-gate behaviour lives in the harness it runs.
   - `[low]` `[reject]` (intent) The AC1 surfaces run on fake vectors and a fake LLM. That is the CI design (AD-21 fakes); the live run is AC4's eval.
   - `[low]` `[patch]` (CI) `test_retry_behind_a_holder_in_another_campaign_is_held` failed with MissingGreenlet (an expired `world.owner` in `bearer`). → headers computed once.
+
+### 2026-11-22: Re-review of the `control.py` and `enqueue.py` diff (edge-case and adversarial)
+- verdicts: 18 findings: high 1, medium 3, low 9, false 2, maybe-false 3
+- findings:
+  - `[high]` `[patch]` (edge, adversarial) A starter's held copies in two Campaigns collided on `K#retry:{starter}`: three IntegrityErrors, then a 409 that reveals the hidden Job. → the Campaign id is now in the held key; tested.
+  - `[medium]` `[patch]` (adversarial) Two GMs retrying Jobs with no starter wrote different keys (`…#retry:{gm}`), so the work queued twice. → `none` is used for a missing starter, so there is one key per Campaign.
+  - `[medium]` `[patch]` (edge, adversarial) `enqueue` matched another Campaign's held copy by prefix and raised ValueError (a 500) "in another Campaign" though the exact key was free. → the prefix match is scoped to the caller's Campaign; tested.
+  - `[medium]` `[patch]` (edge, adversarial) A caller key containing `#retry:` would be cut short or matched wrongly. → `enqueue` rejects the reserved mark, and `_base_key` strips only `#retry:{own campaign}:`; tested.
+  - `[low]` `[reject]` (edge, adversarial) A 409 after three lost races regardless of visibility. With per-Campaign held keys, a conflict on a held key is always with a copy the caller can see, and a conflict on the exact key re-checks correctly. Three successive exact-key racers is not a realistic sequence.
+  - `[low]` `[reject]` (edge, adversarial) The held path overwrites a real `depends_on_job_id`, and the hidden holder's status reaches the handler as `dependency_status`. A failed Job's dependency is already terminal, no registered kind reads `dependency_status`, and a fix needs a new column (a migration) for no current consumer. Recorded under deferred for E1, which adds the first dependent kinds.
+  - `[low]` `[defer]` (adversarial) The prefix LIKE can't use the btree index outside the C locale. The scan is limited to active rows, which are few. A `text_pattern_ops` index would need a migration; deferred.
+  - `[maybe-false]` `[reject]` (adversarial) `enqueue` de-duplication can return the id of another starter's held copy that the caller can't see. Exact-key de-duplication already did this before the change; `enqueue` has no Player-facing route today.
+  - `[maybe-false]` `[reject]` (adversarial) The lifecycle of a held retry differs from a free retry. Already deferred (owner decision).
+  - `[low]` `[reject]` (adversarial) An IntegrityError from another constraint inside the loop is re-raised as a 500. That is intended: only the active-key index is a race.
+  - `[low]` `[reject]` (adversarial) Missing tests for `dependency_status` and pre-existing dependencies. Follows the deferred dependency item.
+  - `[low]` `[patch]` (adversarial) Missing tests for cross-Campaign collisions and keys containing `#retry:`. → added.
+  - `[false]` `[reject]` (edge, claim) "One copy per (starter, key)" fails across Campaigns. The claim is now per (Campaign, starter, key), and the cross-Campaign case gives one copy per Campaign, which is the intended scope.
+  - `[false]` `[reject]` (edge, claim) Free-key parity breaks on cross-Campaign collision. Fixed by the high patch above.
+  - `[maybe-false]` `[reject]` (adversarial) A FOR SHARE scan in non-id order could deadlock. Holders are only read-locked (shared locks are compatible). The writer, a worker finishing a holder, updates one row, so no lock cycle with two exclusive waiters forms.
+  - `[low]` `[reject]` (adversarial) A queue_position of 0 on a held row looks unlike a busy queue. Part of the deferred lifecycle item.
+  - `[low]` `[reject]` (adversarial) NULL-starter Jobs (starter deleted) and GM retries. Covered by the `none` patch.
+  - `[low]` `[reject]` (edge) No test for exhaustion. Follows the rejected exhaustion row.
 
 ## Design Notes
 

@@ -30,7 +30,7 @@ idempotency key must be free of Jobs the ctx can see: an active Job holding
 it that `scoped_select(Job, ctx)` returns is a 409. A holder the ctx cannot
 see (another starter's Job, or one in another Campaign) must not be revealed
 (E0-QA.14, EV-4): the retry answers exactly like a free key, but the row
-takes a per-retry key `{key}#retry:{starter id}` (the partial unique index stays
+takes a per-retry key `{key}#retry:{campaign}:{starter}` (the partial unique index stays
 satisfied), `depends_on_job_id` = the holder (locked FOR SHARE), stays
 `queued` and is not pushed; the outbox releases it when the holder ends
 (the work runs again then: kinds are idempotent on content-derived keys).
@@ -59,7 +59,7 @@ from app.access.policy import not_found
 from app.db.models.job import ACTIVE_STATUSES, Job
 from app.domain.enums import JobQueue, JobStatus
 from app.jobs import outbox
-from app.jobs.enqueue import RETRY_KEY_MARK, _like_escape  # a held retry's `{key}#retry:{starter}`; enqueue dedups on it
+from app.jobs.enqueue import RETRY_KEY_MARK, _like_escape  # a held retry's `{key}#retry:{campaign}:{starter}`
 from app.jobs.registry import get_kind
 
 ONLY_QUEUED = "Only queued Jobs can be cancelled"
@@ -101,37 +101,47 @@ async def cancel_job(db: AsyncSession, ctx: CampaignContext, job_id: Any) -> Job
     return job
 
 
+def _held_prefix(base: str, campaign_id: uuid.UUID) -> str:
+    return f"{base}{RETRY_KEY_MARK}{campaign_id}:"
+
+
 def _base_key(job: Job) -> str:
     """The Job's idempotency key without the per-retry suffix
-    (`{key}#retry:{starter}`) a hidden-holder retry gave it."""
+    (`{key}#retry:{campaign}:{starter}`) a hidden-holder retry gave it.
+    `enqueue` refuses keys holding RETRY_KEY_MARK, so only a held retry has it."""
     key = job.idempotency_key
-    cut = key.rfind(RETRY_KEY_MARK)
+    cut = key.rfind(f"{RETRY_KEY_MARK}{job.campaign_id}:")
     return key[:cut] if cut >= 0 else key
 
 
 def _held_key(base: str, job: Job, ctx: CampaignContext) -> str:
-    """The key a retry held behind a hidden Job takes: one per (starter,
-    original key). The partial unique index on active keys then allows one
-    held copy per starter, so a second retry (sequential or racing) by the
-    starter or a GM, who can both see every Job of that starter, finds or
-    collides with the first and answers 409 instead of queueing the work
-    twice."""
-    return f"{base}{RETRY_KEY_MARK}{job.ctx_user_id or ctx.user_id}"
+    """The key a retry held behind a hidden Job takes: one per (Campaign,
+    starter, original key); a Job with no starter left shares `none` (only a
+    GM, who sees every Job of the Campaign, can retry it). The partial
+    unique index on active keys then allows one held copy each, so a second
+    retry (sequential or racing) by the starter or a GM, who can both see
+    that copy, finds or collides with it and answers 409 instead of queueing
+    the work twice. The Campaign in the key keeps the same starter's held
+    copies in two Campaigns from colliding (that 409 would reveal the
+    hidden holder)."""
+    return f"{_held_prefix(base, job.campaign_id)}{job.ctx_user_id or 'none'}"
 
 
-async def _key_holders(db: AsyncSession, ctx: CampaignContext, job_id: uuid.UUID,
+async def _key_holders(db: AsyncSession, ctx: CampaignContext, job: Job,
                        key: str) -> tuple[uuid.UUID | None, bool]:
     """(a hidden active Job holding `key` to wait behind, whether ctx can see
-    any active holder). Holders are the active Jobs other than `job_id`
-    whose key is `key` or a held retry's `{key}#retry:...`; they are locked
+    any active holder). Holders are the active Jobs other than `job` whose
+    key is `key` (in any Campaign: the index is global) or a held retry's
+    `{key}#retry:{job's Campaign}:...`; they are locked
     FOR SHARE (a worker finishing one waits for this transaction, so its
     after-commit release sees a dependent written here). The exact-key
     holder is preferred to wait behind. (None, False) when the key is free."""
     exact = Job.idempotency_key == key
     rows = (await db.execute(
         sa.select(Job.id, exact.label("exact")).where(
-            sa.or_(exact, Job.idempotency_key.like(f"{_like_escape(key)}{RETRY_KEY_MARK}%", escape="\\")),
-            Job.id != job_id, Job.status.in_([s.value for s in ACTIVE_STATUSES]))
+            sa.or_(exact, Job.idempotency_key.like(f"{_like_escape(_held_prefix(key, job.campaign_id))}%",
+                                                   escape="\\")),
+            Job.id != job.id, Job.status.in_([s.value for s in ACTIVE_STATUSES]))
         .order_by(sa.case((exact, 0), else_=1), Job.created_at, Job.id)
         .with_for_update(read=True)
     )).all()
@@ -160,7 +170,7 @@ async def retry_job(db: AsyncSession, ctx: CampaignContext, job_id: Any) -> uuid
         raise JobConflict(UNKNOWN_KIND) from None
     job_pk, base = job.id, _base_key(job)
     for _ in range(_RETRY_ATTEMPTS):
-        hidden_holder, seen = await _key_holders(db, ctx, job_pk, base)
+        hidden_holder, seen = await _key_holders(db, ctx, job, base)
         if seen:
             raise JobConflict(KEY_IN_USE)  # the ctx can see a Job holding the key
         try:
