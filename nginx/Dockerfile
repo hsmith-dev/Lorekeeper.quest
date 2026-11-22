@@ -1,6 +1,9 @@
 # Multi-stage: build React app then serve with nginx
 # Stage 1 — build frontend
-FROM node:20-alpine AS builder
+# On the build platform (E0-Platform.9): the static bundle is the same on
+# every arch, so an arm64 build doesn't run node under emulation. Only the
+# nginx stage below is built for the target platform.
+FROM --platform=$BUILDPLATFORM node:20-alpine AS builder
 WORKDIR /app
 COPY src/frontend/package*.json ./
 RUN npm ci --include=dev

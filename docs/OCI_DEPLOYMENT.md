@@ -19,7 +19,10 @@ tradeoff is ARM64 — every image in `docker-compose.prod.yml` was verified to
 have a real `linux/arm64` build (not just an x86_64 image running under
 emulation), including a from-scratch `docker buildx build --platform
 linux/arm64` of the custom backend image, so this isn't a "should work"
-claim.
+claim. Since E0-Platform.9, `.github/workflows/images.yml` builds all four of
+Lorekeeper's own images (`docker-bake.hcl`: web, ml, stt's CPU target, nginx)
+natively for both `linux/amd64` and `linux/arm64` on every PR, so an arm64
+break shows up in CI, not on the instance.
 
 ## 1. Create the instance (OCI Console)
 
@@ -103,9 +106,38 @@ cd ~/lorekeeper
 ```
 
 This installs Docker if missing, generates `.env` (with a random
-`SECRET_KEY`), brings up the full stack (`docker-compose.prod.yml`), waits
-for Ollama to report healthy, and imports the fine-tuned model. Full detail
-in the script's own header comment.
+`SECRET_KEY`), applies the edition rule, builds Lorekeeper's images on the
+instance, pulls the upstream images, brings up the full stack
+(`docker-compose.prod.yml` and `.env`, nothing else), waits for Ollama to
+report healthy, and imports the fine-tuned model. Full detail in the
+script's own header comment.
+
+- **Built here, never pulled or pushed.** Lorekeeper is distributed as
+  source. `docker buildx bake --load -f docker-bake.hcl` builds `lorekeeper-web` (also the
+  worker's image), `lorekeeper-ml`, `lorekeeper-stt` and `lorekeeper-nginx`
+  natively for the instance's arm64 CPU, tagged with `LOREKEEPER_TAG`
+  (from the environment or `.env`; else `git describe`; else `latest`).
+  `docker compose pull --ignore-buildable` fetches only the upstream
+  multi-arch images (Postgres, Valkey, Ollama). The script never logs in to
+  or pushes to a registry. It needs the buildx plugin (get.docker.com
+  installs it) and stops with a hint if it is missing.
+- **Set a tag per release.** Put `LOREKEEPER_TAG=v1.2` (say) in `.env` when
+  you deploy a release. The previous release's images then stay on the host
+  under their own tag. The script always builds from the checkout on disk
+  (an existing image with the same tag may be older source); BuildKit's
+  cache makes rebuilding an unchanged checkout quick.
+- **Edition (AD-16).** `LOREKEEPER_EDITION=agpl` (the default) adds the
+  `tts` profile to `COMPOSE_PROFILES`. With `LOREKEEPER_EDITION=commercial`
+  the script never sets it, and if `COMPOSE_PROFILES` asks for `tts` it
+  stops before building anything (no compose service uses the `tts`
+  profile until E5 adds Kokoro; the rule is in place for it), with a line explaining that the
+  commercial edition uses browser speech.
+- **Upgrades back up first.** When the new `web` image starts against a
+  database that has data and a migration pending, it writes
+  `pre-upgrade_<UTC stamp>_<old revision>.dump` to the `backups` volume
+  before `alembic upgrade head` runs (`scripts/boot_migrate.py`). If that
+  dump fails, `web` exits with a `boot-migrate:` line and the database is
+  not touched. The newest `PRE_UPGRADE_BACKUPS_KEEP` (default 5) are kept.
 
 **Before it's actually safe to expose**, edit `.env` on the instance and set:
 
@@ -117,6 +149,75 @@ FRONTEND_URL=http://<public-ip>
 then `docker compose -f docker-compose.prod.yml restart web`.
 
 At this point `http://<public-ip>/` should load the app.
+
+## Rolling back an upgrade
+
+If a release misbehaves after its migration ran, put the database back as it
+was just before the upgrade and run the previous release again:
+
+1. Find the dump the upgrade wrote (the boot log names it too:
+   `docker compose -f docker-compose.prod.yml logs web | grep boot-migrate`):
+
+   ```bash
+   ./scripts/restore-db.sh          # with no argument, lists nightly and pre-upgrade dumps
+   ```
+
+2. Restore it and leave the services stopped. `--no-restart` matters:
+   starting the newer image again would upgrade the restored database
+   straight back.
+
+   ```bash
+   ./scripts/restore-db.sh --no-restart pre-upgrade_20261121T101500Z_0f1c3b194a4b.dump
+   ```
+
+   The restore runs in a one-off `web` container with its own PostgreSQL 17
+   client (the postgres container's 16 client can't read a 17-made archive).
+   It resets the `public` schema and loads the dump in one transaction, so
+   the tables the newer migration added are gone too, and a restore that
+   fails leaves the database exactly as it was.
+
+3. Check out the previous release's source (`git checkout v1.1`, or copy
+   that release onto the instance as in step 3 above) and run **its**
+   deploy script, so its own `docker-compose.prod.yml` runs its images:
+
+   ```bash
+   git checkout v1.1
+   LOREKEEPER_TAG=v1.1 ./scripts/deploy-oci.sh
+   ```
+
+   Don't point the newer checkout at the older tag: the compose file and the
+   image must come from the same release (a release from before E0-Platform.9
+   has no `scripts/boot_migrate.py`, which the newer compose file runs). Set
+   `LOREKEEPER_TAG=v1.1` in `.env` as well, so a later plain run doesn't go
+   back to the newer tag. The script rebuilds from that source; BuildKit's
+   cache makes it quick when the images were built here before.
+
+The previous release finds the database at its own head revision and
+starts without migrating. If you start an *older* image against a database
+a newer one already upgraded (step 2 skipped), `web` refuses to boot with a
+`boot-migrate:` line naming the unknown revision and pointing here.
+
+What a rollback does not bring back:
+
+- **Writes after the upgrade.** Everything written since the dump (new
+  entries, Jobs, accounts) is discarded with the newer schema.
+  `deploy-oci.sh` stops the worker before it starts the upgrade, so nothing
+  is written between the dump and the migration.
+- **Stored files.** The pre-upgrade dump covers the database only. Files
+  created after the upgrade stay on the `files_data` volume with nothing
+  pointing at them (`files.gc` sweeps them), and a file deleted after the
+  upgrade is missing for its restored row. To roll the files back as well,
+  restore the last nightly backup instead (it pairs a dump with a files
+  archive).
+- **A database you run yourself.** With `DATABASE_URL` pointing at your own
+  server, the restore needs a role that may drop the `public` schema and run
+  `CREATE EXTENSION vector`, which on most servers means a superuser. The
+  bundled `postgres` service's user is one.
+
+Each upgrade's dump stays on the `backups` volume (the newest
+`PRE_UPGRADE_BACKUPS_KEEP`, default 5). To keep one longer, copy it off the
+volume, for example
+`docker compose -f docker-compose.prod.yml run --rm --no-deps -T web cat /backups/<name> > <name>`.
 
 ## 5. Set up a domain + HTTPS (recommended before any real users)
 

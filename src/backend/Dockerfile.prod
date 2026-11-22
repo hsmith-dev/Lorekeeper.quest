@@ -3,11 +3,16 @@ WORKDIR /app
 
 # Pango, HarfBuzz, fontconfig and DejaVu are WeasyPrint's system libraries and
 # font for the campaign PDF export (E0-QA.9). fonts-dejavu-extra has the
-# oblique faces: WeasyPrint does not synthesise italics. No compiler and no
-# libpq: every requirement ships a binary wheel on amd64 and arm64, and
-# asyncpg speaks the Postgres protocol itself.
+# oblique faces: WeasyPrint does not synthesise italics. No compiler: every
+# requirement ships a binary wheel on amd64 and arm64, and asyncpg speaks the
+# Postgres protocol itself.
+# postgresql-client-17 (E0-Platform.9): pg_dump / pg_restore for the
+# pre-upgrade dump scripts/boot_migrate.py writes on boot and for
+# scripts/restore-db.sh. The 17 client reads and dumps the bundled pg16
+# server; its archives need this client to restore (licenses/register.yaml).
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libpango-1.0-0 libpangoft2-1.0-0 libharfbuzz0b fontconfig fonts-dejavu-core fonts-dejavu-extra \
+        postgresql-client-17 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
@@ -27,9 +32,12 @@ COPY . .
 # /data/files (the files_data volume, E0-Jobs.8) likewise: the backend and the
 # worker write stored files there as appuser. Files are created 0644 and
 # directories 0755 (the default umask) so nginx can serve them read-only.
+# /backups (the backups volume, E0-Platform.9) the same way: boot_migrate.py
+# writes the pre-upgrade dumps there as appuser.
 RUN useradd -m appuser && chown -R appuser /app \
     && mkdir -p /var/log/lorekeeper && chown appuser /var/log/lorekeeper \
-    && mkdir -p /data/files && chown appuser /data/files
+    && mkdir -p /data/files && chown appuser /data/files \
+    && mkdir -p /backups && chown appuser /backups
 USER appuser
 
 EXPOSE 8000

@@ -29,6 +29,30 @@ happened. Restoring rolls the whole database back to the most recent nightly
 dump (`scripts/restore-db.sh <dump-file>` — destructive, stops the backend,
 asks for confirmation, restores, restarts).
 
+### Pre-upgrade dumps (`backups` volume)
+
+Since E0-Platform.9 the web container also dumps the database right before
+any migration (`scripts/boot_migrate.py`, under the same advisory lock as
+the migration): `pre-upgrade_<UTC stamp>_<revision>.dump` on the `backups`
+Docker volume, mounted at `/backups` in web. It is written as `.partial` and
+renamed only when non-empty; if it fails, the migration doesn't run. The
+newest `PRE_UPGRADE_BACKUPS_KEEP` (default 5) are kept. These dumps cover the
+database only, not `files_data` (a migration doesn't change stored files).
+They are made with the web image's PostgreSQL 17 client, so only that client
+can restore them; `restore-db.sh` uses it for every restore.
+
+### How a restore runs
+
+`restore-db.sh` takes a nightly dump by path (`backups/lorekeeper_*.dump`)
+or a pre-upgrade dump by name (`pre-upgrade_*.dump`, read from the volume).
+With no argument it lists both. It restores from a one-off `web` container:
+`python scripts/boot_migrate.py restore` checks the archive with
+`pg_restore --list`, resets the `public` schema, and loads the dump with
+`pg_restore --no-owner --exit-on-error --single-transaction`. A reset rather
+than `--clean`: `--clean` can't drop tables a newer migration added.
+`--no-restart` leaves web and the worker stopped afterwards, for a rollback
+to an older release (docs/OCI_DEPLOYMENT.md, "Rolling back").
+
 ### Stored files (`files_data`)
 
 Since E0-Jobs.8 the app also keeps derived binaries (recap audio,
@@ -122,5 +146,7 @@ download → restore) actually round-trips.
 | Manual backup right now | `ssh ubuntu@<instance> "cd ~/lorekeeper && ./scripts/backup-db.sh"` |
 | List backups | `ssh ubuntu@<instance> "ls -lh ~/lorekeeper/backups"` |
 | Restore from a backup (database + stored files) | `ssh ubuntu@<instance> "cd ~/lorekeeper && ./scripts/restore-db.sh backups/<file>.dump"` |
+| List nightly and pre-upgrade dumps | `ssh ubuntu@<instance> "cd ~/lorekeeper && ./scripts/restore-db.sh"` |
+| Roll back an upgrade | `./scripts/restore-db.sh --no-restart pre-upgrade_<stamp>_<rev>.dump`, then `LOREKEEPER_TAG=<previous> ./scripts/deploy-oci.sh` |
 | Back up a Campaign's kept Live audio too | `docker compose -f docker-compose.prod.yml exec web touch /data/files/<campaign_id>/.backup-live-audio` |
 | Check the cron job is installed | `ssh ubuntu@<instance> "crontab -l"` |

@@ -4,6 +4,37 @@ Notes for self-hosters on what an upgrade changes in your data. Every
 upgrade runs `alembic upgrade head` when the web container starts; there is
 nothing to run by hand.
 
+## A backup before every migration (E0-Platform.9)
+
+The web container now starts with `scripts/boot_migrate.py` before gunicorn.
+When the database holds data and this release has a migration it doesn't,
+the web container first writes `pg_dump -Fc` to the new `backups` volume as
+`pre-upgrade_<UTC stamp>_<old revision>.dump`, then upgrades. If the dump
+can't be written (no space, an unwritable volume), the container stops with
+`boot-migrate: pre-upgrade backup failed (...); not migrating` and your
+database stays at its old revision. Free the space and start it again. A
+Postgres advisory lock makes a second web replica wait; it then finds the
+schema at head and skips both steps. The newest `PRE_UPGRADE_BACKUPS_KEEP`
+(default 5) dumps are kept. If you upgrade by hand rather than with
+`scripts/deploy-oci.sh`, stop the worker first
+(`docker compose -f docker-compose.prod.yml stop worker`): compose replaces
+it only after the new web is healthy, and anything it writes in between is
+not in the dump.
+
+To undo an upgrade, restore that dump with
+`scripts/restore-db.sh --no-restart <dump>` and run the previous release
+(docs/OCI_DEPLOYMENT.md, "Rolling back"). Starting an older image against a
+database a newer one has upgraded stops with a `boot-migrate:` line naming
+the revision it doesn't know, instead of running on a schema it wasn't built
+for.
+
+The images are also tagged now: `lorekeeper-web` (web and worker),
+`lorekeeper-ml`, `lorekeeper-stt` and `lorekeeper-nginx`, all at
+`${LOREKEEPER_TAG:-latest}`. `scripts/deploy-oci.sh` builds them from source
+with `docker buildx bake -f docker-bake.hcl`; Lorekeeper publishes no images.
+The web image now includes the PostgreSQL 17 client (`pg_dump`,
+`pg_restore`, `psql`), which reads the bundled PostgreSQL 16 server.
+
 ## Requirement: PostgreSQL 15 or newer
 
 PostgreSQL 15+ (16 recommended; bundled). The compose stack ships

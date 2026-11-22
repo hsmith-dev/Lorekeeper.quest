@@ -192,6 +192,9 @@ os_aggregate_allowlist = [
   "^libpam(0g|-modules(-bin)?|-runtime)$", "^zlib1g$",
   "^libssl(\\d+(t64)?|-dev)$", "^openssl(-provider-legacy)?$",
   "^libldap(2|-[\\d.]+-\\d+)$", "^libsasl2-(\\d+|modules-db)$", "^libpq(5|-dev)$",
+  # postgresql-client-17's hard dependencies (E0-Platform.9): pg_wrapper (Perl) and the
+  # sensible-* shell scripts, run as separate programs; pg_dump itself is PostgreSQL-licensed.
+  "^postgresql-client-common$", "^sensible-utils$",
   # --- Debian (stt image: python:3.11-slim + ffmpeg) ---
   # The `ffmpeg` CLI and the GPL/LGPL libraries of its dependency closure
   # (codecs, libav*, Mesa/X11 pulled in by libavdevice). The stt sidecar runs
