@@ -117,7 +117,9 @@ def get_kind(name: str) -> JobKind:
 
 # Modules that register kinds (and backfills) at import time, imported by the
 # worker at start (LorekeeperWorker). This module's own built-ins need no entry.
-KIND_MODULES: tuple[str, ...] = ()
+KIND_MODULES: tuple[str, ...] = (
+    "app.jobs.world",  # backfill.mentions and the suggested_mentions_v1 backfill (E0-WorldCore.7)
+)
 
 
 def load_kind_modules() -> None:

@@ -86,6 +86,13 @@ register(JobKind(name="test_b.onsave", queue=JobQueue.ONSAVE, timeout_s=10, hand
 @pytest.fixture(autouse=True)
 async def only_this_tests_jobs(db):
     await db.execute(sa.update(Job).where(Job.status.in_(["queued", "running"])).values(status="cancelled"))
+    # A feature's real backfill rows (suggested_mentions_v1, E0-WorldCore.7) are
+    # registered once their module is imported: park them, so a runner pass here
+    # advances only this test's row (tests/jobs/test_world_backfill.py re-queues its own).
+    features = [n for n in backfill.BACKFILLS if not n.startswith("test_")]
+    if features:
+        await db.execute(sa.update(DataBackfill).where(
+            DataBackfill.name.in_(features), DataBackfill.status.in_(["queued", "running"])).values(status="done"))
     await db.commit()
 
 

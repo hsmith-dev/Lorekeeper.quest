@@ -255,12 +255,12 @@ async def test_ambiguity_name_then_mentions_then_created_at_then_id(db, ev4, gm)
     by_alias = await _create(db, gm, "Bramwell")
     await _alias(db, gm, by_alias, "Bram")
     by_name = await _create(db, gm, "Bram")
-    await apply_change(db, gm, AddMention(entity_id=by_alias.id, journal_id=entry))
+    await apply_change(db, gm, AddMention(entity_id=by_alias.id, journal_id=entry, confirmed=True))
     assert _spans(await match_names(db, gm, "Bram")) == [("Bram", by_name.id)]  # a name beats an alias
 
     await _create(db, gm, "Corin")
     loud = await _create(db, gm, "Corin")
-    await apply_change(db, gm, AddMention(entity_id=loud.id, journal_id=entry))
+    await apply_change(db, gm, AddMention(entity_id=loud.id, journal_id=entry, confirmed=True))
     assert _spans(await match_names(db, gm, "Corin")) == [("Corin", loud.id)]  # more visible Mentions
 
     newer, older = await _create(db, gm, "Daven"), await _create(db, gm, "Daven")
@@ -274,13 +274,15 @@ async def test_ambiguity_name_then_mentions_then_created_at_then_id(db, ev4, gm)
     assert _spans(await match_names(db, gm, "Evran")) == [("Evran", min(twins, key=lambda t: str(t.id)).id)]
 
 
-async def test_mentions_count_only_visible_ones(db, ev4, gm):
+async def test_mentions_count_only_visible_confirmed_ones(db, ev4, gm):
     first, second = ev4.a.ids["journal_entries"][:2]
     a = await _party(db, gm, await _create(db, gm, "Fennick"))
     b = await _party(db, gm, await _create(db, gm, "Fennick"))
     for entry in (first, second):
-        await apply_change(db, gm, AddMention(entity_id=a.id, journal_id=entry))
-    await apply_change(db, gm, AddMention(entity_id=b.id, journal_id=first))
+        await apply_change(db, gm, AddMention(entity_id=a.id, journal_id=entry, confirmed=True))
+    await apply_change(db, gm, AddMention(entity_id=b.id, journal_id=first, confirmed=True))
+    # A suggested (unconfirmed) Mention never counts (E0-WorldCore.7).
+    await apply_change(db, gm, AddMention(entity_id=b.id, journal_id=second))
     await set_visibility(db, gm, RecordRef(kind="journal", id=second), "gm")
     by_id = {c.entity_id: c.mention_count for c in await candidates(db, gm, "Fennick", limit=100)}
     assert (by_id[a.id], by_id[b.id]) == (2, 1)
@@ -296,7 +298,8 @@ async def test_candidates(db, ev4, gm):
     other = await _create(db, gm, "Zephyrine Quill")
     smith = await _create(db, gm, "Hobb")
     await _alias(db, gm, smith, "Aldred the Smith")
-    await apply_change(db, gm, AddMention(entity_id=aldric.id, journal_id=ev4.a.ids["journal_entries"][0]))
+    await apply_change(db, gm, AddMention(entity_id=aldric.id, journal_id=ev4.a.ids["journal_entries"][0],
+                                          confirmed=True))
     top = await candidates(db, gm, "Aldrik")
     assert isinstance(top[0], NameCandidate) and top[0].entity_id == aldric.id
     assert 0 < top[0].score <= 1 and top[0].mention_count == 1 and top[0].matched == "Aldric"
@@ -326,7 +329,7 @@ async def test_candidates_tie_break(db, ev4, gm):
     entry = ev4.a.ids["journal_entries"][0]
     b, a = await _create(db, gm, "Gamma Brin"), await _create(db, gm, "Gamma Arn")
     loud = await _create(db, gm, "Gamma Crin")
-    await apply_change(db, gm, AddMention(entity_id=loud.id, journal_id=entry))
+    await apply_change(db, gm, AddMention(entity_id=loud.id, journal_id=entry, confirmed=True))
     ranked = [c for c in await candidates(db, gm, "Gamma", limit=100) if c.name.startswith("Gamma")]
     assert len({c.score for c in ranked}) == 1  # WRatio ties: partial match of the same token
     assert [c.entity_id for c in ranked] == [loud.id, a.id, b.id]
