@@ -2,13 +2,51 @@
 title: 'E0-Journal.2: Journal writers recompute every index column'
 type: 'feature'
 created: '2026-11-21'
-status: 'in-progress'
+status: 'in-review'
 baseline_revision: '90c8ea18b688baa1306717a61e03e6f3b2007475'
 review_loop_iteration: 0
 followup_review_recommended: false
 context: []
 warnings: ['oversized']
-deferred: []
+deferred:
+  - summary: >-
+      No durable sweep enqueues journal.reembed for rows left with NULL vectors when the after-commit hook is lost.
+    evidence: |-
+      Hooks are at most once (app/core/hooks.py); a crash between commit and dispatch leaves NULL vectors until a manual /reindex. Follow-up: a register_backfill cursor over NULL-embedding rows.
+    location: >-
+      src/backend/app/hooks/journal.py
+    severity: medium
+  - summary: >-
+      A reembed Job running while a Narrative-only edit (same entry_hash) commits can write vectors from the old Narrative.
+    evidence: |-
+      reembed_job reads the entry, calls ml, then writes; the key covers only the Shorthand hash, so the edit's own fallback (if any) dedups onto the running Job. Needs a re-check of the text under FOR UPDATE before writing.
+    location: >-
+      src/backend/app/services/journal_service.py:reembed_job
+    severity: medium
+  - summary: >-
+      A detached derived tag reappears on the next text edit or reindex of the entry.
+    evidence: |-
+      detach deletes the link; _replace_derived_tags re-derives it from NER. A suppression record (or detaching as a negative manual row) is a product decision.
+    location: >-
+      src/backend/app/services/journal_service.py:_replace_derived_tags
+    severity: low
+  - summary: >-
+      Pre-existing rows keep their stored entry_hash (seed rows use the old seed hash); no recompute migration.
+    evidence: |-
+      Client hashes already equal sha256(trim.lower); only demo-seed rows differ. A recompute could collide with uq_journal_entries_campaign_user_entry_hash and needs a collision policy.
+    severity: low
+  - summary: >-
+      A GM edit of another author's entry into a collision with that author's hidden entry answers 409 (existence oracle).
+    evidence: |-
+      update_journal_entry checks the author's dedup key and the unique constraint; for E0-Journal.3 / E0-QA.14 to decide.
+    severity: medium
+  - summary: >-
+      The generate route's Valkey check_hash is not best-effort (Valkey down is a 500); unchanged from before.
+    evidence: |-
+      Pre-existing; the service wrappers swallow Valkey errors but the route calls check_hash directly.
+    location: >-
+      src/backend/app/api/routes/journals.py:generate_journal
+    severity: low
 ---
 
 <intent-contract>
@@ -80,6 +118,47 @@ deferred: []
 
 **Acceptance Criteria:**
 - Given the full backend suite and gates on CI, when run, then they are green with no new baseline lines.
+
+## Spec Change Log
+
+## Review Triage Log
+
+### 2026-11-21 — Review pass
+- verdicts: 33 findings — high 1, medium 9, low 12, false 7, maybe-false 4
+- findings:
+  - `[false]` `[reject]` Blind: reembed key ignores Narrative — enqueue dedups only active Jobs; a finished Job frees the key, and a queued one re-reads the current row.
+  - `[low]` `[reject]` Blind: NER failure also clears vectors — deliberate: one failure signal (NULL vector) drives the reembed fallback, which redoes both.
+  - `[medium]` `[patch]` Blind/Edge: /reindex lost batching — restored one embed_many for the Campaign before any write; per-row reindex_entry with precomputed vectors.
+  - `[medium]` `[patch]` Blind/Edge/VerifGap: /reindex 500 on ValueError — now caught with ModelServiceError: rollback, 503.
+  - `[low]` `[defer]` Blind: generate route check_hash not best-effort — pre-existing.
+  - `[low]` `[reject]` Blind: create skips the service Valkey check — the route checks first and the unique constraint backs it.
+  - `[maybe-false]` `[reject]` Blind: JS/Python normalization parity on exotic Unicode — only client UX dedup; the server hash is authoritative.
+  - `[low]` `[defer]` Blind: existing rows' hashes not recomputed — see deferred.
+  - `[false]` `[reject]` Blind: update_journal_entry has no caller — the PUT route is E0-Journal.3 by the epic's own story split.
+  - `[low]` `[patch]` Blind: session_date not validated — `_normalize_changes` rejects a non-date.
+  - `[maybe-false]` `[reject]` Blind: _reload fallback unloaded tags — fallback only when ctx cannot see its own write, which no writer path produces.
+  - `[medium]` `[patch]` Blind/Edge: Tag upsert lock order — keys sorted before the multi-row upsert.
+  - `[medium]` `[defer]` Blind: no sweep behind the at-most-once hook — deferred.
+  - `[false]` `[reject]` Blind: visibility silently overridden for unreviewed saves — the rule is the intended safe default and is documented.
+  - `[low]` `[reject]` Blind: missing-tests list — covered by the VerifGap patches below; the 503 route test exists (tests/test_ml_callers.py).
+  - `[low]` `[reject]` Blind: `test_dedup_drop_hash_exists` is weak — harmless.
+  - `[medium]` `[patch]` VerifGap: entry_updated hook path untested — added test_update_with_ml_down_enqueues_reembed_and_publishes.
+  - `[medium]` `[patch]` VerifGap: publish-failure guard untested — added test_failed_publish_still_enqueues_the_reembed.
+  - `[low]` `[reject]` VerifGap: multi-entry reindex rollback untested — vectors are now computed before any write, so the partial-write case cannot occur.
+  - `[high]` `[patch]` Edge: attach_tag of a hidden (shorthand) link raises PK IntegrityError (500) — attach is now an upsert that sets `manual`.
+  - `[medium]` `[patch]` Edge: manual attach of a derived link stays derived and is dropped on the next edit — same upsert promotes it to `manual`.
+  - `[low]` `[defer]` Edge: detached derived tag reappears on recompute — deferred (product decision).
+  - `[medium]` `[defer]` Edge: running reembed Job vs Narrative-only edit race — deferred.
+  - `[low]` `[reject]` Edge: Valkey drop failure leaves stale key — logged, expires with DEDUP_TTL; unique constraint is the authority.
+  - `[false]` `[reject]` Edge: reindex non-ml failure (dup of the patched 503 row) — patched above.
+  - `[false]` `[reject]` Edge: reindex large Campaign (dup of batching row) — patched above.
+  - `[false]` `[reject]` Edge: tag deadlock (dup) — patched above.
+  - `[low]` `[patch]` Edge: seed lookup misses case/whitespace variants — lookup also matches compute_entry_hash(shorthand).
+  - `[maybe-false]` `[reject]` Edge (claim): routes still write journal_tags — manual links are route-owned by design; journal_service owns derived links only.
+  - `[low]` `[reject]` Intent: grep test maps `notes` to `shorthand` — `notes` is the API name; the column is `shorthand`.
+  - `[low]` `[reject]` Intent: enqueue after commit, not in-transaction — forced by the layer contract (services never import app.jobs); documented.
+  - `[maybe-false]` `[reject]` Intent: unreviewed saves broader than offline — the one-step path exists only for the offline queue.
+  - `[false]` `[reject]` CI EV-4 probe_reindex leak — not a leak of GM content: the reindex re-derived tags and dropped fixture tags; fixed by reindex updating search columns only (tags=False).
 
 ## Design Notes
 

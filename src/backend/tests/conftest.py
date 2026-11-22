@@ -153,6 +153,12 @@ async def db():
     async with session_factory() as session:
         yield session
         await session.rollback()
+    # Hook handlers (app/core/hooks.py) run as background tasks on this
+    # loop, on this engine: finish them before the engine and the loop go,
+    # or a handler's half-open transaction outlives the test and its locks
+    # block later DDL (E0-Journal.2: every journal write emits a hook).
+    from app.core import hooks
+    await hooks.drain(timeout=30)
     await engine.dispose()
 
 

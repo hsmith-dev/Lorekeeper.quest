@@ -48,7 +48,7 @@ _BACKEND_DIR = Path(__file__).resolve().parents[1]
 if str(_BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(_BACKEND_DIR))
 
-from sqlalchemy import func, select  # noqa: E402
+from sqlalchemy import func, or_, select  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
 
 import app.db.models  # noqa: E402,F401  (registers every mapper)
@@ -328,8 +328,9 @@ async def seed_campaign(
     for e in seed["entries"]:
         entry = await session.scalar(select(JournalEntry).where(
             JournalEntry.campaign_id == campaign.id, JournalEntry.user_id == user.id,
-            JournalEntry.shorthand == e["shorthand"],
-        ))
+            or_(JournalEntry.shorthand == e["shorthand"],
+                JournalEntry.entry_hash == journal_service.compute_entry_hash(e["shorthand"])),
+        ).limit(1))
         if entry is None:
             # No hooks (a bulk load, no request), no tags and no ml here: the
             # vectors, if any, come from the reindex below (strict, so an

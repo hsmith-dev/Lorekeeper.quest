@@ -427,6 +427,32 @@ async def test_delete_removes_row_links_and_dedup_key(db, world, emitted, publis
     await _create(db, world)
 
 
+async def test_update_with_ml_down_enqueues_reembed_and_publishes(db, world, monkeypatch):
+    entry = await _create(db, world)
+    await hooks.drain()
+    _ml(monkeypatch, _DownML())
+    entry = await journal_service.update_journal_entry(db, world.gm, entry, {"notes": "Mira left the mill"})
+    await hooks.drain()
+    row = await _row(db, entry.id)
+    assert row.embedding is None and row.party_embedding is None
+    key = journal_service.reembed_key(entry.id, row.entry_hash)
+    assert key == f"journal.reembed:{entry.id}:{journal_service.compute_entry_hash('Mira left the mill')}"
+    job = (await db.execute(sa.select(Job).where(Job.idempotency_key == key)
+                            .execution_options(populate_existing=True))).scalar_one()
+    assert job.kind == "journal.reembed"
+
+
+async def test_failed_publish_still_enqueues_the_reembed(db, world, ml_down, monkeypatch):
+    async def boom(campaign_id, domain, id):  # noqa: A002
+        raise RuntimeError("valkey down")
+
+    monkeypatch.setattr(journal_hooks, "publish_campaign_event", boom)
+    entry = await _create(db, world)
+    await hooks.drain()
+    key = journal_service.reembed_key(entry.id, entry.entry_hash)
+    assert (await db.execute(sa.select(Job.id).where(Job.idempotency_key == key))).first() is not None
+
+
 # ── Reindex ────────────────────────────────────────────────────────────────
 
 async def test_reindex_route_uses_reindex_entry_and_emits_nothing(db, world, client, emitted):
@@ -440,7 +466,8 @@ async def test_reindex_route_uses_reindex_entry_and_emits_nothing(db, world, cli
     assert _close(list(row.embedding), fake_vector("Zorblax did it The tower fell near Neverwinter."))
     assert _close(list(row.party_embedding), fake_vector("The tower fell near Neverwinter."))
     assert tuple(await _tsv_hits(db, entry.id, "zorblax")) == (True, False)
-    assert ("Neverwinter", "location") in await _links(db, entry.id)
+    # Search columns only: tags are the writers' and the reembed Job's.
+    assert await _links(db, entry.id) == {}
     assert emitted == []
 
 

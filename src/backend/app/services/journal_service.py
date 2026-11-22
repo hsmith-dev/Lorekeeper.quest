@@ -259,6 +259,9 @@ async def _tag_ids(db: AsyncSession, keys: list[tuple[str, Any]]) -> dict[tuple[
     """Each (name, type)'s global Tag id, inserted when missing (one upsert)."""
     if not keys:
         return {}
+    # One lock order for every writer: concurrent upserts of overlapping tag
+    # sets never deadlock.
+    keys = sorted(keys, key=lambda k: (k[0], str(getattr(k[1], "value", k[1]))))
     ins = pg_insert(Tag).values([{"id": uuid.uuid4(), "name": n, "tag_type": t} for n, t in keys])
     # DO UPDATE (a no-op) rather than DO NOTHING, so RETURNING yields existing rows too.
     stmt = ins.on_conflict_do_update(constraint="uq_tag_name_type", set_={"name": ins.excluded.name}) \
@@ -408,6 +411,8 @@ def _normalize_changes(changes: Mapping[str, Any]) -> dict[str, Any]:
             raise ValueError(f"update_journal_entry: {key!r} is not an editable field")
         if field in TEXT_FIELDS and not isinstance(value, str):
             raise ValueError(f"update_journal_entry: {key!r} must be a string")
+        if field == "session_date" and value is not None and not isinstance(value, date):
+            raise ValueError("update_journal_entry: 'session_date' must be a date or None")
         out[field] = Visibility(value) if field == "visibility" else value
     return out
 
