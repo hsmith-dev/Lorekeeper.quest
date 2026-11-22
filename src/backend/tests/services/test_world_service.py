@@ -510,7 +510,11 @@ async def test_revert_create_merge_and_visibility(db, ev4, gm, stale):
     vis_row = [r for r in await _changes(db, vis_row_entity.id) if r.field == "visibility"][0]
     assert await _code(revert_change(db, gm, vis_row.id)) == "not_revertible"
     merge = await apply_change(db, gm.as_system("merge"), Merge(entity_id=entity.id, survivor_id=survivor.id))
-    assert await _code(revert_change(db, gm, merge.id)) == "not_revertible"
+    # E0-WorldCore.9: a merge is revertible; a revert of that revert is not.
+    unmerge = await revert_change(db, gm, merge.id)
+    assert (unmerge.op, unmerge.field, unmerge.reverted_change_id) == ("revert", None, merge.id)
+    assert (await _get(db, Entity, entity.id)).merged_into_id is None
+    assert await _code(revert_change(db, gm, unmerge.id)) == "not_revertible"
     assert await _code(revert_change(db, gm, uuid.uuid4())) == "not_found"
     fresh = await _create(db, gm)
     await revert_change(db, gm, (await _changes(db, fresh.id))[0].id)
@@ -683,6 +687,260 @@ async def test_merge_moves_quest_steps_only_when_safe(db, ev4, gm):
     moved = await apply_change(db, gm, AddQuestStep(entity_id=other.id, text="moves"))
     await apply_change(db, gm.as_system("merge"), Merge(entity_id=other.id, survivor_id=gm_survivor.id))
     assert (await _get(db, QuestStep, uuid.UUID(moved.new_value["step_id"]))).quest_entity_id == gm_survivor.id
+
+
+# ── merge_entities (E0-WorldCore.9) ────────────────────────────────────────
+
+async def _publish(db, gm, entity_id, field=None, value="party"):
+    await set_visibility(db, gm, RecordRef(kind="entity", id=entity_id, field=field), value)
+
+
+async def _rows_of(db, model, column, entity_id):
+    return list((await db.execute(sa.select(model).where(column == entity_id)
+                                  .execution_options(populate_existing=True))).scalars())
+
+
+async def test_merge_floors_aliases_by_the_aliases_field(db, ev4, gm):
+    survivor = await _create(db, gm, name="Mira")
+    absorbed = await _create(db, gm, name="Hooded Woman")
+    for e in (survivor, absorbed):
+        await _publish(db, gm, e.id)
+    await _publish(db, gm, absorbed.id, "aliases", "gm")
+    await apply_change(db, gm, AddAlias(entity_id=absorbed.id, alias="The Hood"))
+    result = await ws.merge_entities(db, gm, survivor.id, absorbed.id)
+    await db.commit()
+    aliases = {a.alias: a for a in await _rows_of(db, EntityAlias, EntityAlias.entity_id, survivor.id)}
+    assert aliases["The Hood"].visibility_floor == "gm"
+    assert aliases["Hooded Woman"].visibility_floor is None  # the name itself was Party-visible
+    player = await _player(ev4, db)
+    seen = {a.alias for a in (await db.execute(ws.scoped_select(EntityAlias, player))).scalars()}
+    assert "The Hood" not in seen and "Hooded Woman" in seen
+    assert result.warning is None and result.change_id is not None
+    assert [(d["kind"], d["id"]) for d in result.downgrades] == [("alias", str(aliases["The Hood"].id))]
+    # The survivor's own Visibility is untouched.
+    s = await _get(db, Entity, survivor.id)
+    assert (s.visibility, s.field_visibility) == ("party", {})
+
+
+async def test_merge_repoints_entity_refs_only_when_safe(db, ev4, gm, stale):
+    # Safe: both Party.
+    survivor, absorbed = await _create(db, gm, name="Mira"), await _create(db, gm, name="Old Mira")
+    bell = await _create(db, gm, type="item", name="Bell", attributes={"holder_entity_id": str(absorbed.id)})
+    for e in (survivor, absorbed, bell):
+        await _publish(db, gm, e.id)
+    # Unsafe: a GM-only Entity into a Party one.
+    party, secret = await _create(db, gm, name="Wren"), await _create(db, gm, name="Shadow")
+    await _publish(db, gm, party.id)
+    cup = await _create(db, gm, type="item", name="Cup", attributes={"holder_entity_id": str(secret.id)})
+    # The survivor's own ref to the absorbed one is never turned into a self-ref.
+    town = await _create(db, gm, type="location", name="Town")
+    old_town = await _create(db, gm, type="location", name="Old Town")
+    await apply_change(db, gm, UpdateField(entity_id=town.id, field="attributes.parent_location_entity_id",
+                                           value=str(old_town.id)))
+    await db.commit()
+    stale.clear()
+    first = await ws.merge_entities(db, gm, survivor.id, absorbed.id)
+    assert (await _get(db, Entity, bell.id)).attributes["holder_entity_id"] == str(survivor.id)
+    assert first.moved_counts["attribute_refs"] == 1
+    await ws.merge_entities(db, gm, party.id, secret.id)
+    assert (await _get(db, Entity, cup.id)).attributes["holder_entity_id"] == str(secret.id)
+    await ws.merge_entities(db, gm, town.id, old_town.id)
+    assert (await _get(db, Entity, town.id)).attributes["parent_location_entity_id"] == str(old_town.id)
+    assert {bell.id, cup.id, town.id} <= {r.id for r in stale}
+    # No history row on the holders: the one merge row is on the survivor.
+    assert [r.op for r in await _changes(db, bell.id)] == ["create_entity", "update_field"]
+
+
+async def test_merge_revert_restores_everything(db, ev4, gm, stale):
+    a = ev4.a.campaign_id
+    survivor = await _create(db, gm, name="Mira")
+    absorbed = await _create(db, gm, name="Old Mira")  # GM-only: every moved row is floored
+    third = await _create(db, gm)
+    await apply_change(db, gm, AddAlias(entity_id=absorbed.id, alias="Grey Lady"))
+    await apply_change(db, gm, AddAlias(entity_id=absorbed.id, alias="Shared"))
+    await apply_change(db, gm, AddAlias(entity_id=survivor.id, alias="shared"))
+    mention = await apply_change(db, gm, AddMention(entity_id=absorbed.id, journal_id=_entry(ev4)))
+    rt = await _rel_type(db, a)
+    out_edge = await apply_change(db, gm, AddRelationship(entity_id=third.id, target_entity_id=absorbed.id,
+                                                          relationship_type_id=rt.id, note="kin"))
+    loop = await apply_change(db, gm, AddRelationship(entity_id=absorbed.id, target_entity_id=survivor.id,
+                                                      relationship_type_id=rt.id, note="loop"))
+    bell = await _create(db, gm, type="item", name="Bell", attributes={"holder_entity_id": str(absorbed.id)})
+    await db.commit()
+
+    async def snapshot():
+        out = {}
+        for model in (EntityAlias, EntityMention, EntityRelationship):
+            rows = (await db.execute(sa.select(model).where(model.campaign_id == a)
+                                     .execution_options(populate_existing=True))).scalars().all()
+            out[model.__tablename__] = sorted(
+                (str(r.id), str(getattr(r, "entity_id", None)), str(getattr(r, "source_entity_id", None)),
+                 str(getattr(r, "target_entity_id", None)), r.visibility_floor, getattr(r, "note", None),
+                 getattr(r, "alias", None)) for r in rows)
+        out["bell"] = dict((await _get(db, Entity, bell.id)).attributes)
+        return out
+
+    before = await snapshot()
+    merge = await ws.merge_entities(db, gm, survivor.id, absorbed.id)
+    await db.commit()
+    assert await snapshot() != before
+    stale.clear()
+    undo = await revert_change(db, gm, merge.change_id)
+    await db.commit()
+    assert (undo.op, undo.entity_id, undo.field, undo.write_visibility) == ("revert", survivor.id, None, "gm")
+    assert (await _get(db, Entity, absorbed.id)).merged_into_id is None
+    assert await snapshot() == before
+    assert (await _get(db, EntityRelationship, uuid.UUID(loop.new_value["relationship_id"]))).note == "loop"
+    assert (await _get(db, EntityMention, uuid.UUID(mention.new_value["mention_id"]))).entity_id == absorbed.id
+    assert (await _get(db, EntityRelationship, uuid.UUID(out_edge.new_value["relationship_id"]))
+            ).target_entity_id == absorbed.id
+    assert {survivor.id, absorbed.id, bell.id} <= {r.id for r in stale}
+    # The absorbed Entity is live again: it takes edits and can be merged again.
+    await apply_change(db, gm, UpdateField(entity_id=absorbed.id, field="description", value="Back"))
+    again = await ws.merge_entities(db, gm, survivor.id, absorbed.id)
+    assert again.change_id != merge.change_id
+
+
+async def test_merge_revert_superseded_force_and_gone_survivor(db, ev4, gm):
+    survivor, absorbed = await _create(db, gm, name="Mira"), await _create(db, gm, name="Old Mira")
+    await apply_change(db, gm, AddAlias(entity_id=absorbed.id, alias="Grey Lady"))
+    await apply_change(db, gm, AddAlias(entity_id=absorbed.id, alias="Sea Witch"))
+    merge = await ws.merge_entities(db, gm, survivor.id, absorbed.id)
+    await apply_change(db, gm, RemoveAlias(entity_id=survivor.id, alias="Grey Lady"))
+    await db.commit()
+    count = len(await _changes(db, survivor.id))
+    assert await _code(revert_change(db, gm, merge.change_id)) == "superseded"
+    assert len(await _changes(db, survivor.id)) == count
+    assert (await _get(db, Entity, absorbed.id)).merged_into_id == survivor.id
+    undo = await revert_change(db, gm, merge.change_id, force=True)
+    assert undo.new_value["skipped"] == 1
+    assert {x.alias for x in await _rows_of(db, EntityAlias, EntityAlias.entity_id, absorbed.id)} == {"Sea Witch"}
+    assert (await _get(db, Entity, absorbed.id)).merged_into_id is None
+
+    # A survivor deleted, or merged away, since the merge.
+    s2, a2, s3, a3, end = [await _create(db, gm) for _ in range(5)]
+    m2 = await ws.merge_entities(db, gm, s2.id, a2.id)
+    await apply_change(db, gm, DeleteEntity(entity_id=s2.id))
+    assert await _code(revert_change(db, gm, m2.change_id)) == "deleted"
+    m3 = await ws.merge_entities(db, gm, s3.id, a3.id)
+    await ws.merge_entities(db, gm, end.id, s3.id)
+    assert await _code(revert_change(db, gm, m3.change_id)) == "merged"
+
+
+async def test_a_merge_reverted_once_is_superseded_after_a_re_merge(db, ev4, gm):
+    survivor, absorbed = await _create(db, gm, name="Mira"), await _create(db, gm, name="Old Mira")
+    await apply_change(db, gm, AddAlias(entity_id=absorbed.id, alias="Grey Lady"))
+    m1 = await ws.merge_entities(db, gm, survivor.id, absorbed.id)
+    await revert_change(db, gm, m1.change_id)
+    m2 = await ws.merge_entities(db, gm, survivor.id, absorbed.id)
+    await db.commit()
+    count = len(await _changes(db, survivor.id))
+    for force in (False, True):
+        assert await _code(revert_change(db, gm, m1.change_id, force=force)) == "superseded"
+    assert len(await _changes(db, survivor.id)) == count
+    assert (await _get(db, Entity, absorbed.id)).merged_into_id == survivor.id
+    # m2's own revert still works.
+    await revert_change(db, gm, m2.change_id)
+    assert (await _get(db, Entity, absorbed.id)).merged_into_id is None
+    assert {a.alias for a in await _rows_of(db, EntityAlias, EntityAlias.entity_id, absorbed.id)} == {"Grey Lady"}
+
+
+async def test_merge_revert_moves_quest_steps_back(db, ev4, gm):
+    survivor, absorbed = await _create(db, gm, type="quest"), await _create(db, gm, type="quest")
+    step = await apply_change(db, gm, AddQuestStep(entity_id=absorbed.id, text="moves"))
+    step_id = uuid.UUID(step.new_value["step_id"])
+    merge = await ws.merge_entities(db, gm, survivor.id, absorbed.id)
+    assert (await _get(db, QuestStep, step_id)).quest_entity_id == survivor.id
+    await revert_change(db, gm, merge.change_id)
+    assert (await _get(db, QuestStep, step_id)).quest_entity_id == absorbed.id
+
+
+async def test_merge_revert_restores_a_stale_normalized_alias(db, ev4, gm):
+    survivor, absorbed = await _create(db, gm, name="Mira"), await _create(db, gm, name="Old Mira")
+    db.add(EntityAlias(campaign_id=ev4.a.campaign_id, entity_id=absorbed.id, alias="Sister Grey",
+                       normalized_alias="sister grey"))  # the old casefold key
+    await db.flush()
+    merge = await ws.merge_entities(db, gm, survivor.id, absorbed.id)
+    await revert_change(db, gm, merge.change_id)
+    rows = await _rows_of(db, EntityAlias, EntityAlias.entity_id, absorbed.id)
+    assert [(a.alias, a.normalized_alias) for a in rows] == [("Sister Grey", "sister grey")]
+
+
+async def test_merge_counts_refs_left_on_the_absorbed_id(db, ev4, gm):
+    party, secret = await _create(db, gm, name="Wren"), await _create(db, gm, name="Shadow")
+    await _publish(db, gm, party.id)
+    await _create(db, gm, type="item", name="Cup", attributes={"holder_entity_id": str(secret.id)})
+    preview = await ws.merge_entities(db, gm, party.id, secret.id, preview=True)
+    done = await ws.merge_entities(db, gm, party.id, secret.id)
+    for result in (preview, done):
+        assert (result.moved_counts["attribute_refs"], result.moved_counts["attribute_refs_left"]) == (0, 1)
+
+
+async def test_merge_locks_both_entities_in_id_order(db, ev4, gm, monkeypatch):
+    locked: list[uuid.UUID] = []
+    pair: set[uuid.UUID] = set()
+    real = ws._Run.first
+
+    async def first(self, stmt):
+        if getattr(stmt, "_for_update_arg", None) is not None and stmt.column_descriptions[0].get("entity") is Entity:
+            from sqlalchemy.dialects import postgresql
+            params = stmt.compile(dialect=postgresql.dialect()).params
+            locked.extend(v for v in params.values() if v in pair)
+        return await real(self, stmt)
+
+    monkeypatch.setattr(ws._Run, "first", first)
+    for _ in range(2):
+        x, y = await _create(db, gm), await _create(db, gm)
+        pair.clear()
+        pair.update({x.id, y.id})
+        for survivor, absorbed in ((x, y), (y, x)):
+            locked.clear()
+            merge = await ws.merge_entities(db, gm, survivor.id, absorbed.id)
+            assert locked[:2] == sorted([x.id, y.id]), (survivor.id, absorbed.id)
+            locked.clear()
+            await revert_change(db, gm, merge.change_id)
+            assert locked[:2] == sorted([x.id, y.id])
+
+
+async def test_merge_preview_writes_nothing(db, ev4, gm, events):
+    a = ev4.a.campaign_id
+    survivor = await _create(db, gm, name="Mira")
+    await _publish(db, gm, survivor.id)
+    absorbed = await _create(db, gm, name="Old Mira")  # GM-only into Party
+    await apply_change(db, gm, AddAlias(entity_id=absorbed.id, alias="Grey Lady"))
+    await apply_change(db, gm, AddAlias(entity_id=survivor.id, alias="Little Mira"))
+    await apply_change(db, gm, AddMention(entity_id=absorbed.id, journal_id=_entry(ev4)))
+    third = await _create(db, gm)
+    rt = await _rel_type(db, a)
+    await apply_change(db, gm, AddRelationship(entity_id=absorbed.id, target_entity_id=third.id,
+                                               relationship_type_id=rt.id))
+    await db.commit()
+    await hooks.drain()
+    events.clear()
+    before = await _counts(db, a)
+    preview = await ws.merge(db, gm, survivor.id, absorbed.id, preview=True)
+    await db.commit()
+    await hooks.drain()
+    assert await _counts(db, a) == before and events == []
+    assert (await _get(db, Entity, absorbed.id)).merged_into_id is None
+    assert preview.change_id is None and preview.warning == ws.PARTY_WITH_GM_ONLY
+    assert {d["kind"] for d in preview.downgrades} == {"alias", "mention", "relationship"}
+    assert preview.aliases == ["Grey Lady", "Little Mira", "Old Mira"] and preview.mention_count == 1
+    assert [(r["source_entity_id"], r["target_entity_id"]) for r in preview.relationships] == [(survivor.id, third.id)]
+    # The real merge reports the same.
+    done = await ws.merge_entities(db, gm, survivor.id, absorbed.id)
+    assert done.moved_counts == preview.moved_counts and done.warning == preview.warning
+    assert len(done.downgrades) == len(preview.downgrades)
+    # A preview validates like the merge.
+    item = await _create(db, gm, type="item")
+    assert await _code(ws.merge_entities(db, gm, survivor.id, survivor.id, preview=True)) == "invalid"
+    assert await _code(ws.merge_entities(db, gm, survivor.id, item.id, preview=True)) == "invalid"
+    assert await _code(ws.merge_entities(db, gm, survivor.id, absorbed.id, preview=True)) == "merged"
+    assert await _code(ws.merge_entities(db, gm, survivor.id, uuid.uuid4(), preview=True)) == "not_found"
+    player = await _player(ev4, db)
+    for flag in (True, False):
+        with pytest.raises(NotFound):
+            await ws.merge_entities(db, player, survivor.id, third.id, preview=flag)
 
 
 # ── Deleted / merged Entities are GM-only ──────────────────────────────────
@@ -1021,18 +1279,27 @@ def _as_system_refs(path: Path) -> list[int]:
                                                                            and n.id == "as_system")]
 
 
+def _as_system_functions(path: Path) -> set[str]:
+    """The module-level functions of `path` that reference as_system."""
+    tree = ast.parse(path.read_text())
+    return {node.name for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and any((isinstance(n, ast.Attribute) and n.attr == "as_system")
+                    or (isinstance(n, ast.Name) and n.id == "as_system") for n in ast.walk(node))}
+
+
 def test_world_service_builds_no_system_ctx():
-    """Only E0-WorldCore.9's merge wrapper may build as_system("merge") here;
-    this story builds none (the tests do). CI-8 and its Visibility gate pass."""
+    """Only E0-WorldCore.9's merge wrapper, `merge_entities`, builds
+    as_system("merge") here. CI-8 and its Visibility gate pass."""
     spec = importlib.util.spec_from_file_location("csq_wc3", REPO / "scripts" / "check_scoped_queries.py")
     csq = importlib.util.module_from_spec(spec)
     sys.modules.setdefault(spec.name, csq)  # dataclasses look their module up
     spec.loader.exec_module(csq)
     assert csq.check() == [] and csq.check_visibility_writes() == []
     app_dir = REPO / "src" / "backend" / "app"
-    assert _as_system_refs(app_dir / "services" / "world_service.py") == []
+    world = app_dir / "services" / "world_service.py"
+    assert len(_as_system_refs(world)) == 1 and _as_system_functions(world) == {"merge_entities"}
     users = {p.relative_to(app_dir.parent).as_posix() for p in app_dir.rglob("*.py") if _as_system_refs(p)}
-    assert users <= {"app/access/context.py", "app/services/journal_service.py"}
+    assert users <= {"app/access/context.py", "app/services/journal_service.py", "app/services/world_service.py"}
 
 
 # ── Adversarial review: gaps and probes ────────────────────────────────────
@@ -1326,3 +1593,110 @@ async def test_hidden_aliases_hide_alias_rows_and_alias_history(db, ev4, gm):
         EntityAlias.entity_id == entity.id))).scalars().all()) == 2
     seen = {r["id"] for r in await _projected_history(db, player, entity.id)}
     assert str(shown.id) in seen and str(hidden.id) not in seen
+
+
+# ── Merge and Mentions of the same entry (E0-WorldCore.7 coordination) ─────
+
+async def _mentions_of(db, entity_id) -> list[EntityMention]:
+    return list((await db.execute(sa.select(EntityMention).where(EntityMention.entity_id == entity_id)
+                                  .execution_options(populate_existing=True))).scalars().all())
+
+
+@pytest.mark.parametrize("survivor_confirmed", [False, True])
+async def test_merge_drops_an_absorbed_suggestion_the_survivor_has_and_revert_restores_it(
+        db, ev4, gm, survivor_confirmed):
+    entry = _entry(ev4)
+    survivor, absorbed = await _create(db, gm, name="Mira"), await _create(db, gm, name="Old Mira")
+    kept = await apply_change(db, gm, AddMention(entity_id=survivor.id, journal_id=entry,
+                                                 confirmed=survivor_confirmed, span_start=0, span_end=4))
+    dup = await apply_change(db, gm, AddMention(entity_id=absorbed.id, journal_id=entry, span_start=10, span_end=18))
+    dup_id = uuid.UUID(dup.new_value["mention_id"])
+
+    row = await apply_change(db, gm.as_system("merge"), Merge(entity_id=absorbed.id, survivor_id=survivor.id))
+    assert (row.new_value["moved"]["mentions"], row.new_value["moved"]["mentions_dropped"]) == (0, 1)
+    assert [m.id for m in await _mentions_of(db, survivor.id)] == [uuid.UUID(kept.new_value["mention_id"])]
+    assert await _get(db, EntityMention, dup_id) is None
+
+    # The survivor's Mention of the pair is still there when the suggestion comes back, under
+    # uq_entity_mentions_suggested (eed202f2eead): the revert must not violate it.
+    assert (await db.execute(sa.text(
+        "SELECT count(*) FROM pg_indexes WHERE indexname = 'uq_entity_mentions_suggested'"))).scalar_one() == 1
+    await revert_change(db, gm, row.id)
+    await db.flush()
+    back = await _get(db, EntityMention, dup_id)
+    assert (back.entity_id, back.confirmed, back.span_start, back.span_end) == (absorbed.id, False, 10, 18)
+    assert [m.id for m in await _mentions_of(db, survivor.id)] == [uuid.UUID(kept.new_value["mention_id"])]
+    await db.commit()  # the index holds at commit too
+
+
+async def test_merge_revert_skips_a_suggestion_the_absorbed_entity_has_again(db, ev4, gm):
+    """A dropped suggestion is not restored over a suggestion of the same pair the absorbed Entity holds
+    (the index would refuse it): with force it is skipped, without force the revert is superseded."""
+    entry = _entry(ev4)
+    survivor, absorbed = await _create(db, gm, name="Wren"), await _create(db, gm, name="Old Wren")
+    await apply_change(db, gm, AddMention(entity_id=survivor.id, journal_id=entry, span_start=0, span_end=4))
+    await apply_change(db, gm, AddMention(entity_id=absorbed.id, journal_id=entry, span_start=10, span_end=18))
+    row = await apply_change(db, gm.as_system("merge"), Merge(entity_id=absorbed.id, survivor_id=survivor.id))
+    # A suggestion of the same pair appears on the absorbed row behind the merge's back.
+    db.add(EntityMention(campaign_id=ev4.a.campaign_id, journal_id=entry, entity_id=absorbed.id,
+                         source_field="narrative", origin="manual", confirmed=False, span_start=30, span_end=34))
+    await db.flush()
+    assert await _code(revert_change(db, gm, row.id)) == "superseded"
+    undo = await revert_change(db, gm, row.id, force=True)
+    assert undo.new_value["skipped"] == 1
+    await db.commit()
+    assert len([m for m in await _mentions_of(db, absorbed.id) if not m.confirmed]) == 1
+
+
+async def test_a_merge_too_large_to_undo_is_not_revertible(db, ev4, gm, monkeypatch):
+    survivor, absorbed = await _create(db, gm, name="Cole"), await _create(db, gm, name="Old Cole")
+    for i in range(3):
+        await apply_change(db, gm, AddAlias(entity_id=absorbed.id, alias=f"Cole the {i}th"))
+    monkeypatch.setattr(ws, "MERGE_UNDO_MAX_BYTES", 64)
+    preview = await ws.merge_entities(db, gm, survivor.id, absorbed.id, preview=True)
+    assert preview.revertible is False
+    done = await ws.merge_entities(db, gm, survivor.id, absorbed.id)
+    assert done.revertible is False
+    row = await _get(db, EntityChange, done.change_id)
+    assert (row.new_value["revertible"], row.new_value["undo"]) == (False, None)
+    assert await _code(revert_change(db, gm, row.id)) == "not_revertible"
+
+
+async def test_concurrent_merges_sharing_holders_do_not_deadlock(db, ev4, gm):
+    """A absorbs into S1 while B absorbs into S2; A names B and B names A (parent_location), so each
+    merge's ENTITY_REF holder is the other's absorbed Entity. Without the Campaign merge lock the two
+    transactions lock {A, S1} then B, and {B, S2} then A: a deadlock. With it the second waits."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    s1_, s2_ = await _create(db, gm, type="location", name="Keep"), await _create(db, gm, type="location", name="Tower")
+    a = await _create(db, gm, type="location", name="Old Keep")
+    b = await _create(db, gm, type="location", name="Old Tower")
+    await apply_change(db, gm, UpdateField(entity_id=a.id, field="attributes.parent_location_entity_id", value=b.id))
+    await apply_change(db, gm, UpdateField(entity_id=b.id, field="attributes.parent_location_entity_id", value=a.id))
+    await db.commit()
+    factory = async_sessionmaker(db.bind, expire_on_commit=False)
+    async with factory() as one, factory() as two:
+        first = await apply_change(one, gm.as_system("merge"), Merge(entity_id=a.id, survivor_id=s1_.id))
+        second = asyncio.create_task(
+            apply_change(two, gm.as_system("merge"), Merge(entity_id=b.id, survivor_id=s2_.id)))
+        await asyncio.sleep(0.5)
+        assert not second.done()  # waiting on the merge lock, holding no row lock
+        await one.commit()
+        other = await asyncio.wait_for(second, timeout=10)
+        await two.commit()
+    assert first.op == other.op == "merge"
+    assert (await _get(db, Entity, a.id)).merged_into_id == s1_.id
+    assert (await _get(db, Entity, b.id)).merged_into_id == s2_.id
+
+
+async def test_merge_moves_duplicate_confirmed_mentions(db, ev4, gm):
+    entry = _entry(ev4)
+    survivor, absorbed = await _create(db, gm, name="Bree"), await _create(db, gm, name="Old Bree")
+    await apply_change(db, gm, AddMention(entity_id=survivor.id, journal_id=entry, confirmed=True,
+                                          span_start=0, span_end=4))
+    moved = await apply_change(db, gm, AddMention(entity_id=absorbed.id, journal_id=entry, confirmed=True,
+                                                  span_start=20, span_end=28))
+    row = await apply_change(db, gm.as_system("merge"), Merge(entity_id=absorbed.id, survivor_id=survivor.id))
+    assert (row.new_value["moved"]["mentions"], row.new_value["moved"]["mentions_dropped"]) == (1, 0)
+    assert (await _get(db, EntityMention, uuid.UUID(moved.new_value["mention_id"]))).entity_id == survivor.id
+    assert len(await _mentions_of(db, survivor.id)) == 2

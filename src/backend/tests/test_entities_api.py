@@ -368,6 +368,191 @@ async def test_mention_count_counts_confirmed_mentions_the_viewer_sees(ev4, db):
     listed = await _ok(await player.get(f"{BASE}/?campaign_id={ev4.a.campaign_id}"))
     assert [i["mention_count"] for i in listed["items"] if i["id"] == str(mira)] == [1]
 
+# ── Merge (E0-WorldCore.9) ─────────────────────────────────────────────────
+
+async def test_merge_route_preview_and_merge(ev4, db):
+    gm = await ev4.actor("gm_owner")
+    survivor = await _create(gm, ev4, name="Aldric")
+    absorbed = await _create(gm, ev4, name="Brother Aldric Vane")
+    await _ok(await gm.post(f"{BASE}/{survivor['id']}/visibility", json={"visibility": "party"}))
+    await _ok(await gm.post(f"{BASE}/{absorbed['id']}/aliases", json={"alias": "The Monk"}), 201)
+    url = f"{BASE}/{survivor['id']}/merge"
+    before = await _history_count(db, absorbed["id"]) + await _history_count(db, survivor["id"])
+    preview = await _ok(await gm.post(url, json={"absorbed_id": absorbed["id"], "preview": True}))
+    assert preview["change_id"] is None and preview["warning"] == "party_with_gm_only"
+    assert preview["downgrades"] and all(set(d) == {"kind", "id", "from", "to"} for d in preview["downgrades"])
+    assert preview["aliases"] == ["Brother Aldric Vane", "The Monk"]
+    assert (preview["mention_count"], preview["relationships"]) == (0, [])
+    assert await _history_count(db, absorbed["id"]) + await _history_count(db, survivor["id"]) == before
+    assert (await _ok(await gm.get(f"{BASE}/{absorbed['id']}")))["id"] == absorbed["id"]
+
+    done = await _ok(await gm.post(url, json={"absorbed_id": absorbed["id"]}))
+    assert done["change_id"] is not None and done["survivor_id"] == survivor["id"]
+    assert done["moved_counts"]["aliases"] == 1 and done["warning"] == "party_with_gm_only"
+    assert "aliases" not in done and "mention_count" not in done
+    body = await _ok(await gm.get(f"{BASE}/{survivor['id']}"))
+    assert sorted(a["alias"] for a in body["aliases"]) == ["Brother Aldric Vane", "The Monk"]
+    # The old id answers the survivor's body.
+    old = await gm.get(f"{BASE}/{absorbed['id']}")
+    assert old.status_code == 200 and old.content == (await gm.get(f"{BASE}/{survivor['id']}")).content
+    # The survivor's history includes the absorbed Entity's rows.
+    history = await _ok(await gm.get(f"{BASE}/{survivor['id']}/history?limit=200"))
+    assert {i["entity_id"] for i in history["items"]} == {survivor["id"], absorbed["id"]}
+    assert history["total"] == before + 1
+    assert any(i["op"] == "merge" for i in history["items"])
+
+
+async def test_merge_route_errors_write_nothing(ev4, db):
+    gm = await ev4.actor("gm_owner")
+    mira = await _create(gm, ev4, name="Mira")
+    bell = await _create(gm, ev4, type="item", name="Bell")
+    gone = await _create(gm, ev4, name="Gone")
+    await _ok(await gm.delete(f"{BASE}/{gone['id']}"), 204)
+    absorbed = await _create(gm, ev4, name="Wren")
+    await _ok(await gm.post(f"{BASE}/{mira['id']}/merge", json={"absorbed_id": absorbed["id"]}))
+    other = await outsider(ev4)
+    other_gm = await ctx_for(db, other.owner_id, other.campaign_id)
+    foreign = (await apply_change(db, other_gm, {"op": "create_entity", "type": "character", "kind": "npc",
+                                                 "name": "Far"})).entity_id
+    await db.commit()
+
+    async def total() -> int:
+        return (await db.execute(sa.select(sa.func.count()).select_from(EntityChange)
+                                 .where(EntityChange.campaign_id == ev4.a.campaign_id))).scalar_one()
+
+    start = await total()
+    for target, absorbed_id in ((mira["id"], bell["id"]), (mira["id"], mira["id"])):
+        for preview in (False, True):
+            r = await gm.post(f"{BASE}/{target}/merge", json={"absorbed_id": absorbed_id, "preview": preview})
+            assert r.status_code == 422 and r.json()["code"] == "invalid", r.text
+    missing = await gm.post(f"{BASE}/{mira['id']}/merge", json={"absorbed_id": MISSING})
+    assert (missing.status_code, missing.json()) == (404, {"detail": "Not found"})
+    for target, absorbed_id in ((mira["id"], gone["id"]), (mira["id"], absorbed["id"]), (mira["id"], str(foreign)),
+                                (absorbed["id"], mira["id"]), (gone["id"], mira["id"]), (MISSING, mira["id"])):
+        for preview in (False, True):
+            r = await gm.post(f"{BASE}/{target}/merge", json={"absorbed_id": absorbed_id, "preview": preview})
+            assert (r.status_code, r.content) == (404, missing.content), (target, absorbed_id, r.text)
+    assert (await gm.post(f"{BASE}/{mira['id']}/merge", json={"absorbed_id": "x"})).status_code == 422
+    assert (await gm.post(f"{BASE}/{mira['id']}/merge", json={})).status_code == 422
+    assert await total() == start
+
+
+async def test_merge_then_revert_leaves_every_party_body_as_before(ev4, db):
+    gm = await ev4.actor("gm_owner")
+    player = await ev4.actor("player")
+    survivor = await _create(gm, ev4, name="Mira")
+    absorbed = await _create(gm, ev4, name="Sea Witch")
+    for e in (survivor, absorbed):
+        await _ok(await gm.post(f"{BASE}/{e['id']}/visibility", json={"visibility": "party"}))
+    await _ok(await gm.post(f"{BASE}/{absorbed['id']}/aliases", json={"alias": "Grey Lady"}), 201)
+    bell = await _create(gm, ev4, type="item", name="Bell", attributes={"holder_entity_id": absorbed["id"]})
+    await _ok(await gm.post(f"{BASE}/{bell['id']}/visibility", json={"visibility": "party"}))
+    urls = [f"{BASE}/{survivor['id']}", f"{BASE}/{absorbed['id']}", f"{BASE}/{bell['id']}",
+            f"{BASE}/?campaign_id={ev4.a.campaign_id}", f"{BASE}/{survivor['id']}/history"]
+    before = [(await player.get(u)).content for u in urls]
+    done = await _ok(await gm.post(f"{BASE}/{survivor['id']}/merge", json={"absorbed_id": absorbed["id"]}))
+    # A Party absorbed id resolves, for a Player, to the Party survivor's body.
+    moved = await player.get(f"{BASE}/{absorbed['id']}")
+    assert moved.status_code == 200 and moved.content == (await player.get(f"{BASE}/{survivor['id']}")).content
+    assert (await _ok(await gm.get(f"{BASE}/{bell['id']}")))["attributes"]["holder_entity_id"] == survivor["id"]
+    revert = await _ok(await gm.post(f"{BASE}/{survivor['id']}/history/{done['change_id']}/revert", json={}))
+    assert (revert["op"], revert["reverted_change_id"]) == ("revert", done["change_id"])
+    assert [(await player.get(u)).content for u in urls] == before
+    assert (await _ok(await gm.get(f"{BASE}/{bell['id']}")))["attributes"]["holder_entity_id"] == absorbed["id"]
+
+
+async def test_entity_field_citation_follows_a_merge_for_a_gm(ev4, db):
+    from app.access import set_visibility
+    from app.schemas.sources import RecordRef
+    from app.services.world_service import merge_entities
+
+    gm_ctx = await ctx_for(db, ev4.a.owner_id, ev4.a.campaign_id)
+    player = await ctx_for(db, (await ev4.actor("player")).user_id, ev4.a.campaign_id)
+
+    async def create(**kw):
+        return (await apply_change(db, gm_ctx, {"op": "create_entity", "type": "character", "kind": "npc",
+                                                **kw})).entity_id
+
+    survivor = await create(name="Mira", description="A sailor")
+    absorbed = await create(name="Old Mira", description="Old text")
+    for e in (survivor, absorbed):
+        await set_visibility(db, gm_ctx, RecordRef(kind="entity", id=e), "party")
+    await merge_entities(db, gm_ctx, survivor, absorbed)
+    await db.commit()
+    refs = [SourceRef(kind=SourceKind.ENTITY_FIELD, id=absorbed, field="description")]
+    assert [(c.title, c.quote) for c in await resolve_sources(db, refs, gm_ctx)] == [
+        ("Mira · Description", "A sailor")]
+    assert await resolve_sources(db, refs, player) == []
+
+
+async def _publish_via(gm, entity, visibility="party"):
+    await _ok(await gm.post(f"{BASE}/{entity['id']}/visibility", json={"visibility": visibility}))
+
+
+async def test_merge_chains_resolve_and_history_spans_them(ev4, db):
+    gm = await ev4.actor("gm_owner")
+    player = await ev4.actor("player")
+    a, b, c = [await _create(gm, ev4, name=n) for n in ("Alpha", "Bravo", "Charlie")]
+    for e in (a, c):
+        await _publish_via(gm, e)  # B stays GM-only
+    await _ok(await gm.post(f"{BASE}/{b['id']}/merge", json={"absorbed_id": a["id"]}))
+    await _ok(await gm.post(f"{BASE}/{c['id']}/merge", json={"absorbed_id": b["id"]}))
+    end = await gm.get(f"{BASE}/{c['id']}")
+    assert (await gm.get(f"{BASE}/{a['id']}")).content == end.content
+    assert (await gm.get(f"{BASE}/{b['id']}")).content == end.content
+    history = await _ok(await gm.get(f"{BASE}/{c['id']}/history?limit=200"))
+    assert {i["entity_id"] for i in history["items"]} == {a["id"], b["id"], c["id"]}
+    total = sum([await _history_count(db, e["id"]) for e in (a, b, c)])
+    assert history["total"] == total == len(history["items"])
+    # A Player may not follow the hop from B (stored gm): A answers like a missing id.
+    missing = await player.get(f"{BASE}/{MISSING}")
+    hidden = await player.get(f"{BASE}/{a['id']}")
+    assert (hidden.status_code, hidden.content) == (404, missing.content)
+
+
+async def test_a_merge_loop_answers_404(ev4, db):
+    gm = await ev4.actor("gm_owner")
+    x, y = await _create(gm, ev4, name="Xan"), await _create(gm, ev4, name="Yev")
+    await db.execute(sa.update(Entity).where(Entity.id == uuid.UUID(x["id"])).values(merged_into_id=uuid.UUID(y["id"])))
+    await db.execute(sa.update(Entity).where(Entity.id == uuid.UUID(y["id"])).values(merged_into_id=uuid.UUID(x["id"])))
+    await db.commit()
+    missing = await gm.get(f"{BASE}/{MISSING}")
+    for e in (x, y):
+        r = await gm.get(f"{BASE}/{e['id']}")
+        assert (r.status_code, r.content) == (404, missing.content)
+        assert (await gm.get(f"{BASE}/{e['id']}/history")).status_code == 200  # the family walk ends too
+
+
+async def test_publishing_an_absorbed_row_does_not_open_its_old_id(ev4, db):
+    gm = await ev4.actor("gm_owner")
+    player = await ev4.actor("player")
+    survivor = await _create(gm, ev4, name="Mira")
+    absorbed = await _create(gm, ev4, name="Shadow")  # GM-only when merged
+    await _publish_via(gm, survivor)
+    await _ok(await gm.post(f"{BASE}/{survivor['id']}/merge", json={"absorbed_id": absorbed["id"]}))
+    await _publish_via(gm, absorbed)  # the stored column now says party
+    missing = await player.get(f"{BASE}/{MISSING}")
+    r = await player.get(f"{BASE}/{absorbed['id']}")
+    assert (r.status_code, r.content) == (404, missing.content)
+
+
+async def test_gm_only_into_party_merge_then_revert_leaves_party_bodies_as_before(ev4, db):
+    gm = await ev4.actor("gm_owner")
+    player = await ev4.actor("player")
+    survivor = await _create(gm, ev4, name="Mira")
+    absorbed = await _create(gm, ev4, name="Shadow")
+    await _publish_via(gm, survivor)
+    await _ok(await gm.post(f"{BASE}/{absorbed['id']}/aliases", json={"alias": "The Hood"}), 201)
+    await _ok(await gm.post(f"{BASE}/{survivor['id']}/aliases", json={"alias": "Little Mira"}), 201)
+    urls = [f"{BASE}/{survivor['id']}", f"{BASE}/?campaign_id={ev4.a.campaign_id}",
+            f"{BASE}/{survivor['id']}/history"]
+    before = [(await player.get(u)).content for u in urls]
+    done = await _ok(await gm.post(f"{BASE}/{survivor['id']}/merge", json={"absorbed_id": absorbed["id"]}))
+    assert done["warning"] == "party_with_gm_only"
+    assert [(await player.get(u)).content for u in urls] == before
+    await _ok(await gm.post(f"{BASE}/{survivor['id']}/history/{done['change_id']}/revert", json={}))
+    assert [(await player.get(u)).content for u in urls] == before
+
 
 # ── Mentions (E0-WorldCore.7) ──────────────────────────────────────────────
 
@@ -590,14 +775,14 @@ async def test_a_player_sees_confirmed_allowed_mentions_only(ev4, db):
     assert await _mention_history(db, mira, "remove_mention") == 0
 
 
-# ── Wiring: 17 routes, each in nginx's /api/entities/ location (zone api) ───
+# ── Wiring: 18 routes, each in nginx's /api/entities/ location (zone api) ───
 
 def test_every_entity_route_is_in_the_api_zone():
     from app.main import app
     from tests.ev4.routes import api_routes, resolve_route
 
     routes = [r for r in api_routes(app) if r.path.startswith("/api/entities")]
-    assert len(routes) == 17, sorted(f"{r.method} {r.path}" for r in routes)
+    assert len(routes) == 18, sorted(f"{r.method} {r.path}" for r in routes)
     for route in routes:
         loc = resolve_route(route)
         assert loc is not None and (loc.modifier, loc.uri) == ("", "/api/entities/"), (route, loc)

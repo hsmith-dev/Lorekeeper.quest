@@ -445,3 +445,116 @@ async def probe_entity_visibility(ev4, actor):
         await _refused(ev4, actor, "POST", f"{BASE}/{entity_id}/visibility", f"{BASE}/{MISSING}/visibility",
                        json=body)
     assert await row_count(ev4, Entity, Entity.id == w.secret, Entity.visibility == "gm") == 1
+
+
+# ── Merge (E0-WorldCore.9) ─────────────────────────────────────────────────
+
+async def _merge_material(ev4, w: World) -> None:
+    """The GM-only `secret` also gets a confirmed Mention in the seed's Party
+    entry and an edge to a Party Entity (its note a canary), so a merge into
+    the Party `party` moves an alias, a Mention and a Relationship."""
+    from app.db.models.entity import RelationshipType
+    from app.services.world_service import apply_change
+
+    db, a = ev4.db, ev4.a.campaign_id
+    rt = RelationshipType(campaign_id=a, key=f"ev4_merge_{uuid.uuid4().hex[:6]}", label="Ally of",
+                          inverse_label="Ally of")
+    db.add(rt)
+    await db.flush()
+    await apply_change(db, w.gm, {"op": "add_mention", "entity_id": w.secret,
+                                  "journal_id": ev4.a.ids["journal_entries"][0], "confirmed": True})
+    await apply_change(db, w.gm, {"op": "add_relationship", "entity_id": w.secret, "target_entity_id": w.hidden_status,
+                                  "relationship_type_id": rt.id, "note": mint_canary("XENTEDGE", a).token})
+    await db.commit()
+
+
+async def _gm_merges(ev4, w: World) -> None:
+    from app.services.world_service import merge_entities
+
+    await merge_entities(ev4.db, w.gm, w.party, w.secret)
+    await ev4.db.commit()
+
+
+async def _rows_on(ev4, actor, entity_id) -> dict[str, list[str]] | None:
+    """The alias, Mention and edge ids on `entity_id` the actor's ctx can see
+    (None for an actor with no ctx in Campaign A)."""
+    import sqlalchemy as sa
+
+    from app.access import NotFound, ctx_for, scoped_select
+    from app.db.models.entity import EntityAlias, EntityMention, EntityRelationship
+
+    if not authenticated(actor):
+        return None
+    try:
+        ctx = await ctx_for(ev4.db, actor.user_id, ev4.a.campaign_id)
+    except NotFound:
+        return None
+    out = {}
+    for name, model, where in (
+            ("aliases", EntityAlias, EntityAlias.entity_id == entity_id),
+            ("mentions", EntityMention, EntityMention.entity_id == entity_id),
+            ("relationships", EntityRelationship, sa.or_(EntityRelationship.source_entity_id == entity_id,
+                                                         EntityRelationship.target_entity_id == entity_id))):
+        rows = (await ev4.db.execute(scoped_select(model, ctx).where(where)
+                                     .execution_options(populate_existing=True))).scalars().all()
+        out[name] = sorted(str(r.id) for r in rows)
+    return out
+
+
+@ev4_probe("POST", "/api/entities/{entity_id}/merge", actors=WRITERS)
+async def probe_merge_entities(ev4, actor):
+    """A non-GM is refused like a missing Entity and nothing is written. The
+    downgrade probe: after a GM merges the GM-only Entity into the Party one,
+    a Player sees none of the moved aliases, Mentions or edges (no canary, the
+    bodies and counts do not move), and the absorbed id answers like a
+    missing one."""
+    from app.db.models.entity import Entity
+
+    w = await _world(ev4)
+    await _merge_material(ev4, w)
+    a = ev4.a.campaign_id
+    body = {"absorbed_id": str(w.secret)}
+    # Another Campaign's Entity, as the survivor, answers like a missing one.
+    await assert_hidden_equals_missing(actor, f"{BASE}/{w.other}/merge", f"{BASE}/{MISSING}/merge", method="POST",
+                                       json={"absorbed_id": str(w.party)})
+    if is_gm_of_a(ev4, actor):
+        # ... and as the absorbed one.
+        assert_same_answer(actor, await actor.post(f"{BASE}/{w.party}/merge", json={"absorbed_id": str(w.other)}),
+                           await actor.post(f"{BASE}/{w.party}/merge", json={"absorbed_id": MISSING}),
+                           "merge of another Campaign's Entity")
+        before = await _history_rows(ev4)
+        preview = await actor.post(f"{BASE}/{w.party}/merge", json={**body, "preview": True})
+        assert_no_canary(actor, preview)
+        assert preview.status_code == 200, preview.text
+        assert preview.json()["warning"] == "party_with_gm_only" and {
+            d["kind"] for d in preview.json()["downgrades"]} == {"alias", "mention", "relationship"}, preview.text
+        assert await _history_rows(ev4) == before
+        r = await actor.post(f"{BASE}/{w.party}/merge", json=body)
+        assert_no_canary(actor, r)
+        assert r.status_code == 200 and r.json()["change_id"], r.text
+        old = await actor.get(f"{BASE}/{w.secret}")
+        assert old.status_code == 200 and old.json()["id"] == str(w.party), old.text
+        return
+    for target, absorbed in ((w.party, w.secret), (w.secret, w.party), (w.party, w.hidden_status)):
+        for preview in (False, True):
+            await _refused(ev4, actor, "POST", f"{BASE}/{target}/merge", f"{BASE}/{MISSING}/merge",
+                           json={"absorbed_id": str(absorbed), "preview": preview})
+    assert await row_count(ev4, Entity, Entity.campaign_id == a, Entity.merged_into_id.is_not(None)) == 0
+
+    # The downgrade probe.
+    seen = await _rows_on(ev4, actor, w.party)
+    if authenticated(actor):
+        urls = [f"{BASE}/{w.party}", f"{BASE}/?campaign_id={a}", f"{BASE}/?campaign_id={a}&q=Mira",
+                f"{BASE}/{w.party}/history", f"{BASE}/{w.hidden_status}"]
+        await assert_counts_and_ranking_unchanged(actor, urls, lambda: _gm_merges(ev4, w), ignore=())
+        for url in urls:
+            assert_no_canary(actor, await actor.get(url))
+    else:
+        await _gm_merges(ev4, w)
+    assert await row_count(ev4, Entity, Entity.id == w.secret, Entity.merged_into_id == w.party) == 1
+    if await _rows_on(ev4, actor, w.party) != seen:
+        record_leak("EV-4 leak: a merge of a GM-only Entity widened what the Party sees",
+                    [f"{actor.name}: before {seen} after {await _rows_on(ev4, actor, w.party)}"])
+    # The hidden absorbed id answers like a missing one.
+    await assert_hidden_equals_missing(actor, f"{BASE}/{w.secret}", f"{BASE}/{MISSING}")
+    await assert_hidden_equals_missing(actor, f"{BASE}/{w.secret}/history", f"{BASE}/{MISSING}/history")

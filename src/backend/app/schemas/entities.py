@@ -648,6 +648,50 @@ class EntityHistoryPartyResponse(BaseModel):
     offset: int
 
 
+# ── Merge (E0-WorldCore.9): GM-only request and response ───────────────────
+
+class MergeRequest(_Body):
+    """`POST /api/entities/{survivor_id}/merge`: absorb `absorbed_id` into the
+    path's Entity; `preview` validates and reports without writing."""
+
+    absorbed_id: uuid.UUID
+    preview: bool = False
+
+
+class MergeDowngrade(BaseModel):
+    """A moved alias, Mention or Relationship whose Party audience the merge changes."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    kind: Literal["alias", "mention", "relationship"]
+    id: uuid.UUID
+    from_: Visibility = Field(alias="from")
+    to: Visibility
+
+
+class MergeRelationship(BaseModel):
+    """A Relationship that moves to the survivor, with its ends after the merge."""
+
+    id: uuid.UUID
+    source_entity_id: uuid.UUID
+    target_entity_id: uuid.UUID
+    relationship_type_id: uuid.UUID
+
+
+class MergeResponse(BaseModel):
+    """GM-only (no Party twin): a Player never reaches the merge route.
+    `change_id` is the merge row (None for a preview); `aliases`,
+    `mention_count` and `relationships` are the preview's extras."""
+
+    survivor_id: uuid.UUID
+    change_id: uuid.UUID | None = None
+    downgrades: list[MergeDowngrade] = Field(default_factory=list)
+    moved_counts: dict[str, int] = Field(default_factory=dict)
+    warning: str | None = None
+    revertible: bool = True
+    aliases: list[str] | None = None
+    mention_count: int | None = None
+    relationships: list[MergeRelationship] | None = None
 # ── Mention lists (E0-WorldCore.7) ─────────────────────────────────────────
 
 class EntityMentionListGMResponse(BaseModel):
