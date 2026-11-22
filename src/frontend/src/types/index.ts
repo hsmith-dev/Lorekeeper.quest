@@ -187,10 +187,14 @@ export interface GenerateRequest {
   notes: string;
   campaign_id: string;
   session_date?: string;
-  entry_hash: string;
+  // Client-side dedup UX only (utils/hashNotes.ts): the server computes the
+  // hash itself and ignores this one (E0-Journal.2).
+  entry_hash?: string;
   // The (possibly user-edited) narrative from a prior draft generation —
   // when set, the backend saves it as-is instead of generating one.
   narrative?: string;
+  // Saved by the offline sync queue (no one reviewed it): lands GM-only.
+  offline?: boolean;
 }
 
 export interface GenerateDraftRequest {

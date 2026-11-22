@@ -15,7 +15,7 @@ from app.db.models.npc import NpcEntry, NpcStatus
 from app.db.models.quest import Quest
 from app.db.models.user import User
 from app.schemas.share import PublicJournalResponse, PublicNpcResponse, PublicQuestResponse
-from app.services import embedding_service
+from app.services import embedding_service, journal_service
 from scripts import seed_demo
 from scripts.eval_common import FakeEmbeddingModel
 from scripts.eval_retrieval import LABELED
@@ -243,16 +243,18 @@ async def test_rows_match_the_seed(db):
     entries = (await db.scalars(
         sa.select(JournalEntry).where(JournalEntry.campaign_id == res.campaign_id)
     )).all()
-    by_hash = {e.entry_hash: e for e in entries}
+    by_id = {e.id: e for e in entries}
     for e in SEED["entries"]:
-        row = by_hash[seed_demo.entry_hash(res.campaign_id, e["seed_id"])]
+        row = by_id[res.entry_ids[e["seed_id"]]]
         assert row.shorthand == e["shorthand"] and row.narrative == e["narrative"]
+        # E0-Journal.2: written through journal_service, with the server's hash.
+        assert row.entry_hash == journal_service.compute_entry_hash(e["shorthand"])
         assert row.session_date.isoformat() == e["session_date"]
         assert row.narrative_tsv is not None
         assert row.embedding is None  # no embedder
 
     # tsv covers shorthand + narrative: "party" is only in e01's shorthand.
-    e01 = by_hash[seed_demo.entry_hash(res.campaign_id, "e01-old-mill")]
+    e01 = by_id[res.entry_ids["e01-old-mill"]]
     assert "party" not in e01.narrative.lower()
     hit = await db.scalar(sa.select(JournalEntry.id).where(
         JournalEntry.id == e01.id,
@@ -291,8 +293,8 @@ async def test_embeddings_filled_once_a_model_is_available(db):
     third = await _seed_in_new_session(owner_email=email, embedder=fake_embedder)
     assert third.embedded == 0 and third.created_total == 0
 
-    e01 = await db.scalar(sa.select(JournalEntry).where(
-        JournalEntry.entry_hash == seed_demo.entry_hash(first.campaign_id, "e01-old-mill")))
+    e01 = await db.scalar(sa.select(JournalEntry).where(JournalEntry.id == first.entry_ids["e01-old-mill"])
+                          .execution_options(populate_existing=True))
     expected = fake_vec(seed_demo.entry_text(e01.shorthand, e01.narrative))
     assert list(e01.embedding) == pytest.approx(expected, abs=1e-6)
 

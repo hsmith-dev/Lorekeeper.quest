@@ -1,6 +1,6 @@
 import uuid
 from datetime import date
-from sqlalchemy import CheckConstraint, String, Text, Date, ForeignKey, Index, UniqueConstraint
+from sqlalchemy import CheckConstraint, String, Text, Date, ForeignKey, Index
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.dialects.postgresql import UUID, TSVECTOR
 from pgvector.sqlalchemy import Vector
@@ -15,9 +15,10 @@ class JournalEntry(Base, TimestampMixin):
         Index("ix_journal_narrative_fts", "narrative_tsv", postgresql_using="gin"),
         Index("ix_journal_party_fts", "party_tsv", postgresql_using="gin"),
         CheckConstraint(check_expr(EntryKind, "kind"), name="ck_journal_entries_kind"),
-        # AR-17: unique per (Campaign, author), not globally.
-        UniqueConstraint("campaign_id", "user_id", "entry_hash",
-                         name="uq_journal_entries_campaign_user_entry_hash"),
+        # AR-17: the dedup key is per (Campaign, author). Not unique since
+        # 7d1e2a9c4b6f: a duplicate is a 409 only when the writer can see it
+        # (journal_service.visible_duplicate), so a hidden entry is never revealed.
+        Index("ix_journal_entries_campaign_user_entry_hash", "campaign_id", "user_id", "entry_hash"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)

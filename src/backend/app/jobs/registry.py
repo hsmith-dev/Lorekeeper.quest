@@ -119,6 +119,7 @@ def get_kind(name: str) -> JobKind:
 # worker at start (LorekeeperWorker). This module's own built-ins need no entry.
 KIND_MODULES: tuple[str, ...] = (
     "app.jobs.world",  # backfill.mentions and the suggested_mentions_v1 backfill (E0-WorldCore.7)
+    "app.jobs.journal",  # journal.reembed_sweep and the journal_reembed_v1 backfill (E0-Journal.2)
 )
 
 
@@ -142,7 +143,18 @@ FILES_GC = register(JobKind(
     live_safe=True,
 ))
 
+# Built-in (E0-Journal.2): the fallback when a journal save could not reach
+# the ml sidecar. app/hooks/journal.py enqueues it (key
+# `journal.reembed:{journal_id}:{entry_hash}`); the handler re-runs
+# `journal_service.reindex_entry(strict=True)`, so ml still down raises and
+# the Job retries. Embeddings and NER on the shared sidecar: cpu_heavy, and
+# paused during a Live Session.
+JOURNAL_REEMBED = register(JobKind(
+    name="journal.reembed", queue=JobQueue.ONSAVE, timeout_s=300,
+    handler="app.services.journal_service:reembed_job", resources=frozenset({"cpu_heavy"}), live_safe=False,
+))
+
 __all__ = [
-    "FILES_GC", "KINDS", "KIND_MODULES", "RESOURCES", "RESULT_AUDIENCES", "SYSTEM_NOOP", "JobKind", "get_kind",
+    "FILES_GC", "JOURNAL_REEMBED", "KINDS", "KIND_MODULES", "RESOURCES", "RESULT_AUDIENCES", "SYSTEM_NOOP", "JobKind", "get_kind",
     "load_kind_modules", "register",
 ]

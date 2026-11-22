@@ -3,6 +3,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import and_, case, false, or_, select, func
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import selectinload
 import uuid
 
@@ -11,7 +12,7 @@ from app.core.limiter import limiter, user_or_ip
 from app.db.session import get_db
 from app.db.models.user import User
 from app.db.models.journal import JournalEntry
-from app.domain.enums import EntryKind
+from app.domain.enums import EntryKind, TagSourceField
 from app.db.models.campaign import Campaign
 from app.db.models.tag import Tag, JournalTag
 from app.db.models.tag_category import TagCategory
@@ -35,11 +36,12 @@ from app.access import (
     role_ctx, role_map_for_request, scoped_get, scoped_select, scoped_select_multi,
 )
 from app.api.deps import PARTY_READ, get_current_user, get_user_llm_config
-from app.services.journal_service import create_journal_entry, generate_draft_narrative
-from app.services.dedup_service import check_hash
+from app.services.journal_service import (
+    EntryTextChanged, compute_entry_hash, create_journal_entry, delete_journal_entry, generate_draft_narrative,
+    reindex_entry, visible_duplicate,
+)
 from app.services.chat_service import autocomplete_notes, generate_session_recap, summarize_session_transcript
 from app.services import embedding_service
-from app.services.retrieval_service import index_party_fields
 from app.services.llm_provider import LLMConfig
 from app.services import llm_config_service
 
@@ -100,11 +102,14 @@ async def generate_journal(
     db: AsyncSession = Depends(get_db),
 ):
     # GM only (E0-Access.6). The duplicate check is keyed per (Campaign,
-    # caller), so no 409 can reveal another author's row.
+    # caller), so no 409 can reveal another author's row. The hash is the
+    # server's (E0-Journal.2): `body.entry_hash` is ignored.
     ctx = await ctx_for_request(request, db, user, body.campaign_id, "gm")
     # The service adds the entry itself: gate the row it will write.
     can_write(ctx, JournalEntry(campaign_id=body.campaign_id, user_id=user.id, kind=EntryKind.GM))
-    if await check_hash(body.campaign_id, user.id, body.entry_hash):
+    # Before any LLM call: a duplicate the caller can see is a 409 (one they
+    # cannot see never is; create_journal_entry checks again under a lock).
+    if await visible_duplicate(db, ctx, user.id, compute_entry_hash(body.notes)):
         raise HTTPException(status_code=409, detail="Duplicate entry detected")
 
     # Only resolve an LLM config (and only meter it) when a narrative still
@@ -116,16 +121,10 @@ async def generate_journal(
     if body.narrative is None:
         config = await get_user_llm_config(user=user, db=db)
 
+    # An offline-queue save, or one with no reviewed narrative, lands
+    # visibility=gm (create_journal_entry).
     entry = await create_journal_entry(
-        db=db,
-        user_id=user.id,
-        campaign_id=body.campaign_id,
-        notes=body.notes,
-        entry_hash=body.entry_hash,
-        session_date=body.session_date,
-        config=config,
-        narrative=body.narrative,
-        gm_context=ctx.is_gm,
+        db, ctx, body.notes, body.session_date, config=config, narrative=body.narrative, offline=body.offline,
     )
     if body.narrative is None:
         await llm_config_service.meter(db, user, config, body.notes, entry.narrative)
@@ -255,12 +254,16 @@ async def attach_tag(
         db.add(tag)
         await db.flush()
 
-    link_exists = await db.execute(
-        scoped_select(JournalTag, ctx).where(JournalTag.journal_id == entry.id, JournalTag.tag_id == tag.id)
-    )
-    if not link_exists.scalar_one_or_none():
-        db.add(JournalTag(journal_id=entry.id, tag_id=tag.id))
-        await db.commit()
+    # Upsert, never a lookup: a link the caller cannot see (a Shorthand tag,
+    # for a Player) would otherwise collide on the primary key. An attached
+    # tag is `manual` from now on, so a later text edit never drops it
+    # (journal_service keeps manual links).
+    ins = pg_insert(JournalTag).values(journal_id=entry.id, tag_id=tag.id, source_field=TagSourceField.MANUAL.value)
+    await db.execute(ins.on_conflict_do_update(
+        index_elements=[JournalTag.journal_id, JournalTag.tag_id],
+        set_={"source_field": TagSourceField.MANUAL.value},
+    ))
+    await db.commit()
 
     await db.refresh(tag, attribute_names=["custom_category"])
     return project(tag, ctx)
@@ -367,25 +370,33 @@ async def reindex_journal_embeddings(
     ctx: CampaignContext = Depends(require_campaign("gm")),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """Regenerate vector embeddings for all journal entries in a campaign
-    (`campaign_id` query parameter). GM only: the count covers every row,
-    hidden ones included."""
+    """Recompute the search columns (both tsv, both vectors) of all journal
+    entries in a campaign (`campaign_id` query parameter) through
+    `journal_service.reindex_entry`: no hooks, no text, hash or tag change
+    (tags are re-derived by the writers and the `journal.reembed` Job). GM
+    only: the count covers every row, hidden ones included. Every vector is
+    computed first in one batch, so with the ml sidecar down this is a 503
+    before any row changes."""
     entries_result = await db.execute(scoped_select(JournalEntry, ctx))
     entries = list(entries_result.scalars().all())
     for entry in entries:
         can_write(ctx, entry)
-    # Every vector first, in batches: with the ml sidecar down this is a 503
-    # before any row changes.
     texts = [f"{e.shorthand} {e.narrative}" for e in entries] + [e.narrative for e in entries]
     try:
-        vectors = await embedding_service.embed_many(texts)
-    except ModelServiceError as exc:
-        logger.warning("Journal reindex failed, ml sidecar: %s", exc)
+        vectors = await embedding_service.embed_many(texts) if entries else []
+        n = len(entries)
+        for i, entry in enumerate(entries):
+            async def _precomputed(_texts, pair=(vectors[i], vectors[n + i])):
+                return list(pair)
+            try:
+                async with db.begin_nested():
+                    await reindex_entry(db, entry, strict=True, tags=False, embed=_precomputed)
+            except EntryTextChanged:
+                continue  # edited meanwhile: its own writer recomputed it
+    except (ModelServiceError, ValueError) as exc:
+        await db.rollback()
+        logger.warning("Journal reindex failed, ml sidecar: %s", type(exc).__name__)
         raise HTTPException(status_code=503, detail="Embedding model unavailable")
-    n = len(entries)
-    for i, entry in enumerate(entries):
-        entry.embedding = vectors[i]
-        await index_party_fields(db, entry, party_vector=vectors[n + i])
     await db.commit()
     return {"reindexed": len(entries)}
 
@@ -399,7 +410,4 @@ async def delete_journal(
     # A GM of the entry's Campaign (Owner or Co-GM) may delete any entry
     # there; a Player only their own `kind=player` entries (can_write).
     # Anything else is the one 404.
-    entry = await scoped_get(db, JournalEntry, ctx, journal_id)
-    can_write(ctx, entry)
-    await db.delete(entry)
-    await db.commit()
+    await delete_journal_entry(db, ctx, journal_id)

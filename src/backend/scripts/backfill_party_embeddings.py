@@ -18,7 +18,9 @@ Two passes, both idempotent and resumable:
      row whose embedding fails stays NULL, is reported, and the run goes on;
      a later run retries it.
 
-A second run over a filled table changes nothing.
+A second run over a filled table changes nothing. Both writes go through
+journal_service (`refresh_party_tsv`, `fill_party_embedding`), the only
+writer of a journal entry's index columns (E0-Journal.2).
 
   python scripts/backfill_party_embeddings.py [--database-url URL] [--dry-run]
 
@@ -42,11 +44,12 @@ _BACKEND_DIR = Path(__file__).resolve().parents[1]
 if str(_BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(_BACKEND_DIR))
 
-from sqlalchemy import func, or_, select, update  # noqa: E402
+from sqlalchemy import func, select  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
 
 import app.db.models  # noqa: E402,F401  (registers every mapper)
 from app.db.models.journal import EMBEDDING_DIM, JournalEntry  # noqa: E402
+from app.services import journal_service  # noqa: E402
 
 BATCH_SIZE = 50
 
@@ -76,11 +79,6 @@ class BackfillResult:
         return "\n".join(lines)
 
 
-def _stale_tsv():
-    expected = func.to_tsvector("english", JournalEntry.narrative)
-    return or_(JournalEntry.party_tsv.is_(None), JournalEntry.party_tsv.is_distinct_from(expected))
-
-
 async def _default_embed(text: str) -> list[float]:
     from app.services import embedding_service
 
@@ -100,7 +98,8 @@ async def backfill(
         raise ValueError("batch_size must be at least 1")
     embed_fn = embed or _default_embed
     result = BackfillResult(dry_run=dry_run)
-    result.tsv_updated = await session.scalar(select(func.count()).select_from(JournalEntry).where(_stale_tsv()))
+    result.tsv_updated = await session.scalar(
+        select(func.count()).select_from(JournalEntry).where(journal_service.stale_party_tsv()))
     result.embedding_pending = await session.scalar(
         select(func.count()).select_from(JournalEntry).where(JournalEntry.party_embedding.is_(None))
     )
@@ -108,12 +107,7 @@ async def backfill(
         return result
 
     # Pass 1: set-based, one statement.
-    tsv = await session.execute(
-        update(JournalEntry).where(_stale_tsv())
-        .values(party_tsv=func.to_tsvector("english", JournalEntry.narrative))
-        .execution_options(synchronize_session=False)
-    )
-    result.tsv_updated = tsv.rowcount
+    result.tsv_updated = await journal_service.refresh_party_tsv(session)
     await session.commit()
 
     # Pass 2: batches in id order. Keyset paging, so a row that failed stays
@@ -137,13 +131,7 @@ async def backfill(
                 result.failed.append(entry_id)
                 continue
             # IS NULL again: a journal write since the SELECT has already set it.
-            done = await session.execute(
-                update(JournalEntry)
-                .where(JournalEntry.id == entry_id, JournalEntry.party_embedding.is_(None))
-                .values(party_embedding=vector)
-                .execution_options(synchronize_session=False)
-            )
-            result.embedded += done.rowcount
+            result.embedded += await journal_service.fill_party_embedding(session, entry_id, vector)
         await session.commit()
         result.batches += 1
         last_id = rows[-1][0]
