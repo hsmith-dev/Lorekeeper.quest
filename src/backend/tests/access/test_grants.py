@@ -424,10 +424,25 @@ def _scripted_stream(monkeypatch, during):
     later. Records whether the generator was closed."""
     state = {"closed": False, "after": False}
 
+    import traceback  # TEMP DIAGNOSTIC
+    orig_wait_for = asyncio.wait_for
+    state["swallowed"] = []
+
+    async def spy_wait_for(fut, timeout):
+        task = asyncio.current_task()
+        before = task.cancelling()
+        result = await orig_wait_for(fut, timeout)
+        if task.cancelling() > before:
+            state["swallowed"].append("".join(traceback.format_stack(limit=12)))
+        return result
+
+    monkeypatch.setattr(asyncio, "wait_for", spy_wait_for)
+
     async def fake(messages, config=None, **kwargs):
         try:
             yield "Before the change. "
             await during()
+            state["cancelling_after_during"] = asyncio.current_task().cancelling()
             await asyncio.sleep(10)
             state["after"] = True
             yield "AFTER"
@@ -468,6 +483,9 @@ async def _stream_closed(db, client, monkeypatch, user, campaign_id, during, **e
         import io
         import sys
         out = io.StringIO()
+        out.write(f"\ncancelling_after_during={state.get('cancelling_after_during')}\n")
+        for s in state["swallowed"]:
+            out.write(f"\n### wait_for returned a result while its task was being cancelled:\n{s}\n")
         for t in asyncio.all_tasks():
             out.write(f"\n--- {t!r}\n")
             t.print_stack(limit=40, file=out)
