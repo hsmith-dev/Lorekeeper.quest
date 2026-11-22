@@ -113,23 +113,24 @@ report healthy, and imports the fine-tuned model. Full detail in the
 script's own header comment.
 
 - **Built here, never pulled or pushed.** Lorekeeper is distributed as
-  source. `docker buildx bake --load` builds `lorekeeper-web` (also the
+  source. `docker buildx bake --load -f docker-bake.hcl` builds `lorekeeper-web` (also the
   worker's image), `lorekeeper-ml`, `lorekeeper-stt` and `lorekeeper-nginx`
   natively for the instance's arm64 CPU, tagged with `LOREKEEPER_TAG`
   (from the environment or `.env`; else `git describe`; else `latest`).
   `docker compose pull --ignore-buildable` fetches only the upstream
   multi-arch images (Postgres, Valkey, Ollama). The script never logs in to
-  or pushes to a registry. Without buildx it falls back to
-  `docker compose build`.
+  or pushes to a registry. It needs the buildx plugin (get.docker.com
+  installs it) and stops with a hint if it is missing.
 - **Set a tag per release.** Put `LOREKEEPER_TAG=v1.2` (say) in `.env` when
   you deploy a release. The previous release's images then stay on the host
-  under their own tag, and a clean release tag that is already built is
-  reused instead of rebuilt: that is what makes a rollback quick (below).
-  `latest` and a dirty checkout always rebuild.
+  under their own tag. The script always builds from the checkout on disk
+  (an existing image with the same tag may be older source); BuildKit's
+  cache makes rebuilding an unchanged checkout quick.
 - **Edition (AD-16).** `LOREKEEPER_EDITION=agpl` (the default) adds the
   `tts` profile to `COMPOSE_PROFILES`. With `LOREKEEPER_EDITION=commercial`
   the script never sets it, and if `COMPOSE_PROFILES` asks for `tts` it
-  stops before building anything, with a line explaining that the
+  stops before building anything (no compose service uses the `tts`
+  profile until E5 adds Kokoro; the rule is in place for it), with a line explaining that the
   commercial edition uses browser speech.
 - **Upgrades back up first.** When the new `web` image starts against a
   database that has data and a migration pending, it writes
@@ -169,27 +170,54 @@ was just before the upgrade and run the previous release again:
    ./scripts/restore-db.sh --no-restart pre-upgrade_20261121T101500Z_0f1c3b194a4b.dump
    ```
 
-   The restore runs in a one-off `web` container with its own `pg_restore`
-   (17; the postgres container's 16 client can't read a 17-made archive). It
-   resets the `public` schema and loads the dump in one transaction, so the
-   tables the newer migration added are gone too.
+   The restore runs in a one-off `web` container with its own PostgreSQL 17
+   client (the postgres container's 16 client can't read a 17-made archive).
+   It resets the `public` schema and loads the dump in one transaction, so
+   the tables the newer migration added are gone too, and a restore that
+   fails leaves the database exactly as it was.
 
-3. Redeploy the previous tag. Its images are still on the host if you
-   tagged releases:
+3. Check out the previous release's source (`git checkout v1.1`, or copy
+   that release onto the instance as in step 3 above) and run **its**
+   deploy script, so its own `docker-compose.prod.yml` runs its images:
 
    ```bash
+   git checkout v1.1
    LOREKEEPER_TAG=v1.1 ./scripts/deploy-oci.sh
    ```
 
-   Set `LOREKEEPER_TAG=v1.1` in `.env` as well, so a later plain run doesn't
-   go back to the newer tag. Deployed as `latest` (no tags)? Copy the
-   previous release's source onto the instance and run the script from it:
-   it rebuilds that code.
+   Don't point the newer checkout at the older tag: the compose file and the
+   image must come from the same release (a release from before E0-Platform.9
+   has no `scripts/boot_migrate.py`, which the newer compose file runs). Set
+   `LOREKEEPER_TAG=v1.1` in `.env` as well, so a later plain run doesn't go
+   back to the newer tag. The script rebuilds from that source; BuildKit's
+   cache makes it quick when the images were built here before.
 
 The previous release finds the database at its own head revision and
 starts without migrating. If you start an *older* image against a database
 a newer one already upgraded (step 2 skipped), `web` refuses to boot with a
 `boot-migrate:` line naming the unknown revision and pointing here.
+
+What a rollback does not bring back:
+
+- **Writes after the upgrade.** Everything written since the dump (new
+  entries, Jobs, accounts) is discarded with the newer schema.
+  `deploy-oci.sh` stops the worker before it starts the upgrade, so nothing
+  is written between the dump and the migration.
+- **Stored files.** The pre-upgrade dump covers the database only. Files
+  created after the upgrade stay on the `files_data` volume with nothing
+  pointing at them (`files.gc` sweeps them), and a file deleted after the
+  upgrade is missing for its restored row. To roll the files back as well,
+  restore the last nightly backup instead (it pairs a dump with a files
+  archive).
+- **A database you run yourself.** With `DATABASE_URL` pointing at your own
+  server, the restore needs a role that may drop the `public` schema and run
+  `CREATE EXTENSION vector`, which on most servers means a superuser. The
+  bundled `postgres` service's user is one.
+
+Each upgrade's dump stays on the `backups` volume (the newest
+`PRE_UPGRADE_BACKUPS_KEEP`, default 5). To keep one longer, copy it off the
+volume, for example
+`docker compose -f docker-compose.prod.yml run --rm --no-deps -T web cat /backups/<name> > <name>`.
 
 ## 5. Set up a domain + HTTPS (recommended before any real users)
 

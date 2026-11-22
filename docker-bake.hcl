@@ -1,9 +1,12 @@
 # =============================================================================
 # Lorekeeper — the images built from source (E0-Platform.9)
 #
-#   docker buildx bake --load                       # native platform, for this host
-#   LOREKEEPER_TAG=v1.2 docker buildx bake --load   # tagged lorekeeper-<svc>:v1.2
-#   docker buildx bake --set '*.platform=linux/amd64,linux/arm64'   # both arches
+#   docker buildx bake -f docker-bake.hcl --load                      # native platform, for this host
+#   LOREKEEPER_TAG=v1.2 docker buildx bake -f docker-bake.hcl --load  # tagged lorekeeper-<svc>:v1.2
+#   docker buildx bake -f docker-bake.hcl --set '*.platform=linux/amd64,linux/arm64'   # both arches
+#
+# Always pass -f docker-bake.hcl: without it bake also reads docker-compose.yml
+# (whose env_file: .env must then exist) and merges its services in.
 #
 # The same four images docker-compose.prod.yml runs (web is also the worker's
 # image). stt is always its `cpu` target here; the `gpu` target is local-only

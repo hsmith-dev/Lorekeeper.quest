@@ -18,9 +18,10 @@ head:
   a newer image): exit 1, no dump.
 
 `restore` resets the `public` schema and loads a custom-format dump with
-this image's pg_restore (pg_dump 17 archives can't be read by the pg16
-server image's client). `--clean` is not used: it can't drop the tables a
-newer migration added. Rollback: docs/OCI_DEPLOYMENT.md, "Rolling back".
+this image's pg_restore and psql (pg_dump 17 archives can't be read by the
+pg16 server image's client), reset and load in one transaction, so a failed
+restore leaves the database as it was. `--clean` is not used: it can't drop
+the tables a newer migration added. Rollback: docs/OCI_DEPLOYMENT.md, "Rolling back".
 
 Every log line starts with `boot-migrate:`. The password never reaches argv
 or a log line: pg_dump and pg_restore get it through PGPASSWORD.
@@ -86,6 +87,8 @@ def target_from_url(url: str) -> Target:
         parsed = make_url(url)
     except Exception:  # no exception text: it would echo the URL, password included
         raise BootError("DATABASE_URL could not be parsed") from None
+    if not parsed.database:
+        raise BootError("DATABASE_URL names no database")
     return Target(parsed.host, parsed.port, parsed.username, parsed.password, parsed.database)
 
 
@@ -140,9 +143,28 @@ async def connect(target: Target):
     raise BootError(f"cannot connect to the database ({type(last).__name__})")
 
 
+LOCK_POLL_S = 2.0
+LOCK_REPORT_S = 30.0
+
+
 async def lock(conn) -> None:
-    """Session-level: held until the connection closes, so across the subprocesses."""
-    await conn.execute("SELECT pg_advisory_lock(hashtext($1))", LOCK_NAME)
+    """Session-level: held until the connection closes, so across the subprocesses.
+
+    Waits as long as it takes (another web replica may be mid-dump), but says
+    so every LOCK_REPORT_S with the holder's pid, so a hung holder is visible
+    in the log instead of a silent stall.
+    """
+    waited = 0.0
+    next_report = LOCK_REPORT_S
+    while not await conn.fetchval("SELECT pg_try_advisory_lock(hashtext($1))", LOCK_NAME):
+        await asyncio.sleep(LOCK_POLL_S)
+        waited += LOCK_POLL_S
+        if waited >= next_report:
+            holder = await conn.fetchval(
+                "SELECT string_agg(pid::text, ', ') FROM pg_locks "
+                "WHERE locktype = 'advisory' AND objid = hashtext($1)::oid AND granted", LOCK_NAME)
+            log(f"still waiting for the migration lock after {int(waited)} s (held by pid {holder or '?'})")
+            next_report += LOCK_REPORT_S
 
 
 async def read_state(conn) -> DbState:
@@ -276,6 +298,10 @@ async def boot(environ: Mapping[str, str], now: datetime | None = None) -> int:
 
         log("running alembic upgrade head")
         rc = run_alembic(environ)
+        if rc != 0 and dump is not None:
+            # restart: unless-stopped re-runs a failed boot, each time with a
+            # new dump: keep the volume bounded on this path too.
+            prune(backup_dir, keep)
         if rc != 0:
             where = (f"restore {dump.name} with scripts/restore-db.sh --no-restart {dump.name} "
                      f"({ROLLBACK_DOC})") if dump else "there was no data to back up"
@@ -301,10 +327,33 @@ def _spool(source) -> Path:
     return Path(name)
 
 
+# pg_restore 17 always opens its SQL with `SET transaction_timeout = 0;`, a
+# setting PostgreSQL 16 does not know (the bundled server is pg16), so the
+# load fails on its first line. The SETs come only in the script header,
+# before any object, so only the first lines are filtered, and only when the
+# server is older than 17.
+_PG17_ONLY_SETS = (b"SET transaction_timeout = 0;",)
+_HEADER_LINES = 100
+_RESET = b"DROP SCHEMA IF EXISTS public CASCADE;\nCREATE SCHEMA public;\n"
+
+
+def _copy_script(source, sink, *, drop_pg17_sets: bool) -> None:
+    for n, line in enumerate(source):
+        if drop_pg17_sets and n < _HEADER_LINES and line.strip() in _PG17_ONLY_SETS:
+            continue
+        sink.write(line)
+
+
 async def restore(environ: Mapping[str, str], path: str | None, stdin=None) -> int:
-    """Reset `public` and load the dump at `path` (or stdin) in one transaction."""
+    """Reset `public` and load the dump at `path` (or stdin), all in one transaction.
+
+    `pg_restore -f -` turns the archive into SQL, which psql runs after the
+    schema reset under --single-transaction with ON_ERROR_STOP: a failed load
+    rolls back the reset too, and the database is left as it was.
+    """
     target = target_from_url(database_url(environ))
     pg_restore = environ.get("PG_RESTORE") or "pg_restore"
+    psql = environ.get("PSQL") or "psql"
     env = target.pg_env(environ)
 
     spooled: Path | None = None
@@ -331,16 +380,14 @@ async def restore(environ: Mapping[str, str], path: str | None, stdin=None) -> i
         try:
             log("waiting for the migration lock")
             await lock(conn)
-            log("resetting the public schema")
-            await conn.execute("DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;")
-            log(f"restoring {archive.name if spooled is None else 'the dump from stdin'}")
-            proc = subprocess.run(
-                [pg_restore, "--no-owner", "--no-password", "--exit-on-error", "--single-transaction",
-                 "-d", target.database or "", str(archive)],
-                env=env, capture_output=True)
-            if proc.returncode != 0:
-                raise BootError(f"pg_restore exited {proc.returncode}{_stderr_tail(proc.stderr)}; "
-                                "the public schema is empty, run the restore again")
+            server = int(await conn.fetchval("SHOW server_version_num"))
+            log(f"restoring {archive.name if spooled is None else 'the dump from stdin'} "
+                "(schema reset and load in one transaction)")
+            rc_restore, rc_psql, err = _pipe_restore(pg_restore, psql, archive, env,
+                                                    drop_pg17_sets=server < 170000)
+            if rc_restore != 0 or rc_psql != 0:
+                raise BootError(f"restore failed (pg_restore {rc_restore}, psql {rc_psql}){_stderr_tail(err)}; "
+                                "rolled back, the database is unchanged")
             state = await read_state(conn)
         finally:
             await conn.close()
@@ -349,6 +396,45 @@ async def restore(environ: Mapping[str, str], path: str | None, stdin=None) -> i
     finally:
         if spooled is not None:
             spooled.unlink(missing_ok=True)
+
+
+def _pipe_restore(pg_restore: str, psql: str, archive: Path, env: Mapping[str, str], *,
+                  drop_pg17_sets: bool) -> tuple[int, int, bytes]:
+    """pg_restore -f - | (reset + filter) | psql --single-transaction. Returns both exit codes and stderr."""
+    with tempfile.TemporaryFile() as restore_err, tempfile.TemporaryFile() as psql_err:
+        try:
+            dumper = subprocess.Popen([pg_restore, "--no-owner", "-f", "-", str(archive)],
+                                      env=env, stdout=subprocess.PIPE, stderr=restore_err)
+        except OSError as exc:
+            raise BootError(f"cannot run {pg_restore} ({exc.strerror or type(exc).__name__})") from None
+        try:
+            loader = subprocess.Popen([psql, "--no-password", "--no-psqlrc", "--quiet", "-v", "ON_ERROR_STOP=1",
+                                       "--single-transaction", "-d", env.get("PGDATABASE", ""), "-f", "-"],
+                                      env=env, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=psql_err)
+        except OSError as exc:
+            dumper.kill()
+            dumper.wait()
+            raise BootError(f"cannot run {psql} ({exc.strerror or type(exc).__name__})") from None
+        try:
+            loader.stdin.write(_RESET)
+            _copy_script(dumper.stdout, loader.stdin, drop_pg17_sets=drop_pg17_sets)
+        except BrokenPipeError:
+            pass  # psql stopped on an error; its exit code says so
+        finally:
+            try:
+                loader.stdin.close()
+            except BrokenPipeError:
+                pass
+        rc_psql = loader.wait()
+        if rc_psql != 0 and dumper.poll() is None:
+            dumper.kill()
+        rc_restore = dumper.wait()
+        if rc_psql != 0 and rc_restore < 0:
+            rc_restore = 0  # killed by us after psql failed: psql's error is the one to report
+        restore_err.seek(0)
+        psql_err.seek(0)
+        err = psql_err.read() or restore_err.read()
+    return rc_restore, rc_psql, err
 
 
 # ── entry point ────────────────────────────────────────────────────────────
@@ -367,6 +453,9 @@ def main(argv: Sequence[str] | None = None, environ: Mapping[str, str] | None = 
         return 2
     except BootError as exc:
         log(str(exc))
+        return 1
+    except Exception as exc:  # e.g. a wrong password or a missing database: one readable line, no traceback
+        log(f"failed: {type(exc).__name__}: {exc}")
         return 1
 
 

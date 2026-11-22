@@ -279,8 +279,10 @@ def snapshot_db(tmp_path):
     from tests.migrations.test_upgrade_snapshot import SNAPSHOT_SQL, _restore
 
     pg_dump = shutil.which("pg_dump")
-    if pg_dump is None or shutil.which("pg_restore") is None:
-        pytest.skip("pg_dump / pg_restore not installed")
+    if pg_dump is None or shutil.which("pg_restore") is None or shutil.which("psql") is None:
+        # On CI the runner ships the PostgreSQL client: a silent skip there
+        # would hide every real-database check of the boot and the restore.
+        (pytest.fail if os.environ.get("CI") else pytest.skip)("pg_dump / pg_restore / psql not installed")
     _guard_test_database(TEST_DB_URL)
 
     async def server_major() -> int:
@@ -293,7 +295,7 @@ def snapshot_db(tmp_path):
 
     client = _pg_major(subprocess.run([pg_dump, "--version"], capture_output=True, text=True).stdout)
     if client is None or client < asyncio.run(server_major()):
-        pytest.skip(f"pg_dump {client} is older than the test server")
+        (pytest.fail if os.environ.get("CI") else pytest.skip)(f"pg_dump {client} is older than the test server")
 
     def load_snapshot():
         asyncio.run(_reset_public_schema(TEST_DB_URL, with_vector=False))
@@ -339,6 +341,19 @@ def test_boot_on_snapshot_dumps_upgrades_and_restores(snapshot_db, tmp_path):
     assert bm.main(["restore", str(backups / names[0])], env) == 0
     assert _revision(url) == {"a3e7c1f9d258"}
 
+    # The same dump through stdin, as restore-db.sh sends a nightly dump.
+    bm.main([], env)
+    assert _revision(url) == heads
+    with open(backups / names[0], "rb") as dump:
+        assert asyncio.run(bm.restore(env, None, stdin=dump)) == 0
+    assert _revision(url) == {"a3e7c1f9d258"}
+
+    # A load that fails part-way rolls the schema reset back too: the
+    # database is left exactly as it was, not empty.
+    broken = _program(tmp_path / "psql_fail", 'cat >/dev/null\necho "psql: ERROR: boom" >&2\nexit 3\n')
+    assert bm.main(["restore", str(backups / names[0])], {**env, "PSQL": str(broken)}) == 1
+    assert _revision(url) == {"a3e7c1f9d258"}
+
     # A failing pg_dump: exit 1, the revision unchanged, no new file.
     failing = _program(tmp_path / "pg_dump_fail", "echo 'pg_dump: error: disk full' >&2\nexit 1\n")
     assert bm.main([], {**env, "PG_DUMP": str(failing)}) == 1
@@ -357,3 +372,23 @@ def test_boot_on_snapshot_dumps_upgrades_and_restores(snapshot_db, tmp_path):
     assert sum("running alembic upgrade head" in o for o in outs) == 1, outs
     assert sum("boot-migrate: at head" in o for o in outs) == 1, outs
     assert _revision(url) == heads
+
+
+def test_restore_script_drops_pg17_only_sets_only_for_an_older_server():
+    """pg_restore 17's header SET breaks a load into the bundled pg16 server;
+    it is dropped only from the header and only when the server is < 17."""
+    import io
+
+    script = [b"SET statement_timeout = 0;\n", b"SET transaction_timeout = 0;\n",
+              b"CREATE TABLE t (x text);\n"]
+    out = io.BytesIO()
+    bm._copy_script(iter(script), out, drop_pg17_sets=True)
+    assert out.getvalue() == b"SET statement_timeout = 0;\nCREATE TABLE t (x text);\n"
+    out = io.BytesIO()
+    bm._copy_script(iter(script), out, drop_pg17_sets=False)
+    assert out.getvalue() == b"".join(script)
+    # Past the header (e.g. COPY data that happens to read the same) it is kept.
+    late = [b"-- filler\n"] * bm._HEADER_LINES + [b"SET transaction_timeout = 0;\n"]
+    out = io.BytesIO()
+    bm._copy_script(iter(late), out, drop_pg17_sets=True)
+    assert out.getvalue().endswith(b"SET transaction_timeout = 0;\n")

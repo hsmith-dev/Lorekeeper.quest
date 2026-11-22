@@ -44,7 +44,7 @@ jobs:
       - uses: docker/setup-buildx-action@v3
 
       - name: Resolved bake definition (linux/${{ matrix.arch }})
-        run: docker buildx bake --print --set '*.platform=linux/${{ matrix.arch }}'
+        run: docker buildx bake -f docker-bake.hcl --print --set '*.platform=linux/${{ matrix.arch }}'
 
       # Cache only the small web and nginx images: the ml / stt layers would
       # crowd out the repo's 10 GB Actions cache.
@@ -75,7 +75,7 @@ jobs:
 
       - name: bake --print with linux/amd64,linux/arm64
         run: |
-          docker buildx bake --print --set '*.platform=linux/amd64,linux/arm64' > bake.json
+          docker buildx bake -f docker-bake.hcl --print --set '*.platform=linux/amd64,linux/arm64' > bake.json
           cat bake.json
           python3 - <<'EOF'
           import json, sys

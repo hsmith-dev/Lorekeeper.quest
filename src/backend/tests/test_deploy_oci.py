@@ -118,3 +118,84 @@ def test_restore_script_uses_web_image_client_and_no_restart():
     assert "run --rm --no-deps -T web python scripts/boot_migrate.py restore" in text
     assert "--entrypoint" not in text
     assert "pg_restore -U" not in text  # no longer the postgres container's pg16 client
+
+
+def _ok_stub(tmp_path: Path, *, fail_on: str = "") -> tuple[Path, Path]:
+    """A `docker` that records `<LOREKEEPER_TAG>|<VITE_API_URL>|<args>` and
+    succeeds, except for calls containing `fail_on`."""
+    bin_dir = tmp_path / "okbin"
+    bin_dir.mkdir(exist_ok=True)
+    calls = tmp_path / "ok.calls"
+    stub = bin_dir / "docker"
+    fail = f'case "$*" in *"{fail_on}"*) exit 1;; esac\n' if fail_on else ""
+    stub.write_text(f'#!/bin/sh\necho "${{LOREKEEPER_TAG-}}|${{VITE_API_URL-}}|$*" >> "{calls}"\n{fail}exit 0\n')
+    stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
+    return bin_dir, calls
+
+
+def _env(bin_dir: Path, tmp_path: Path) -> dict[str, str]:
+    return {"PATH": f"{bin_dir}:{os.environ.get('PATH', '')}", "HOME": str(tmp_path)}
+
+
+def test_build_images_always_bakes_this_checkout_with_dotenv_build_args(tmp_path):
+    """No reuse of an existing tag (it may be older source), the bake file
+    named explicitly, and VITE_API_URL taken from .env like compose did."""
+    bin_dir, calls = _ok_stub(tmp_path)
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / ".env").write_text("VITE_API_URL=https://api.example\n")
+    proc = subprocess.run(["bash", "-c", f'source "{SCRIPT}"; REPO_ROOT="{root}"; build_images v1.2'],
+                          env=_env(bin_dir, tmp_path), capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    lines = calls.read_text().splitlines()
+    assert not any("image inspect" in line for line in lines)
+    assert f"v1.2|https://api.example|buildx bake --load -f {root}/docker-bake.hcl" in lines
+
+
+def test_build_images_without_buildx_refuses(tmp_path):
+    bin_dir, calls = _ok_stub(tmp_path, fail_on="buildx version")
+    proc = subprocess.run(["bash", "-c", f'source "{SCRIPT}"; REPO_ROOT="{tmp_path}"; build_images v1.2'],
+                          env=_env(bin_dir, tmp_path), capture_output=True, text=True)
+    assert proc.returncode != 0 and "buildx" in proc.stderr
+    assert not any("bake" in line for line in calls.read_text().splitlines())
+
+
+RESTORE = REPO / "scripts" / "restore-db.sh"
+PRE = "pre-upgrade_20261121T101500Z_0f1c3b194a4b.dump"
+
+
+def _restore(tmp_path: Path, args: list[str], dotenv: str, fail_on: str = ""):
+    """Run a copy of restore-db.sh (it cds to its own repo root) against the stub."""
+    root = tmp_path / "rrepo"
+    (root / "scripts").mkdir(parents=True)
+    shutil.copy(RESTORE, root / "scripts" / "restore-db.sh")
+    (root / ".env").write_text(dotenv)
+    bin_dir, calls = _ok_stub(tmp_path, fail_on=fail_on)
+    proc = subprocess.run(["bash", str(root / "scripts" / "restore-db.sh"), *args], input="yes\n",
+                          env=_env(bin_dir, tmp_path), capture_output=True, text=True)
+    return proc, calls.read_text().splitlines()
+
+
+@pytest.mark.parametrize("args", [["--no-restart", PRE], [PRE, "--no-restart"]])
+def test_restore_pre_upgrade_dump_no_restart(tmp_path, args):
+    proc, calls = _restore(tmp_path, args, 'POSTGRES_DB=lorekeeper\nLOREKEEPER_TAG="v1.2"\n')
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    restores = [c for c in calls if "boot_migrate.py restore" in c]
+    # The volume name becomes the in-container path; the quoted .env tag is unquoted.
+    assert restores == ["v1.2||compose -f docker-compose.prod.yml run --rm --no-deps -T web "
+                        f"python scripts/boot_migrate.py restore /backups/{PRE}"]
+    assert any(c.endswith("stop web worker") for c in calls)
+    assert not any("start web worker" in c for c in calls)
+
+
+def test_restore_failure_with_no_restart_still_leaves_services_stopped(tmp_path):
+    proc, calls = _restore(tmp_path, ["--no-restart", PRE], "POSTGRES_DB=lorekeeper\n",
+                           fail_on="boot_migrate.py restore")
+    assert proc.returncode != 0
+    assert not any("start web worker" in c for c in calls)
+
+
+def test_restore_without_no_restart_restarts(tmp_path):
+    proc, calls = _restore(tmp_path, [PRE], "POSTGRES_DB=lorekeeper\n")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert calls[-1].startswith("latest|") and calls[-1].endswith("start web worker")

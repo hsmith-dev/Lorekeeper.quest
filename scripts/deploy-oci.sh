@@ -39,11 +39,13 @@
 #     (LOREKEEPER_EDITION=agpl, the default) gets the `tts` profile; the
 #     commercial edition never does, and the script refuses if one is asked for.
 #   - Builds Lorekeeper's own images (web, ml, stt, nginx) natively from this
-#     source with `docker buildx bake --load` (docker-bake.hcl), tagged
+#     source with `docker buildx bake --load -f docker-bake.hcl`, tagged
 #     lorekeeper-<svc>:<TAG>. TAG is LOREKEEPER_TAG (environment, else .env),
-#     else `git describe`, else `latest`. A clean release tag already built
-#     here is reused, not rebuilt: that is how a rollback runs the previous
-#     code (docs/OCI_DEPLOYMENT.md, "Rolling back").
+#     else `git describe`, else `latest`. Always built from the checkout on
+#     disk (BuildKit's cache keeps an unchanged one quick); a rollback runs
+#     the previous release's checkout (docs/OCI_DEPLOYMENT.md, "Rolling back").
+#   - Stops the worker before `up`, so nothing writes between web's
+#     pre-upgrade dump and its migration.
 #   - Pulls the upstream multi-arch images (postgres, valkey, ollama) with
 #     `docker compose pull --ignore-buildable`. Nothing is ever pushed and no
 #     registry login happens: Lorekeeper is distributed as source.
@@ -124,33 +126,25 @@ resolve_tag() {
     tag="$(git -C "$REPO_ROOT" describe --tags --always --dirty 2>/dev/null || true)"
   fi
   tag="${tag:-latest}"
-  printf '%s' "$tag" | tr -c 'A-Za-z0-9_.-' '-' | cut -c1-128
+  # Command substitution drops the newline GNU cut always appends.
+  tag="$(printf '%s' "$tag" | tr -c 'A-Za-z0-9_.-' '-' | cut -c1-128)"
+  tag="${tag#[.-]}"  # a Docker tag can't start with '.' or '-'
+  printf '%s' "${tag:-latest}"
 }
 
 BUILT_IMAGES=(lorekeeper-web lorekeeper-ml lorekeeper-stt lorekeeper-nginx)
 
-all_images_present() {
-  local tag="$1" img
-  for img in "${BUILT_IMAGES[@]}"; do
-    docker image inspect "$img:$tag" >/dev/null 2>&1 || return 1
-  done
-}
-
-# Build web, ml, stt (cpu) and nginx for this host's own platform. `latest`
-# and a dirty tree always rebuild; a clean release tag already built here is
-# reused (a rollback, or a re-run).
+# Build web, ml, stt (cpu) and nginx for this host's own platform, always
+# from the checkout on disk: an existing image with the same tag is never
+# trusted (it may come from older source), and BuildKit's layer cache makes
+# a rebuild of unchanged source quick. bake reads no .env, so the one build
+# setting that lives there (VITE_API_URL) is passed through.
 build_images() {
   local tag="$1"
-  if [ "$tag" != "latest" ] && [[ "$tag" != *-dirty ]] && all_images_present "$tag"; then
-    ok "Images for $tag already built here; reusing them"
-    return 0
-  fi
-  if docker buildx version >/dev/null 2>&1; then
-    LOREKEEPER_TAG="$tag" docker buildx bake --load -f "$REPO_ROOT/docker-bake.hcl"
-  else
-    warn "docker buildx not available; building with docker compose build instead"
-    LOREKEEPER_TAG="$tag" docker compose -f docker-compose.prod.yml build
-  fi
+  docker buildx version >/dev/null 2>&1 \
+    || die "docker buildx is missing: install the docker-buildx-plugin package (get.docker.com includes it), then re-run."
+  VITE_API_URL="${VITE_API_URL:-$(env_file_value VITE_API_URL)}" LOREKEEPER_TAG="$tag" \
+    docker buildx bake --load -f "$REPO_ROOT/docker-bake.hcl"
   ok "Built ${BUILT_IMAGES[*]} at :$tag ($(uname -m))"
 }
 
@@ -215,6 +209,10 @@ main() {
   # stack from before E0-Platform.7 has a `backend` container (now `web`) that
   # would otherwise keep running beside it, outside the budget. web dumps the
   # database to the backups volume before any migration (boot_migrate.py).
+  # The worker is stopped first: compose replaces it only after the new web
+  # is healthy, and an old worker writing while web dumps would put rows
+  # after the pre-upgrade dump that a rollback then loses.
+  docker compose -f docker-compose.prod.yml stop worker
   docker compose -f docker-compose.prod.yml up -d --no-build --remove-orphans
   ok "Stack starting at :$TAG — postgres, valkey, ollama, web, worker, ml, stt, nginx"
 

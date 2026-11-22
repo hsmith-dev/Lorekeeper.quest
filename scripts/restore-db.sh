@@ -38,16 +38,20 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 RESTART=1
-if [[ "${1:-}" == "--no-restart" ]]; then
-  RESTART=0
-  shift
-fi
+ARGS=()
+for arg in "$@"; do
+  if [[ "$arg" == "--no-restart" ]]; then RESTART=0; else ARGS+=("$arg"); fi
+done
+set -- "${ARGS[@]+"${ARGS[@]}"}"
 
 # The one-off containers below use the image the deployed web runs
 # (lorekeeper-web:<LOREKEEPER_TAG>): taken from the environment, else .env,
 # else the existing web container, else latest.
 if [[ -z "${LOREKEEPER_TAG:-}" ]]; then
-  LOREKEEPER_TAG="$(grep -E '^LOREKEEPER_TAG=' .env 2>/dev/null | tail -n 1 | cut -d= -f2- || true)"
+  LOREKEEPER_TAG="$(grep -E '^[[:space:]]*LOREKEEPER_TAG=' .env 2>/dev/null | tail -n 1 | cut -d= -f2- || true)"
+  # The same reading as deploy-oci.sh's env_file_value: surrounding quotes dropped.
+  LOREKEEPER_TAG="${LOREKEEPER_TAG%\"}"; LOREKEEPER_TAG="${LOREKEEPER_TAG#\"}"
+  LOREKEEPER_TAG="${LOREKEEPER_TAG%\'}"; LOREKEEPER_TAG="${LOREKEEPER_TAG#\'}"
 fi
 if [[ -z "${LOREKEEPER_TAG:-}" ]]; then
   WEB_CID="$(docker compose -f docker-compose.prod.yml ps -aq web 2>/dev/null | head -n 1 || true)"
@@ -56,6 +60,9 @@ if [[ -z "${LOREKEEPER_TAG:-}" ]]; then
     [[ "$WEB_IMAGE" == lorekeeper-web:* ]] && LOREKEEPER_TAG="${WEB_IMAGE#lorekeeper-web:}"
   fi
 fi
+# Sanitised exactly as deploy-oci.sh's resolve_tag does, so both name the same image.
+LOREKEEPER_TAG="$(printf '%s' "${LOREKEEPER_TAG:-latest}" | tr -c 'A-Za-z0-9_.-' '-' | cut -c1-128)"
+LOREKEEPER_TAG="${LOREKEEPER_TAG#[.-]}"
 export LOREKEEPER_TAG="${LOREKEEPER_TAG:-latest}"
 
 list_backups() {
@@ -142,8 +149,8 @@ restart_services() {
     echo "Restarting web and worker..."
     docker compose -f docker-compose.prod.yml start web worker
   else
-    echo "web and worker left stopped (--no-restart). Next: deploy the previous tag,"
-    echo "  LOREKEEPER_TAG=<previous tag> scripts/deploy-oci.sh   (docs/OCI_DEPLOYMENT.md)"
+    echo "web and worker left stopped (--no-restart). Next: check out the previous"
+    echo "release's source and run ITS scripts/deploy-oci.sh (docs/OCI_DEPLOYMENT.md, Rolling back)."
   fi
 }
 trap restart_services EXIT
@@ -152,9 +159,10 @@ echo "Stopping web and worker..."
 docker compose -f docker-compose.prod.yml stop web worker
 
 # A one-off web container (same image, env and volumes, no gunicorn and no
-# boot migration): boot_migrate.py restore resets `public` and runs
-# pg_restore --no-owner --exit-on-error --single-transaction. The password
-# reaches pg_restore through PGPASSWORD, never argv.
+# boot migration): boot_migrate.py restore resets `public` and loads the dump
+# (pg_restore -f - | psql --single-transaction, ON_ERROR_STOP) in one
+# transaction, so a failed restore leaves the database as it was. The
+# password reaches the clients through PGPASSWORD, never argv.
 echo "Restoring the database..."
 if [[ -n "$DUMP_FILE" ]]; then
   docker compose -f docker-compose.prod.yml run --rm --no-deps -T web python scripts/boot_migrate.py restore < "$DUMP_FILE"
