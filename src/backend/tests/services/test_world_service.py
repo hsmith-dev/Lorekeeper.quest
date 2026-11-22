@@ -1559,3 +1559,44 @@ async def test_hidden_aliases_hide_alias_rows_and_alias_history(db, ev4, gm):
         EntityAlias.entity_id == entity.id))).scalars().all()) == 2
     seen = {r["id"] for r in await _projected_history(db, player, entity.id)}
     assert str(shown.id) in seen and str(hidden.id) not in seen
+
+
+# ── Merge and Mentions of the same entry (E0-WorldCore.7 coordination) ─────
+
+async def _mentions_of(db, entity_id) -> list[EntityMention]:
+    return list((await db.execute(sa.select(EntityMention).where(EntityMention.entity_id == entity_id)
+                                  .execution_options(populate_existing=True))).scalars().all())
+
+
+@pytest.mark.parametrize("survivor_confirmed", [False, True])
+async def test_merge_drops_an_absorbed_suggestion_the_survivor_has_and_revert_restores_it(
+        db, ev4, gm, survivor_confirmed):
+    entry = _entry(ev4)
+    survivor, absorbed = await _create(db, gm, name="Mira"), await _create(db, gm, name="Old Mira")
+    kept = await apply_change(db, gm, AddMention(entity_id=survivor.id, journal_id=entry,
+                                                 confirmed=survivor_confirmed, span_start=0, span_end=4))
+    dup = await apply_change(db, gm, AddMention(entity_id=absorbed.id, journal_id=entry, span_start=10, span_end=18))
+    dup_id = uuid.UUID(dup.new_value["mention_id"])
+
+    row = await apply_change(db, gm.as_system("merge"), Merge(entity_id=absorbed.id, survivor_id=survivor.id))
+    assert (row.new_value["moved"]["mentions"], row.new_value["moved"]["mentions_dropped"]) == (0, 1)
+    assert [m.id for m in await _mentions_of(db, survivor.id)] == [uuid.UUID(kept.new_value["mention_id"])]
+    assert await _get(db, EntityMention, dup_id) is None
+
+    await revert_change(db, gm, row.id)
+    back = await _get(db, EntityMention, dup_id)
+    assert (back.entity_id, back.confirmed, back.span_start, back.span_end) == (absorbed.id, False, 10, 18)
+    assert len(await _mentions_of(db, survivor.id)) == 1
+
+
+async def test_merge_moves_duplicate_confirmed_mentions(db, ev4, gm):
+    entry = _entry(ev4)
+    survivor, absorbed = await _create(db, gm, name="Bree"), await _create(db, gm, name="Old Bree")
+    await apply_change(db, gm, AddMention(entity_id=survivor.id, journal_id=entry, confirmed=True,
+                                          span_start=0, span_end=4))
+    moved = await apply_change(db, gm, AddMention(entity_id=absorbed.id, journal_id=entry, confirmed=True,
+                                                  span_start=20, span_end=28))
+    row = await apply_change(db, gm.as_system("merge"), Merge(entity_id=absorbed.id, survivor_id=survivor.id))
+    assert (row.new_value["moved"]["mentions"], row.new_value["moved"]["mentions_dropped"]) == (1, 0)
+    assert (await _get(db, EntityMention, uuid.UUID(moved.new_value["mention_id"]))).entity_id == survivor.id
+    assert len(await _mentions_of(db, survivor.id)) == 2

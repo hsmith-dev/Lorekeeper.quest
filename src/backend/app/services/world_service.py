@@ -103,7 +103,10 @@ a moved alias is floored by the stricter of that and the absorbed Entity's
 `field_visibility.aliases` (an existing floor that is already restrictive is
 kept). Its name becomes a survivor alias (floored like a Mention); duplicate
 aliases and self-loops are dropped; Quest steps move only when that cannot
-widen them. An ENTITY_REF attribute of another live Entity naming the
+widen them. An absorbed suggested Mention whose entry and source field the
+survivor already has a Mention of (suggested or confirmed) is deleted, like a
+duplicate alias (uq_entity_mentions_suggested, E0-WorldCore.7); confirmed
+duplicates move. An ENTITY_REF attribute of another live Entity naming the
 absorbed one is repointed to the survivor only when that cannot widen it
 (the absorbed Entity was `party`, or the survivor is not), never to point an
 Entity at itself; each holder is marked stale either way. The survivor's own
@@ -1027,6 +1030,7 @@ class _MergeWork:
     drop_aliases: list[EntityAlias]
     name_alias: str | None        # the absorbed name, when it becomes a survivor alias
     mentions: list[EntityMention]
+    drop_mentions: list[EntityMention]  # absorbed suggestions the survivor already has a Mention of
     move_edges: list[tuple[EntityRelationship, uuid.UUID, uuid.UUID]]  # (edge, new source, new target)
     drop_edges: list[EntityRelationship]
     steps: list[QuestStep]
@@ -1037,6 +1041,7 @@ class _MergeWork:
 
     def moved(self) -> dict[str, int]:
         return {"aliases": len(self.move_aliases), "mentions": len(self.mentions),
+                "mentions_dropped": len(self.drop_mentions),
                 "relationships": len(self.move_edges), "self_loops_dropped": len(self.drop_edges),
                 "quest_steps": len(self.steps), "attribute_refs": len(self.repoint),
                 "attribute_refs_left": self.refs_left()}
@@ -1066,8 +1071,21 @@ async def _merge_work(run: _Run, absorbed: Entity, survivor: Entity, *, lock: bo
     if name_key and name_key not in keys and name_key != normalize_name(survivor.name):
         name_alias = " ".join(absorbed.name.split())
 
-    mentions = await run.all(scoped_select(EntityMention, run.ctx).where(EntityMention.entity_id == absorbed.id)
-                             .order_by(EntityMention.id))
+    mentions: list[EntityMention] = []
+    drop_mentions: list[EntityMention] = []
+    for mention in await run.all(scoped_select(EntityMention, run.ctx).where(EntityMention.entity_id == absorbed.id)
+                                 .order_by(EntityMention.id)):
+        if not mention.confirmed and mention.journal_id is not None:
+            # One suggestion per (entry, Entity, field) (uq_entity_mentions_suggested, E0-WorldCore.7):
+            # any survivor Mention of the pair (suggested or confirmed) makes it redundant. Confirmed
+            # duplicates (E1 extraction can make them) have no unique index and simply move.
+            twin = await run.first(scoped_select(EntityMention, run.ctx).where(
+                EntityMention.entity_id == survivor.id, EntityMention.journal_id == mention.journal_id,
+                EntityMention.source_field == mention.source_field))
+            if twin is not None:
+                drop_mentions.append(mention)
+                continue
+        mentions.append(mention)
     move_edges, drop_edges = [], []
     for edge in await run.all(scoped_select(EntityRelationship, run.ctx).where(sa.or_(
             EntityRelationship.source_entity_id == absorbed.id,
@@ -1122,7 +1140,7 @@ async def _merge_work(run: _Run, absorbed: Entity, survivor: Entity, *, lock: bo
         report("relationship", edge, _is_party(absorbed), _is_party(survivor), floor)
     warning = PARTY_WITH_GM_ONLY if _is_party(absorbed) != _is_party(survivor) else None
     return _MergeWork(absorbed, survivor, floor, alias_floor, move_aliases, drop_aliases, name_alias, mentions,
-                      move_edges, drop_edges, steps, holders, repoint, downgrades, warning)
+                      drop_mentions, move_edges, drop_edges, steps, holders, repoint, downgrades, warning)
 
 
 def _alias_record(alias: EntityAlias) -> dict[str, Any]:
@@ -1156,8 +1174,8 @@ async def _merge(run: _Run, c: Merge) -> _MergePlan | EntityChange:
     # its floor (and an edge with its ends) before the merge, the deleted rows
     # in full, the added name alias, the moved steps and the repointed refs.
     undo: dict[str, Any] = {"aliases": [], "mentions": [], "relationships": [], "dropped_aliases": [],
-                            "dropped_relationships": [], "name_alias_id": None, "quest_steps": [],
-                            "attribute_refs": []}
+                            "dropped_relationships": [], "dropped_mentions": [], "name_alias_id": None,
+                            "quest_steps": [], "attribute_refs": []}
     for alias in work.drop_aliases:
         undo["dropped_aliases"].append(_alias_record(alias))
         await run.delete(alias)
@@ -1173,6 +1191,10 @@ async def _merge(run: _Run, c: Merge) -> _MergePlan | EntityChange:
                                        alias=work.name_alias, normalized_alias=normalize_name(work.name_alias)))
         floored(name_row, work.floor)
         undo["name_alias_id"] = name_row.id
+    for mention in work.drop_mentions:
+        undo["dropped_mentions"].append(_mention_values(mention) | {
+            "quote": mention.quote, "origin": mention.origin, "visibility_floor": _json(mention.visibility_floor)})
+        await run.delete(mention)
     for mention in work.mentions:
         undo["mentions"].append({"id": mention.id, "floor": _json(mention.visibility_floor)})
         mention.entity_id = survivor.id
@@ -1313,6 +1335,20 @@ async def _revert_merge(run: _Run, c: Revert, target: EntityChange) -> _MergePla
             visibility_floor=item.get("visibility_floor"), source_journal_id=journal_id,
             source_deleted_at=_parse_dt(item.get("source_deleted_at")), started_at=_parse_dt(item.get("started_at")),
             ended_at=_parse_dt(item.get("ended_at")),
+        ))
+    for item in undo.get("dropped_mentions") or []:
+        mention_id = _ref_uuid(item.get("mention_id"))
+        journal_id = _ref_uuid(item.get("journal_id"))
+        if (mention_id is None or await locked(EntityMention, mention_id) is not None or journal_id is None
+                or await run.first(scoped_select(JournalEntry, run.ctx).where(JournalEntry.id == journal_id)) is None):
+            touched()
+            continue
+        # A constructor restore of the dropped suggestion, with the floor it had.
+        run.add(EntityMention(
+            id=mention_id, campaign_id=run.ctx.campaign_id, journal_id=journal_id, entity_id=absorbed.id,
+            quote=item.get("quote"), source_field=item.get("source_field"), origin=item.get("origin"),
+            confirmed=bool(item.get("confirmed")), span_start=item.get("span_start"), span_end=item.get("span_end"),
+            visibility_floor=item.get("visibility_floor"),
         ))
     holders: list[uuid.UUID] = []
     for item in undo.get("attribute_refs") or []:

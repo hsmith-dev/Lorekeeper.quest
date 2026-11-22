@@ -159,6 +159,12 @@ deferred:
 
 ## Spec Change Log
 
+### 2026-11-21 — Coordinator note (E0-WorldCore.7, PR #82)
+- Trigger: #82 adds `uq_entity_mentions_suggested` (migration `eed202f2eead`) and a twin check in the old `_merge` Mention loop.
+- Amended: `_merge_work` keeps that check. An absorbed suggested Mention whose (entry, source field) the survivor already has a Mention of, suggested or confirmed, is deleted. It is recorded in `undo.dropped_mentions` and re-created on revert. `moved.mentions_dropped` counts it. Confirmed duplicates move, since they have no unique index.
+- Known-bad state avoided: a merge failing on the unique index after #82 lands.
+- KEEP: when rebasing onto #82, keep the twin check in `_merge_work`, not in the removed loop. This story adds no migration.
+
 ## Review Triage Log
 
 ### 2026-11-21 — Review pass
