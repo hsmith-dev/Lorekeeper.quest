@@ -1,7 +1,8 @@
 """The World Model (F3-world, E0-WorldCore.2; AD-9, AD-10, AD-12, AD-19).
 
 Seven tables, created by revision 03c0b504f1d1 (the models never emit DDL;
-0f1c3b194a4b adds `entity_changes.write_visibility`):
+0f1c3b194a4b adds `entity_changes.write_visibility`, eed202f2eead the partial
+unique index `uq_entity_mentions_suggested` on suggested Mentions):
 
   entities              one row per Character, Location, Faction, Item or Quest
   entity_aliases        other names of an Entity
@@ -138,6 +139,9 @@ class EntityMention(Base):
         _entity_fk("entity_id", "fk_entity_mentions_entity"),
         Index("ix_entity_mentions_campaign_entity", "campaign_id", "entity_id"),
         Index("ix_entity_mentions_journal", "journal_id"),
+        # One suggested Mention per (entry, Entity, source field) (eed202f2eead, E0-WorldCore.7).
+        Index("uq_entity_mentions_suggested", "journal_id", "entity_id", "source_field", unique=True,
+              postgresql_where=sql_text("NOT confirmed")),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)

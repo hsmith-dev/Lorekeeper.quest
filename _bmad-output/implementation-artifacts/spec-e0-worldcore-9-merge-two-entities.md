@@ -165,6 +165,22 @@ deferred:
 - Known-bad state avoided: a merge failing on the unique index after #82 lands.
 - KEEP: when rebasing onto #82, keep the twin check in `_merge_work`, not in the removed loop. This story adds no migration.
 
+### 2026-11-22 — Coordinator round 2 (after #82 landed)
+- **Merged origin/main.** #82's twin-suggestion check lives in `_merge_work`, which replaced the old loop.
+  - A revert restores a dropped suggestion only when the absorbed Entity has no suggestion of the same (entry, field). Otherwise it is `superseded`, or skipped under `force`, so `uq_entity_mentions_suggested` can't be violated.
+  - The survivor's Mention of the pair stays where it is.
+  - Tests: restoring with the survivor's Mention present and the index asserted, committing at the end; and a conflicting suggestion on the absorbed Entity.
+- **Deadlock.**
+  - A merge and a merge revert first take the Campaign's advisory lock `pg_advisory_xact_lock(hashtextextended('entity_merge:<campaign>'))` before any row lock. Two merges never hold Entity row locks at the same time, so pair/holder overlaps can't form a cycle. The pair is then locked in sorted-id order.
+  - Test: two sessions merge A→S1 and B→S2, where A and B name each other through `parent_location_entity_id`. The second merge waits, then both commit.
+  - A merge against a non-merge op locking two Entities in caller order, such as `add_relationship`, is not covered. That pattern predates this story.
+- **Undo cap.** The record is built before any write (`_undo_record`).
+  - Every item is a fixed-size row except dropped edge notes and alias/Mention quotes. Its size is linear in the absorbed Entity's rows.
+  - It is capped at `MERGE_UNDO_MAX_BYTES` (256 KiB of JSON). A larger merge still runs, but stores `undo: null`, `revertible: false`, and reverting it is `not_revertible`.
+  - `revertible` is reported in `MergeResult`, `MergeResponse` and the preview, so the GM knows before merging.
+  - Test: monkeypatched cap.
+- KEEP: the merge lock comes first in `_merge` and `_revert_merge`. The twin check and the restore guard work together.
+
 ## Review Triage Log
 
 ### 2026-11-21 — Review pass

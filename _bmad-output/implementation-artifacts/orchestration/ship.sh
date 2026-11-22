@@ -20,7 +20,6 @@ KEY=$(grep -oE "^  ${N}-${NUM}-[a-z0-9_-]+" "$SS" | sed 's/^  //')
 if ! grep -qE "^  ${KEY}: done" "$SS"; then
   sed -i '' -E "s/^(  ${KEY}): [a-z-]+/\1: done/" "$SS"
   sed -i '' -E "s/^(  epic-${N}): backlog/\1: in-progress/" "$SS"
-  sed -i '' -E "s/^last_updated: .*/last_updated: $(date '+%m-%d-%Y %H:%M')/" "$SS"
   git add "$SS"
   git commit -q -m "Mark ${SID} done in sprint status
 

@@ -1,7 +1,9 @@
 import io
 import uuid
+from typing import Iterable
+
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import and_, false, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.source import SourceChunk, SourceDocument
@@ -45,13 +47,20 @@ async def retrieve_canon_context(
     campaign_id: uuid.UUID | None,
     limit: int = 3,
     max_distance: float = 0.65,  # matches retrieval_service.RAG_RELEVANCE_MAX_DISTANCE — see its comment
+    campaign_ids: Iterable[uuid.UUID] | None = None,
 ) -> tuple[str | None, list[str]]:
     """Return (canon_context_text, source_titles) for the top-k most relevant
     source chunks. Chunks are relevance-gated by cosine distance (0 =
     identical, 2 = opposite), not just top-k — without the cutoff, every
     query got the 3 nearest chunks regardless of whether they had anything to
     do with the question, polluting the prompt with (and crediting sources
-    for) unrelated canon."""
+    for) unrelated canon.
+
+    `campaign_ids` applies only with no `campaign_id` (a chat with no
+    Campaign): the user's own chunks are further restricted to those with no
+    Campaign or in one of `campaign_ids` (the Campaigns the caller's role map
+    makes them GM of; retrieval_service.own_canon_context). An empty
+    collection leaves only chunks with no Campaign."""
     try:
         query_embedding = await embedding_service.embed(query_text)
     except Exception:
@@ -60,8 +69,16 @@ async def retrieve_canon_context(
     # Campaign context is shared: ground on every source doc uploaded to that
     # campaign, not just ones this particular user uploaded. Access to
     # campaign_id is verified by the caller before this runs. With no campaign
-    # selected, fall back to scoping by the requesting user alone.
-    base_filter = SourceChunk.campaign_id == campaign_id if campaign_id else SourceChunk.user_id == user_id
+    # selected, fall back to scoping by the requesting user alone, narrowed
+    # to `campaign_ids` when given.
+    if campaign_id:
+        base_filter = SourceChunk.campaign_id == campaign_id
+    else:
+        base_filter = SourceChunk.user_id == user_id
+        if campaign_ids is not None:
+            ids = list(campaign_ids)
+            base_filter = and_(base_filter, or_(SourceChunk.campaign_id.is_(None),
+                                                SourceChunk.campaign_id.in_(ids) if ids else false()))
 
     distance = SourceChunk.embedding.cosine_distance(query_embedding)
     result = await db.execute(

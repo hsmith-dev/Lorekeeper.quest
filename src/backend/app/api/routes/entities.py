@@ -3,6 +3,7 @@
     GET    /?campaign_id=&type=&status=&q=&visibility=&limit=&offset=   list (Party read)
     POST   /                                                          create (GM)
     POST   /visibility                                                bulk Visibility (GM)
+    GET    /mentions?journal_id=                                      an entry's Mentions (Party read)
     GET    /{entity_id}                                               one Entity (Party read)
     PATCH  /{entity_id}                                               edit fields (GM)
     DELETE /{entity_id}                                               soft delete (GM)
@@ -14,6 +15,9 @@
     POST   /{entity_id}/history/{change_id}/revert                    revert one change (GM)
     POST   /{entity_id}/visibility                                    the Entity's or one field's Visibility (GM)
     POST   /{entity_id}/merge                                         merge `absorbed_id` into it, or preview (GM)
+    GET    /{entity_id}/mentions?confirmed=&page=                     the Entity's Mentions, newest first (Party read)
+    POST   /{entity_id}/mentions/{mention_id}/confirm                 confirm a suggested Mention (GM)
+    DELETE /{entity_id}/mentions/{mention_id}                         remove a Mention (GM)
 
 Every Canon write goes through `world_service.apply_change` / `revert_change`,
 every Visibility write through `access.set_visibility(_many)`, every read
@@ -47,6 +51,14 @@ Filters on the list are applied to what the viewer sees: `status` matches the
 rendered status (a hidden status reads as the type's default), so a filter
 never reveals a hidden value. `q` ranks by `world_service.candidates`
 (score >= 0.6, at most 100), otherwise the order is `lower(name), id`.
+
+Mentions (E0-WorldCore.7): suggested Mentions (`confirmed = false`) are GM
+only. A non-GM ctx (a Player, or a GM in member preview) gets only confirmed
+rows the binding audience formula allows (`scoped_select(EntityMention)`),
+whatever `confirmed=` it sends. Each item carries `entry_title` (from
+`access.resolve_sources`), `entity_name` and `entity_type` (the projected
+Entity). A Mention of another Entity, a hidden or other-Campaign entry and a
+hidden Entity are all the uniform 404.
 """
 from __future__ import annotations
 
@@ -61,20 +73,24 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.access import (
     GM, CampaignContext, ctx_for_request, not_found, project_all, require_campaign, require_campaign_for,
-    resolve_merged, scoped_get, scoped_select, set_visibility, set_visibility_many,
+    resolve_merged, resolve_sources, role_map_for_request, scoped_get, scoped_select, scoped_select_multi, set_visibility,
+    set_visibility_many,
 )
 from app.access.merged import MAX_HOPS
 from app.api.deps import PARTY_READ, get_current_user
 from app.db.models.entity import Entity, EntityAlias, EntityChange, EntityMention, QuestStep
+from app.db.models.journal import JournalEntry
 from app.db.models.user import User
 from app.db.session import get_db
-from app.domain.enums import EntityType, Visibility
+from app.domain.enums import EntityType, EntryKind, Visibility
 from app.schemas.entities import (
-    MAX_PAGE, AliasCreate, BulkEntityVisibilityRequest, EntityAliasGMResponse, EntityChangeGMResponse, EntityCreate,
-    EntityGMResponse, EntityHistoryGMResponse, EntityListGMResponse, EntityPatch, EntityVisibilityRequest,
-    MergeRequest, MergeResponse, QuestStepGMResponse, RevertRequest, StepCreate, StepPatch, UpdatedResponse,
+    MAX_PAGE, AliasCreate, BulkEntityVisibilityRequest, ConfirmMention, EntityAliasGMResponse,
+    EntityChangeGMResponse, EntityCreate, EntityGMResponse, EntityHistoryGMResponse, EntityListGMResponse,
+    EntityMentionGMResponse, EntityMentionListGMResponse, EntityPatch, EntityVisibilityRequest,
+    EntryMentionsGMResponse, MergeRequest, MergeResponse, QuestStepGMResponse, RemoveMention, RevertRequest,
+    StepCreate, StepPatch, UpdatedResponse,
 )
-from app.schemas.sources import RecordRef
+from app.schemas.sources import RecordRef, SourceKind, SourceRef
 from app.services.world_service import (
     CanonChangeError, apply_change, candidates, merge_entities, normalize_name, revert_change,
 )
@@ -88,6 +104,7 @@ _gm_ctx = require_campaign_for(Entity, "entity_id", "gm")
 KIND = "entity"  # the Visibility kind world_service registers
 MIN_SCORE = 0.6
 MAX_MATCHES = 100
+PAGE_SIZE = 20  # an Entity's Mention list
 _CONFLICT_CODES = frozenset({"superseded", "deleted", "merged"})
 
 
@@ -154,6 +171,54 @@ async def _entity_body(db: AsyncSession, ctx: CampaignContext, entity_id: uuid.U
 
 def _page(items: list[Any], total: int, limit: int, offset: int) -> dict[str, Any]:
     return {"items": items, "total": total, "limit": limit, "offset": offset}
+
+
+# ── Mention bodies (E0-WorldCore.7) ────────────────────────────────────────
+
+def _entry_ref(entry: Any) -> SourceRef:
+    kind = SourceKind.JOURNAL if entry.kind == EntryKind.GM.value else SourceKind.PLAYER_JOURNAL
+    return SourceRef(kind=kind, id=entry.id, field="narrative")
+
+
+async def _entries(db: AsyncSession, ctx: CampaignContext, ids: set[uuid.UUID]) -> dict[uuid.UUID, Any]:
+    """The entries among `ids` ctx may see (id, kind, session_date, created_at only)."""
+    if not ids:
+        return {}
+    stmt = (scoped_select(JournalEntry, ctx).where(JournalEntry.id.in_(sorted(ids, key=str)))
+            .with_only_columns(JournalEntry.id, JournalEntry.kind, JournalEntry.session_date, JournalEntry.created_at))
+    return {row.id: row for row in (await db.execute(stmt)).all()}
+
+
+async def _mention_bodies(db: AsyncSession, ctx: CampaignContext, mentions: list[EntityMention],
+                          entries: dict[uuid.UUID, Any]) -> list[Any]:
+    """Each Mention projected for ctx with its entry title (resolve_sources)
+    and its Entity's projected name and type."""
+    if not mentions:
+        return []
+    shown = {m.journal_id for m in mentions if m.journal_id in entries}
+    refs = [_entry_ref(entries[j]) for j in sorted(shown, key=str)]
+    titles = {r.ref.id: r.title for r in await resolve_sources(db, refs, ctx)} if refs else {}
+    ids = sorted({m.entity_id for m in mentions}, key=str)
+    entities = await _rows(db, scoped_select(Entity, ctx).where(Entity.id.in_(ids)))
+    named = {e.id: body for e, body in zip(entities, await project_all(db, entities, ctx))}
+
+    def extra(m: EntityMention) -> dict[str, Any]:
+        body = named.get(m.entity_id)
+        return {"entry_title": titles.get(m.journal_id) if m.journal_id is not None else None,
+                "entity_name": body.name if body is not None else None,
+                "entity_type": body.type if body is not None else None}
+
+    return await project_all(db, mentions, ctx, extra=extra)
+
+
+async def _entity_mention(db: AsyncSession, ctx: CampaignContext, entity_id: uuid.UUID,
+                          mention_id: uuid.UUID) -> EntityMention:
+    """One of this Entity's Mentions (another Entity's is the uniform 404)."""
+    row = (await db.execute(scoped_select(EntityMention, ctx).where(
+        EntityMention.id == mention_id, EntityMention.entity_id == entity_id))).scalars().first()
+    if row is None:
+        not_found()
+    return row
 
 
 # ── Collection ─────────────────────────────────────────────────────────────
@@ -253,6 +318,42 @@ async def bulk_entity_visibility(
     if isinstance(result, Response):
         return result
     return UpdatedResponse(updated=result)
+
+
+# ── An entry's Mentions (declared before /{entity_id}) ─────────────────────
+
+@router.get("/mentions", response_model=None, openapi_extra=PARTY_READ,
+            responses={200: {"model": EntryMentionsGMResponse, "description": _GM_OR_PARTY}})
+async def entry_mentions(
+    request: Request,
+    journal_id: uuid.UUID = Query(...),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """The Mentions of one entry, by `span_start` (nulls last), then the
+    Entity's name, then id. Deleted and merged Entities are left out. A
+    non-GM gets confirmed Mentions it may see only. A hidden, other-Campaign
+    or missing entry is the uniform 404."""
+    roles = await role_map_for_request(request, db, user)
+    entry = (await db.execute(scoped_select_multi(JournalEntry, roles).where(JournalEntry.id == journal_id)
+                              .with_only_columns(JournalEntry.id, JournalEntry.campaign_id))).first()
+    if entry is None:
+        not_found()
+    ctx = await ctx_for_request(request, db, user, entry.campaign_id, "player")
+    entries = await _entries(db, ctx, {entry.id})
+    if entry.id not in entries:
+        not_found()
+    stmt = scoped_select(EntityMention, ctx).where(EntityMention.journal_id == journal_id)
+    if ctx.role != GM:
+        stmt = stmt.where(EntityMention.confirmed.is_(True))
+    mentions = await _rows(db, stmt)
+    ids = sorted({m.entity_id for m in mentions}, key=str)
+    live = await _rows(db, scoped_select(Entity, ctx).where(
+        Entity.id.in_(ids), Entity.deleted_at.is_(None), Entity.merged_into_id.is_(None))) if ids else []
+    names = {e.id: body.name for e, body in zip(live, await project_all(db, live, ctx))}
+    mentions = [m for m in mentions if m.entity_id in names]
+    mentions.sort(key=lambda m: (m.span_start is None, m.span_start or 0, names[m.entity_id].lower(), str(m.id)))
+    return {"items": await _mention_bodies(db, ctx, mentions, entries)}
 
 
 # ── One Entity ─────────────────────────────────────────────────────────────
@@ -511,6 +612,94 @@ async def entity_visibility(
     return UpdatedResponse(updated=result)
 
 
+# ── Mentions (E0-WorldCore.7) ──────────────────────────────────────────────
+
+def _key_date(entry: Any) -> Any:
+    return entry.session_date if entry.session_date is not None else entry.created_at.date()
+
+
+@router.get("/{entity_id}/mentions", response_model=None, openapi_extra=PARTY_READ,
+            responses={200: {"model": EntityMentionListGMResponse, "description": _GM_OR_PARTY}})
+async def entity_mentions(
+    entity_id: uuid.UUID,
+    confirmed: bool | None = None,
+    page: int = Query(1, ge=1),
+    ctx: CampaignContext = Depends(_read_ctx),
+    db: AsyncSession = Depends(get_db),
+):
+    """The Entity's Mentions, newest Session first, PAGE_SIZE per page. A GM
+    may filter on `confirmed`; a non-GM gets confirmed Mentions it may see only
+    (`confirmed=false` is an empty page). Mentions without an entry (GM only)
+    come last."""
+    await scoped_get(db, Entity, ctx, entity_id)
+    gm = ctx.role == GM
+    if not gm and confirmed is False:
+        return {"items": [], "total": 0, "page": page, "page_size": PAGE_SIZE}
+    stmt = scoped_select(EntityMention, ctx).where(EntityMention.entity_id == entity_id)
+    if not gm:
+        stmt = stmt.where(EntityMention.confirmed.is_(True))
+    elif confirmed is not None:
+        stmt = stmt.where(EntityMention.confirmed.is_(confirmed))
+    mentions = await _rows(db, stmt)
+    entries = await _entries(db, ctx, {m.journal_id for m in mentions if m.journal_id is not None})
+    # Fail closed: a Mention whose entry ctx cannot see is dropped.
+    dated = [m for m in mentions if m.journal_id is not None and m.journal_id in entries]
+    undated = [m for m in mentions if m.journal_id is None and gm]
+    dated.sort(key=lambda m: (_key_date(entries[m.journal_id]), entries[m.journal_id].created_at, m.created_at,
+                              str(m.id)), reverse=True)
+    undated.sort(key=lambda m: (m.created_at, str(m.id)), reverse=True)
+    ordered = dated + undated
+    rows = ordered[(page - 1) * PAGE_SIZE:page * PAGE_SIZE]
+    return {"items": await _mention_bodies(db, ctx, rows, entries), "total": len(ordered), "page": page,
+            "page_size": PAGE_SIZE}
+
+
+@router.post("/{entity_id}/mentions/{mention_id}/confirm", response_model=None,
+             responses={200: {"model": EntityMentionGMResponse, "description": "The confirmed Mention (GM schema)."}})
+async def confirm_mention(
+    entity_id: uuid.UUID,
+    mention_id: uuid.UUID,
+    ctx: CampaignContext = Depends(_gm_ctx),
+    db: AsyncSession = Depends(get_db),
+):
+    """Confirm one of this Entity's Mentions: one `confirm_mention` history row.
+    Confirming a Mention that is confirmed already (no earlier confirm) is 422
+    `invalid`; a deleted or merged Entity is 409."""
+    await _entity_mention(db, ctx, entity_id, mention_id)
+
+    async def work():
+        return await apply_change(db, ctx, ConfirmMention(mention_id=mention_id))
+
+    result = await _write(db, work)
+    if isinstance(result, Response):
+        return result
+    row = await scoped_get(db, EntityMention, ctx, mention_id)
+    await db.refresh(row)
+    entries = await _entries(db, ctx, {row.journal_id} if row.journal_id is not None else set())
+    return (await _mention_bodies(db, ctx, [row], entries))[0]
+
+
+@router.delete("/{entity_id}/mentions/{mention_id}", status_code=204)
+async def remove_mention(
+    entity_id: uuid.UUID,
+    mention_id: uuid.UUID,
+    ctx: CampaignContext = Depends(_gm_ctx),
+    db: AsyncSession = Depends(get_db),
+):
+    """Remove one of this Entity's Mentions: one `remove_mention` history row.
+    The backfill never suggests a removed (entry, Entity, narrative) pair again.
+    A deleted or merged Entity is 409."""
+    await _entity_mention(db, ctx, entity_id, mention_id)
+
+    async def work():
+        return await apply_change(db, ctx, RemoveMention(mention_id=mention_id))
+
+    result = await _write(db, work)
+    if isinstance(result, Response):
+        return result
+    return Response(status_code=204)
+
+
 # ── Merge (E0-WorldCore.9) ─────────────────────────────────────────────────
 
 _MERGE_HIDDEN = frozenset({"merged", "deleted"})
@@ -542,6 +731,7 @@ async def merge_entity(
     out: dict[str, Any] = {
         "survivor_id": result.survivor_id, "change_id": result.change_id, "downgrades": result.downgrades,
         "moved_counts": result.moved_counts, "warning": result.warning,
+        "revertible": result.revertible,
     }
     if body.preview:
         out.update(aliases=result.aliases, mention_count=result.mention_count, relationships=result.relationships)

@@ -1127,6 +1127,40 @@ async def test_revert_of_an_update_whose_row_is_gone_is_superseded(db, ev4, gm):
         assert await _code(revert_change(db, gm, upd.id, force=force)) == "superseded"
 
 
+async def test_merge_drops_an_absorbed_suggestion_the_survivor_already_has(db, ev4, gm):
+    # E0-WorldCore.7: uq_entity_mentions_suggested allows one suggestion per
+    # (entry, Entity, source field); the merge keeps the survivor's row.
+    survivor, absorbed = await _create(db, gm, name="Mira"), await _create(db, gm, name="Mira Vale")
+    kept = await apply_change(db, gm, AddMention(entity_id=survivor.id, journal_id=_entry(ev4), quote="Mira",
+                                                 span_start=0, span_end=4))
+    dup = await apply_change(db, gm, AddMention(entity_id=absorbed.id, journal_id=_entry(ev4), quote="Mira Vale",
+                                                span_start=10, span_end=19))
+    other_field = await apply_change(db, gm, AddMention(entity_id=absorbed.id, journal_id=_entry(ev4),
+                                                        source_field="shorthand"))
+    row = await apply_change(db, gm.as_system("merge"), Merge(entity_id=absorbed.id, survivor_id=survivor.id))
+    assert row.op == "merge" and row.new_value["moved"]["mentions"] == 1
+    assert await _get(db, EntityMention, uuid.UUID(dup.new_value["mention_id"])) is None
+    survivor_rows = (await db.execute(sa.select(EntityMention).where(
+        EntityMention.entity_id == survivor.id, EntityMention.journal_id == _entry(ev4),
+        EntityMention.source_field == "narrative").execution_options(populate_existing=True))).scalars().all()
+    assert [m.id for m in survivor_rows] == [uuid.UUID(kept.new_value["mention_id"])]
+    assert survivor_rows[0].quote == "Mira"
+    moved = await _get(db, EntityMention, uuid.UUID(other_field.new_value["mention_id"]))
+    assert moved.entity_id == survivor.id
+
+
+async def test_merge_drops_an_absorbed_suggestion_the_survivor_has_confirmed(db, ev4, gm):
+    survivor, absorbed = await _create(db, gm, name="Mira"), await _create(db, gm, name="Mira Vale")
+    kept = await apply_change(db, gm, AddMention(entity_id=survivor.id, journal_id=_entry(ev4), confirmed=True))
+    dup = await apply_change(db, gm, AddMention(entity_id=absorbed.id, journal_id=_entry(ev4), quote="Mira Vale"))
+    await apply_change(db, gm.as_system("merge"), Merge(entity_id=absorbed.id, survivor_id=survivor.id))
+    assert await _get(db, EntityMention, uuid.UUID(dup.new_value["mention_id"])) is None
+    rows = (await db.execute(sa.select(EntityMention).where(
+        EntityMention.entity_id == survivor.id, EntityMention.journal_id == _entry(ev4))
+        .execution_options(populate_existing=True))).scalars().all()
+    assert [(m.id, m.confirmed) for m in rows] == [(uuid.UUID(kept.new_value["mention_id"]), True)]
+
+
 async def test_state_made_elsewhere_is_invalid_not_a_stray_row(db, ev4, gm):
     a = ev4.a.campaign_id
     entity, other = await _create(db, gm), await _create(db, gm)
@@ -1583,10 +1617,76 @@ async def test_merge_drops_an_absorbed_suggestion_the_survivor_has_and_revert_re
     assert [m.id for m in await _mentions_of(db, survivor.id)] == [uuid.UUID(kept.new_value["mention_id"])]
     assert await _get(db, EntityMention, dup_id) is None
 
+    # The survivor's Mention of the pair is still there when the suggestion comes back, under
+    # uq_entity_mentions_suggested (eed202f2eead): the revert must not violate it.
+    assert (await db.execute(sa.text(
+        "SELECT count(*) FROM pg_indexes WHERE indexname = 'uq_entity_mentions_suggested'"))).scalar_one() == 1
     await revert_change(db, gm, row.id)
+    await db.flush()
     back = await _get(db, EntityMention, dup_id)
     assert (back.entity_id, back.confirmed, back.span_start, back.span_end) == (absorbed.id, False, 10, 18)
-    assert len(await _mentions_of(db, survivor.id)) == 1
+    assert [m.id for m in await _mentions_of(db, survivor.id)] == [uuid.UUID(kept.new_value["mention_id"])]
+    await db.commit()  # the index holds at commit too
+
+
+async def test_merge_revert_skips_a_suggestion_the_absorbed_entity_has_again(db, ev4, gm):
+    """A dropped suggestion is not restored over a suggestion of the same pair the absorbed Entity holds
+    (the index would refuse it): with force it is skipped, without force the revert is superseded."""
+    entry = _entry(ev4)
+    survivor, absorbed = await _create(db, gm, name="Wren"), await _create(db, gm, name="Old Wren")
+    await apply_change(db, gm, AddMention(entity_id=survivor.id, journal_id=entry, span_start=0, span_end=4))
+    await apply_change(db, gm, AddMention(entity_id=absorbed.id, journal_id=entry, span_start=10, span_end=18))
+    row = await apply_change(db, gm.as_system("merge"), Merge(entity_id=absorbed.id, survivor_id=survivor.id))
+    # A suggestion of the same pair appears on the absorbed row behind the merge's back.
+    db.add(EntityMention(campaign_id=ev4.a.campaign_id, journal_id=entry, entity_id=absorbed.id,
+                         source_field="narrative", origin="manual", confirmed=False, span_start=30, span_end=34))
+    await db.flush()
+    assert await _code(revert_change(db, gm, row.id)) == "superseded"
+    undo = await revert_change(db, gm, row.id, force=True)
+    assert undo.new_value["skipped"] == 1
+    await db.commit()
+    assert len([m for m in await _mentions_of(db, absorbed.id) if not m.confirmed]) == 1
+
+
+async def test_a_merge_too_large_to_undo_is_not_revertible(db, ev4, gm, monkeypatch):
+    survivor, absorbed = await _create(db, gm, name="Cole"), await _create(db, gm, name="Old Cole")
+    for i in range(3):
+        await apply_change(db, gm, AddAlias(entity_id=absorbed.id, alias=f"Cole the {i}th"))
+    monkeypatch.setattr(ws, "MERGE_UNDO_MAX_BYTES", 64)
+    preview = await ws.merge_entities(db, gm, survivor.id, absorbed.id, preview=True)
+    assert preview.revertible is False
+    done = await ws.merge_entities(db, gm, survivor.id, absorbed.id)
+    assert done.revertible is False
+    row = await _get(db, EntityChange, done.change_id)
+    assert (row.new_value["revertible"], row.new_value["undo"]) == (False, None)
+    assert await _code(revert_change(db, gm, row.id)) == "not_revertible"
+
+
+async def test_concurrent_merges_sharing_holders_do_not_deadlock(db, ev4, gm):
+    """A absorbs into S1 while B absorbs into S2; A names B and B names A (parent_location), so each
+    merge's ENTITY_REF holder is the other's absorbed Entity. Without the Campaign merge lock the two
+    transactions lock {A, S1} then B, and {B, S2} then A: a deadlock. With it the second waits."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    s1_, s2_ = await _create(db, gm, type="location", name="Keep"), await _create(db, gm, type="location", name="Tower")
+    a = await _create(db, gm, type="location", name="Old Keep")
+    b = await _create(db, gm, type="location", name="Old Tower")
+    await apply_change(db, gm, UpdateField(entity_id=a.id, field="attributes.parent_location_entity_id", value=b.id))
+    await apply_change(db, gm, UpdateField(entity_id=b.id, field="attributes.parent_location_entity_id", value=a.id))
+    await db.commit()
+    factory = async_sessionmaker(db.bind, expire_on_commit=False)
+    async with factory() as one, factory() as two:
+        first = await apply_change(one, gm.as_system("merge"), Merge(entity_id=a.id, survivor_id=s1_.id))
+        second = asyncio.create_task(
+            apply_change(two, gm.as_system("merge"), Merge(entity_id=b.id, survivor_id=s2_.id)))
+        await asyncio.sleep(0.5)
+        assert not second.done()  # waiting on the merge lock, holding no row lock
+        await one.commit()
+        other = await asyncio.wait_for(second, timeout=10)
+        await two.commit()
+    assert first.op == other.op == "merge"
+    assert (await _get(db, Entity, a.id)).merged_into_id == s1_.id
+    assert (await _get(db, Entity, b.id)).merged_into_id == s2_.id
 
 
 async def test_merge_moves_duplicate_confirmed_mentions(db, ev4, gm):

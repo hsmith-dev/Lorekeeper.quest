@@ -5,7 +5,9 @@ The ``ev4`` fixture (tests/ev4/fixtures.py) builds on tests/conftest.py's
 appended to $GITHUB_STEP_SUMMARY in GitHub Actions.
 
 The run fails (exit status 1) when any leak was recorded, even if the
-probe that found it swallowed the EV4Leak, and when the summary itself
+probe that found it swallowed the EV4Leak, when any probe case in
+tests/ev4/test_probes.py was skipped (a skipped probe checks nothing, so
+EV-4 is a hard gate: zero leaks, zero skips), and when the summary itself
 cannot be computed.
 """
 from __future__ import annotations
@@ -17,6 +19,14 @@ from tests.ev4.fixtures import ev4  # noqa: F401  (registers the fixture)
 from tests.ev4.registry import load_exemptions, load_pending, load_probes
 
 _summary_errors: list[str] = []
+_skipped_probes: list[str] = []
+PROBE_RUNNER = "tests/ev4/test_probes.py"
+
+
+def pytest_runtest_logreport(report):  # pytest's TestReport (the hook's argument name), not tests.ev4.report
+    if report.skipped and PROBE_RUNNER in report.nodeid.replace("\\", "/"):
+        reason = report.longrepr[-1] if isinstance(report.longrepr, tuple) else str(report.longrepr or "")
+        _skipped_probes.append(f"{report.nodeid} ({reason})")
 
 
 def _summary() -> str:
@@ -52,6 +62,9 @@ def _failure_reasons() -> list[str]:
     if report.leak_count() > 0:
         reasons.append(f"EV-4 recorded {report.leak_count()} leak(s); a leak fails the build even when "
                        "a probe catches the EV4Leak")
+    for skipped in _skipped_probes:
+        reasons.append(f"EV-4 probe skipped: {skipped}; EV-4 is a hard gate and a skipped probe fails the "
+                       "build (fix the probe or the setup it needs, never skip)")
     return reasons
 
 

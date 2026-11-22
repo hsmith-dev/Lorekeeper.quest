@@ -103,10 +103,32 @@ def _parse_job_id(value: Any) -> uuid.UUID:
         raise ValueError("enqueue: unknown dependency") from None
 
 
-async def _active_with_key(db: AsyncSession, key: str) -> tuple[uuid.UUID, uuid.UUID, str] | None:
+# A retry held behind a Job its ctx cannot see takes
+# `{key}#retry:{campaign}:{starter}` (app/jobs/control.py retry_job); it still
+# holds `key` for dedup in its Campaign. Callers may not use the mark.
+RETRY_KEY_MARK = "#retry:"
+
+
+def _like_escape(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+async def _active_with_key(db: AsyncSession, key: str,
+                           campaign_id: uuid.UUID | None = None) -> tuple[uuid.UUID, uuid.UUID, str] | None:
+    """An active Job holding `key`: exactly (any Campaign: the index is
+    global), or as a held retry of `campaign_id` (`{key}#retry:{campaign_id}:...`).
+    A row of `campaign_id` is preferred, then the exact key."""
+    exact = Job.idempotency_key == key
+    held = sa.false() if campaign_id is None else Job.idempotency_key.like(
+        f"{_like_escape(f'{key}{RETRY_KEY_MARK}{campaign_id}:')}%", escape="\\")
+    order = [sa.case((exact, 0), else_=1)]
+    if campaign_id is not None:
+        order.insert(0, sa.case((Job.campaign_id == campaign_id, 0), else_=1))
     row = (await db.execute(
         sa.select(Job.id, Job.campaign_id, Job.kind).where(
-            Job.idempotency_key == key, Job.status.in_([s.value for s in ACTIVE_STATUSES]))
+            sa.or_(exact, held),
+            Job.status.in_([s.value for s in ACTIVE_STATUSES]))
+        .order_by(*order, Job.created_at, Job.id).limit(1)
     )).first()
     return (row.id, row.campaign_id, row.kind) if row is not None else None
 
@@ -144,6 +166,8 @@ async def enqueue(
     _validate_payload(payload)
     if not isinstance(idempotency_key, str) or not idempotency_key.strip():
         raise ValueError("enqueue: idempotency_key is required")
+    if RETRY_KEY_MARK in idempotency_key:
+        raise ValueError(f"enqueue: idempotency_key may not contain {RETRY_KEY_MARK!r} (reserved for held retries)")
     if ctx.read_only or ctx.user_id is None:
         raise ValueError("enqueue: needs a user's writable ctx (not a reduced or anonymous one)")
 
@@ -161,7 +185,7 @@ async def enqueue(
         hold = dep.status in ACTIVE_STATUSES
 
     for _ in range(_INSERT_ATTEMPTS):
-        found = await _active_with_key(db, idempotency_key)
+        found = await _active_with_key(db, idempotency_key, ctx.campaign_id)
         if found is not None:
             return _existing_or_raise(found, ctx, job_kind.name)
         job = Job(

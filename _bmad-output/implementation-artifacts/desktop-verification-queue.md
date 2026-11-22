@@ -159,3 +159,6 @@ Stories were merged on green GitHub CI while the desktop was offline (owner deci
 - [ ] Ollama OOM-killed at 5.25g on extraction_300? (default no-CPU-cap config — E0-Platform.10 follow-up)
 - [ ] GPU: `ollama ps` shows 100% GPU; stt reports device `cuda`; stt memory.peak vs 1.25g
 - [ ] `KOBOLD_URL=http://host.docker.internal:11434` with bundled Ollama at 0 replicas → `web` reaches the host model
+
+## E0-QA.14 — EV-4 zero-leak hard gate (PR #81)
+- [ ] Live spoiler eval (closes the spoiler-eval AC and SM-4): own pgvector + Valkey containers, `ENVIRONMENT` not `test`, from `src/backend`: `python scripts/eval_spoiler.py --database-url postgresql+asyncpg://…/lorekeeper_eval_test --llm-url http://127.0.0.1:11434 --llm-model lorekeeper --out ../../docs/SPOILER_EVAL.md` → leaks=0, vacuous=0; commit the regenerated doc

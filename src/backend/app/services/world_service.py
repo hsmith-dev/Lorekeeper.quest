@@ -88,7 +88,9 @@ or a ref no longer naming the survivor, is `superseded` unless `force`
 record is stale), even with `force`; a survivor merged or deleted since is
 `merged` / `deleted`. The revert row is on the survivor with field NULL (GM).
 Visibility changes, `migrated`, `source_deleted`, `canon_note`, a merge
-without an undo record and reverts of non-field changes are `not_revertible`.
+without an undo record (written before E0-WorldCore.9, or whose record would
+exceed `MERGE_UNDO_MAX_BYTES`, `revertible: false`) and reverts of non-field
+changes are `not_revertible`.
 
 **Names** (E0-WorldCore.4). Every alias key is `normalize_name(alias)`
 (app/domain/names.py), recomputed from the stored surface form when compared;
@@ -96,8 +98,10 @@ without an undo record and reverts of non-field changes are `not_revertible`.
 `match_names` and `candidates` (app/services/world_matching.py) are
 re-exported here with `normalize_name` and `NAME_PREFIXES`.
 
-**Merge primitive** (`op=merge`, under `as_system("merge")`): the pair is
-locked in sorted-id order (ENTITY_REF holders are locked after it). The absorbed Entity's aliases, Mentions and edges move to the
+**Merge primitive** (`op=merge`, under `as_system("merge")`): a merge and a
+merge revert first take the Campaign's merge advisory lock (`_merge_lock`), so
+two merges never hold Entity row locks at once and cannot deadlock on a shared
+ENTITY_REF holder; then the pair is locked in sorted-id order. The absorbed Entity's aliases, Mentions and edges move to the
 survivor, floored `gm`/`private` when the absorbed Entity is not `party`;
 a moved alias is floored by the stricter of that and the absorbed Entity's
 `field_visibility.aliases` (an existing floor that is already restrictive is
@@ -1156,7 +1160,49 @@ def _edge_record(edge: EntityRelationship) -> dict[str, Any]:
             "started_at": edge.started_at, "ended_at": edge.ended_at}
 
 
+# The undo record is capped (E0-WorldCore.9): a merge whose record would exceed
+# this many bytes of JSON still runs, but stores no record and is not revertible
+# (`revertible: false` in its row, the MergeResult and the preview). Everything
+# in it but dropped edge notes and alias / Mention quotes is fixed-size per row.
+MERGE_UNDO_MAX_BYTES = 256 * 1024
+
+
+def _undo_record(work: _MergeWork, name_alias_id: uuid.UUID | None) -> dict[str, Any]:
+    """What revert_change un-merges from, read before anything is written:
+    each moved row with its floor (and an edge with its ends), the deleted
+    rows in full, the added name alias, the moved steps and the repointed refs."""
+    return _json({
+        "aliases": [{"id": a.id, "floor": a.visibility_floor, "normalized_alias": a.normalized_alias}
+                    for a in work.move_aliases],
+        "mentions": [{"id": m.id, "floor": m.visibility_floor} for m in work.mentions],
+        "relationships": [{"id": e.id, "floor": e.visibility_floor, "source_entity_id": e.source_entity_id,
+                           "target_entity_id": e.target_entity_id} for e, _s, _t in work.move_edges],
+        "dropped_aliases": [_alias_record(a) for a in work.drop_aliases],
+        "dropped_relationships": [_edge_record(e) for e in work.drop_edges],
+        "dropped_mentions": [_mention_values(m) | {"quote": m.quote, "origin": m.origin,
+                                                   "visibility_floor": m.visibility_floor}
+                             for m in work.drop_mentions],
+        "name_alias_id": name_alias_id,
+        "quest_steps": [s.id for s in work.steps],
+        "attribute_refs": [{"entity_id": h.id, "key": k} for h, k in work.repoint],
+    })
+
+
+def _undo_fits(undo: dict[str, Any]) -> bool:
+    return len(json.dumps(undo, separators=(",", ":"), default=str)) <= MERGE_UNDO_MAX_BYTES
+
+
+async def _merge_lock(run: _Run) -> None:
+    """One merge (or merge revert) per Campaign at a time, taken before any row
+    lock: two merges whose pairs and ENTITY_REF holders overlap would otherwise
+    lock the same Entities in different orders and deadlock. Held to the end of
+    the transaction."""
+    await run.db.execute(sa.select(sa.func.pg_advisory_xact_lock(
+        sa.func.hashtextextended(f"entity_merge:{run.ctx.campaign_id}", 0))))
+
+
 async def _merge(run: _Run, c: Merge) -> _MergePlan | EntityChange:
+    await _merge_lock(run)
     absorbed, survivor = await _merge_pair(run, c.entity_id, c.survivor_id)
     repeat = await _repeat(run, Op.MERGE, survivor.id, None,
                            lambda r: _val(r, "new", "absorbed_id") == str(absorbed.id))
@@ -1170,49 +1216,36 @@ async def _merge(run: _Run, c: Merge) -> _MergePlan | EntityChange:
         if floor is not None and not _restrictive_floor(row.visibility_floor):
             floors.append((row, floor))
 
-    # The undo record (revert_change un-merges from it): each moved row with
-    # its floor (and an edge with its ends) before the merge, the deleted rows
-    # in full, the added name alias, the moved steps and the repointed refs.
-    undo: dict[str, Any] = {"aliases": [], "mentions": [], "relationships": [], "dropped_aliases": [],
-                            "dropped_relationships": [], "dropped_mentions": [], "name_alias_id": None,
-                            "quest_steps": [], "attribute_refs": []}
+    name_alias_id = uuid.uuid4() if work.name_alias is not None else None
+    undo: dict[str, Any] | None = _undo_record(work, name_alias_id)
+    revertible = _undo_fits(undo)
+    if not revertible:
+        undo = None
     for alias in work.drop_aliases:
-        undo["dropped_aliases"].append(_alias_record(alias))
         await run.delete(alias)
     for alias in work.move_aliases:
-        undo["aliases"].append({"id": alias.id, "floor": _json(alias.visibility_floor),
-                                "normalized_alias": alias.normalized_alias})
         alias.entity_id = survivor.id
         alias.normalized_alias = normalize_name(alias.alias)
         run.touch(alias)
         floored(alias, work.alias_floor)
     if work.name_alias is not None:
-        name_row = run.add(EntityAlias(id=uuid.uuid4(), campaign_id=run.ctx.campaign_id, entity_id=survivor.id,
+        name_row = run.add(EntityAlias(id=name_alias_id, campaign_id=run.ctx.campaign_id, entity_id=survivor.id,
                                        alias=work.name_alias, normalized_alias=normalize_name(work.name_alias)))
         floored(name_row, work.floor)
-        undo["name_alias_id"] = name_row.id
     for mention in work.drop_mentions:
-        undo["dropped_mentions"].append(_mention_values(mention) | {
-            "quote": mention.quote, "origin": mention.origin, "visibility_floor": _json(mention.visibility_floor)})
         await run.delete(mention)
     for mention in work.mentions:
-        undo["mentions"].append({"id": mention.id, "floor": _json(mention.visibility_floor)})
         mention.entity_id = survivor.id
         run.touch(mention)
         floored(mention, work.floor)
     for edge in work.drop_edges:
-        undo["dropped_relationships"].append(_edge_record(edge))
         await run.delete(edge)
     for edge, source, target in work.move_edges:
-        undo["relationships"].append({"id": edge.id, "floor": _json(edge.visibility_floor),
-                                      "source_entity_id": edge.source_entity_id,
-                                      "target_entity_id": edge.target_entity_id})
         edge.source_entity_id, edge.target_entity_id = source, target
         run.touch(edge)
         floored(edge, work.floor)
         run.ref(source, target)
     for step in work.steps:
-        undo["quest_steps"].append(step.id)
         step.quest_entity_id = survivor.id
         run.touch(step)
     for holder, key in work.repoint:
@@ -1221,14 +1254,13 @@ async def _merge(run: _Run, c: Merge) -> _MergePlan | EntityChange:
         holder.attributes = attrs  # a new dict: JSONB change tracking sees it
         run.touch(holder)
         run.ref(holder.id)
-        undo["attribute_refs"].append({"entity_id": holder.id, "key": key})
     absorbed.merged_into_id = survivor.id
     run.touch(absorbed)
     run.narrow(survivor.id, absorbed.id, *(h.id for h in work.ref_holders))
     run.ref(absorbed.id)
     row = run.history(survivor.id, Op.MERGE, None, None, {
         "absorbed_id": absorbed.id, "floor": work.floor, "moved": work.moved(), "downgrades": work.downgrades,
-        "warning": work.warning, "undo": undo})
+        "warning": work.warning, "revertible": revertible, "undo": undo})
     return _MergePlan(row, floors)
 
 
@@ -1239,6 +1271,7 @@ async def _revert_merge(run: _Run, c: Revert, target: EntityChange) -> _MergePla
     absorbed_id = _ref_uuid(new.get("absorbed_id"))
     if not isinstance(undo, dict) or absorbed_id is None:
         raise CanonChangeError("not_revertible", "This merge has no undo record")
+    await _merge_lock(run)
     # Reverted once already: its undo record is stale (the pair may have been merged again since).
     if await run.first(scoped_select(EntityChange, run.ctx).where(EntityChange.reverted_change_id == target.id)):
         raise CanonChangeError("superseded", "This merge was reverted already")
@@ -1343,6 +1376,14 @@ async def _revert_merge(run: _Run, c: Revert, target: EntityChange) -> _MergePla
                 or await run.first(scoped_select(JournalEntry, run.ctx).where(JournalEntry.id == journal_id)) is None):
             touched()
             continue
+        # uq_entity_mentions_suggested (eed202f2eead) is per (entry, Entity, field): the survivor's
+        # Mention of the pair stays where it is, and a suggestion is restored only when the absorbed
+        # Entity has none of the pair already (the moved-back rows above included).
+        if not item.get("confirmed") and await run.first(scoped_select(EntityMention, run.ctx).where(
+                EntityMention.entity_id == absorbed.id, EntityMention.journal_id == journal_id,
+                EntityMention.source_field == item.get("source_field"), EntityMention.confirmed.is_(False))):
+            touched()
+            continue
         # A constructor restore of the dropped suggestion, with the floor it had.
         run.add(EntityMention(
             id=mention_id, campaign_id=run.ctx.campaign_id, journal_id=journal_id, entity_id=absorbed.id,
@@ -1392,6 +1433,7 @@ class MergeResult:
     downgrades: list[dict[str, Any]]
     moved_counts: dict[str, int]
     warning: str | None
+    revertible: bool = True  # False when the undo record would exceed MERGE_UNDO_MAX_BYTES
     aliases: list[str] | None = None
     mention_count: int | None = None
     relationships: list[dict[str, Any]] | None = None
@@ -1425,7 +1467,9 @@ async def merge_entities(db: AsyncSession, ctx: CampaignContext, survivor_id: An
                          | ({work.name_alias} if work.name_alias else set()), key=lambda s: (s.lower(), s))
         return MergeResult(
             survivor_id=survivor.id, absorbed_id=absorbed.id, change_id=None, downgrades=work.downgrades,
-            moved_counts=work.moved(), warning=work.warning, aliases=aliases, mention_count=len(work.mentions),
+            moved_counts=work.moved(), warning=work.warning,
+            revertible=_undo_fits(_undo_record(work, uuid.uuid4() if work.name_alias else None)),
+            aliases=aliases, mention_count=len(work.mentions),
             relationships=[{"id": e.id, "source_entity_id": s, "target_entity_id": t,
                             "relationship_type_id": e.relationship_type_id} for e, s, t in work.move_edges])
     try:
@@ -1437,7 +1481,7 @@ async def merge_entities(db: AsyncSession, ctx: CampaignContext, survivor_id: An
     return MergeResult(
         survivor_id=row.entity_id, absorbed_id=absorbed_uuid, change_id=row.id,
         downgrades=list(new.get("downgrades") or []), moved_counts=dict(new.get("moved") or {}),
-        warning=new.get("warning"))
+        warning=new.get("warning"), revertible=bool(new.get("revertible", True)))
 
 
 merge = merge_entities  # the story's name for it

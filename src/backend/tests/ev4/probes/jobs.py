@@ -14,7 +14,9 @@ naming a Party entry must reach them as exactly `{"kind", "id"}`.
     ahead of theirs in the same queue); a hidden Campaign is a missing one;
   * POST /{job_id}/retry and /cancel: a hidden Job (failed, queued, running)
     answers like a missing id and is left untouched (never a 409 that would
-    reveal its state); the actor's own Job does change;
+    reveal its state); the actor's own Job does change; a retry whose key
+    a hidden active Job holds answers exactly like a free-key retry
+    (E0-QA.14), while a visible holder is still the 409;
   * GET /stream: only the actor's own `job` events reach a Player (and none
     the member view), `result_ref` filtered; nginx streams the route
     unbuffered in the generic zone.
@@ -30,7 +32,7 @@ from datetime import datetime, timedelta, timezone
 import fakeredis
 
 from tests.ev4 import nginx
-from tests.ev4.families import assert_hidden_equals_missing, assert_no_canary
+from tests.ev4.families import _headers, assert_hidden_equals_missing, assert_no_canary
 from tests.ev4.fixtures import mint_canary
 from tests.ev4.probes._support import (
     MISSING, add_entry, assert_same_answer, authenticated, is_gm_of_a, outsider, previewing,
@@ -238,6 +240,74 @@ async def probe_job_retry(ev4, actor):
     # JOBS_EAGER runs the retried noop at once: queued, then done.
     await _probe_write(ev4, actor, "retry", ("failed", "queued", "running", "done"), "failed", 202,
                        ("queued", "done"))
+
+
+async def _set_key(ev4, job_id, key: str) -> None:
+    from app.db.models import Job
+
+    row = await ev4.db.get(Job, job_id)
+    row.idempotency_key = key
+    await ev4.db.commit()
+
+
+def _same_retry_answer(actor, held, held_id, free, free_id) -> None:
+    """A retry whose key a hidden Job holds answers like one whose key is
+    free: same status, same body (each with its own Job id), same headers."""
+    note_family_call()
+    assert_no_canary(actor, held)
+    assert_no_canary(actor, free)
+    if free.status_code != 202:
+        raise ValueError(f"the free-key retry control answered {free.status_code} ({free.text[:200]}); the "
+                         "comparison needs the normal 202")
+    diffs = []
+    if held.status_code != free.status_code:
+        diffs.append(f"status: held {held.status_code} vs free {free.status_code}")
+    if held.text.replace(str(held_id), "<id>") != free.text.replace(str(free_id), "<id>"):
+        diffs.append(f"body: held {held.text[:200]!r} vs free {free.text[:200]!r}")
+    if _headers(held) != _headers(free):
+        diffs.append("headers differ")
+    if diffs:
+        record_leak(f"EV-4 leak: {actor.name}'s retry reveals a hidden Job holding its idempotency key", diffs)
+
+
+@ev4_probe("POST", "/api/jobs/{job_id}/retry", actors=("player", "co_gm", "cross_gm_player"))
+async def probe_job_retry_hidden_key_holder(ev4, actor):
+    """E0-QA.14: the actor retries their own failed Job while an active Job
+    they cannot see holds its key (another Campaign's, and for a non-GM of A
+    the Owner's in A). The answer is the free-key answer (never the 409 that
+    would reveal the holder); the holder is untouched and the row waits
+    queued behind it. A holder they can see (their own running Job) is
+    still the 409."""
+    from app.jobs.control import KEY_IN_USE
+
+    other = await outsider(ev4)
+    holders = [await _job(ev4, starter=other.owner_id, campaign_id=other.campaign_id, canary=True, offset_s=2)]
+    if not is_gm_of_a(ev4, actor):
+        holders.append(await _job(ev4, starter=ev4.a.owner_id, canary=True, offset_s=3))
+    role = _role(ev4, actor)
+    for holder in holders:
+        key = f"ev4-jobs-held:{uuid.uuid4().hex}"
+        await _set_key(ev4, holder, key)
+        held = await _job(ev4, starter=actor.user_id, ctx_kind=role, status="failed")
+        await _set_key(ev4, held, key)
+        free = await _job(ev4, starter=actor.user_id, ctx_kind=role, status="failed")
+        r_held = await actor.post(f"/api/jobs/{held}/retry")
+        r_free = await actor.post(f"/api/jobs/{free}/retry")
+        _same_retry_answer(actor, r_held, held, r_free, free)
+        if await _status(ev4, holder) != "queued":
+            record_leak(f"EV-4 leak: {actor.name}'s retry changed a Job they cannot see", [str(holder)])
+        assert await _status(ev4, held) == "queued"  # held behind the holder, not run
+
+    # Visible holder: the actor's own running Job holds the key -> 409, as before.
+    key = f"ev4-jobs-held:{uuid.uuid4().hex}"
+    running = await _job(ev4, starter=actor.user_id, ctx_kind=role, status="running")
+    await _set_key(ev4, running, key)
+    failed = await _job(ev4, starter=actor.user_id, ctx_kind=role, status="failed")
+    await _set_key(ev4, failed, key)
+    r = await actor.post(f"/api/jobs/{failed}/retry")
+    assert_no_canary(actor, r)
+    assert r.status_code == 409 and r.json() == {"detail": KEY_IN_USE}, r.text
+    assert await _status(ev4, failed) == "failed"
 
 
 @ev4_probe("POST", "/api/jobs/{job_id}/cancel", actors=ACTORS)

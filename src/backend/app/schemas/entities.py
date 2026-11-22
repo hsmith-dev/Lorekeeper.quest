@@ -111,6 +111,10 @@ class EntityMentionGMResponse(BaseModel):
     span_start: int | None
     span_end: int | None
     created_at: datetime
+    # E0-WorldCore.7: the Mention routes fill these (entry title from resolve_sources).
+    entry_title: str | None = None
+    entity_name: str | None = None
+    entity_type: EntityType | None = None
 
     model_config = _ORM
 
@@ -125,6 +129,10 @@ class EntityMentionPartyResponse(BaseModel):
     span_start: int | None
     span_end: int | None
     created_at: datetime
+    # E0-WorldCore.7: the Mention routes fill these (each as ctx may see it).
+    entry_title: str | None = None
+    entity_name: str | None = None
+    entity_type: EntityType | None = None
 
     model_config = _ORM
 
@@ -680,6 +688,29 @@ class MergeResponse(BaseModel):
     downgrades: list[MergeDowngrade] = Field(default_factory=list)
     moved_counts: dict[str, int] = Field(default_factory=dict)
     warning: str | None = None
+    revertible: bool = True
     aliases: list[str] | None = None
     mention_count: int | None = None
     relationships: list[MergeRelationship] | None = None
+# ── Mention lists (E0-WorldCore.7) ─────────────────────────────────────────
+
+class EntityMentionListGMResponse(BaseModel):
+    items: list[EntityMentionGMResponse]
+    total: int
+    page: int
+    page_size: int
+
+
+class EntityMentionListPartyResponse(BaseModel):
+    items: list[EntityMentionPartyResponse]
+    total: int
+    page: int
+    page_size: int
+
+
+class EntryMentionsGMResponse(BaseModel):
+    items: list[EntityMentionGMResponse]
+
+
+class EntryMentionsPartyResponse(BaseModel):
+    items: list[EntityMentionPartyResponse]

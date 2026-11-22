@@ -55,10 +55,9 @@ from app.services.chat_service import (
 from app.services.llm_provider import LLMConfig, complete_messages
 from app.services.retrieval_service import (
     RAG_RELEVANCE_MAX_DISTANCE, SOURCE_DOCUMENTS, hybrid_search_journal, hybrid_search_own_journals,
-    retrieve_sources,
+    own_canon_context, retrieve_sources,
 )
 from app.services.shorthand_service import get_glossary
-from app.services.source_service import retrieve_canon_context
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -353,7 +352,9 @@ async def _prepare_chat(
             found = await retrieve_sources(db, search_query, ctx=ctx, kinds=[SOURCE_DOCUMENTS])
             canon_context, canon_sources = found[SOURCE_DOCUMENTS]
         else:
-            canon_context, canon_sources = await retrieve_canon_context(db, search_query, user.id, None)
+            # No Campaign: the user's own uploads, only in Campaigns the role
+            # map makes them GM of now (never a Campaign they were demoted in).
+            canon_context, canon_sources = await own_canon_context(db, search_query, roles=scope, user_id=user.id)
     except Exception:
         pass  # RAG failure must not break chat
 
