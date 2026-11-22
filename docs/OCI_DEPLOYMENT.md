@@ -19,7 +19,10 @@ tradeoff is ARM64 — every image in `docker-compose.prod.yml` was verified to
 have a real `linux/arm64` build (not just an x86_64 image running under
 emulation), including a from-scratch `docker buildx build --platform
 linux/arm64` of the custom backend image, so this isn't a "should work"
-claim.
+claim. Since E0-Platform.9, `.github/workflows/images.yml` builds all four of
+Lorekeeper's own images (`docker-bake.hcl`: web, ml, stt's CPU target, nginx)
+natively for both `linux/amd64` and `linux/arm64` on every PR, so an arm64
+break shows up in CI, not on the instance.
 
 ## 1. Create the instance (OCI Console)
 
@@ -103,9 +106,37 @@ cd ~/lorekeeper
 ```
 
 This installs Docker if missing, generates `.env` (with a random
-`SECRET_KEY`), brings up the full stack (`docker-compose.prod.yml`), waits
-for Ollama to report healthy, and imports the fine-tuned model. Full detail
-in the script's own header comment.
+`SECRET_KEY`), applies the edition rule, builds Lorekeeper's images on the
+instance, pulls the upstream images, brings up the full stack
+(`docker-compose.prod.yml` and `.env`, nothing else), waits for Ollama to
+report healthy, and imports the fine-tuned model. Full detail in the
+script's own header comment.
+
+- **Built here, never pulled or pushed.** Lorekeeper is distributed as
+  source. `docker buildx bake --load` builds `lorekeeper-web` (also the
+  worker's image), `lorekeeper-ml`, `lorekeeper-stt` and `lorekeeper-nginx`
+  natively for the instance's arm64 CPU, tagged with `LOREKEEPER_TAG`
+  (from the environment or `.env`; else `git describe`; else `latest`).
+  `docker compose pull --ignore-buildable` fetches only the upstream
+  multi-arch images (Postgres, Valkey, Ollama). The script never logs in to
+  or pushes to a registry. Without buildx it falls back to
+  `docker compose build`.
+- **Set a tag per release.** Put `LOREKEEPER_TAG=v1.2` (say) in `.env` when
+  you deploy a release. The previous release's images then stay on the host
+  under their own tag, and a clean release tag that is already built is
+  reused instead of rebuilt: that is what makes a rollback quick (below).
+  `latest` and a dirty checkout always rebuild.
+- **Edition (AD-16).** `LOREKEEPER_EDITION=agpl` (the default) adds the
+  `tts` profile to `COMPOSE_PROFILES`. With `LOREKEEPER_EDITION=commercial`
+  the script never sets it, and if `COMPOSE_PROFILES` asks for `tts` it
+  stops before building anything, with a line explaining that the
+  commercial edition uses browser speech.
+- **Upgrades back up first.** When the new `web` image starts against a
+  database that has data and a migration pending, it writes
+  `pre-upgrade_<UTC stamp>_<old revision>.dump` to the `backups` volume
+  before `alembic upgrade head` runs (`scripts/boot_migrate.py`). If that
+  dump fails, `web` exits with a `boot-migrate:` line and the database is
+  not touched. The newest `PRE_UPGRADE_BACKUPS_KEEP` (default 5) are kept.
 
 **Before it's actually safe to expose**, edit `.env` on the instance and set:
 
@@ -117,6 +148,48 @@ FRONTEND_URL=http://<public-ip>
 then `docker compose -f docker-compose.prod.yml restart web`.
 
 At this point `http://<public-ip>/` should load the app.
+
+## Rolling back an upgrade
+
+If a release misbehaves after its migration ran, put the database back as it
+was just before the upgrade and run the previous release again:
+
+1. Find the dump the upgrade wrote (the boot log names it too:
+   `docker compose -f docker-compose.prod.yml logs web | grep boot-migrate`):
+
+   ```bash
+   ./scripts/restore-db.sh          # with no argument, lists nightly and pre-upgrade dumps
+   ```
+
+2. Restore it and leave the services stopped. `--no-restart` matters:
+   starting the newer image again would upgrade the restored database
+   straight back.
+
+   ```bash
+   ./scripts/restore-db.sh --no-restart pre-upgrade_20261121T101500Z_0f1c3b194a4b.dump
+   ```
+
+   The restore runs in a one-off `web` container with its own `pg_restore`
+   (17; the postgres container's 16 client can't read a 17-made archive). It
+   resets the `public` schema and loads the dump in one transaction, so the
+   tables the newer migration added are gone too.
+
+3. Redeploy the previous tag. Its images are still on the host if you
+   tagged releases:
+
+   ```bash
+   LOREKEEPER_TAG=v1.1 ./scripts/deploy-oci.sh
+   ```
+
+   Set `LOREKEEPER_TAG=v1.1` in `.env` as well, so a later plain run doesn't
+   go back to the newer tag. Deployed as `latest` (no tags)? Copy the
+   previous release's source onto the instance and run the script from it:
+   it rebuilds that code.
+
+The previous release finds the database at its own head revision and
+starts without migrating. If you start an *older* image against a database
+a newer one already upgraded (step 2 skipped), `web` refuses to boot with a
+`boot-migrate:` line naming the unknown revision and pointing here.
 
 ## 5. Set up a domain + HTTPS (recommended before any real users)
 

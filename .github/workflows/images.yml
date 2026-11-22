@@ -1,0 +1,103 @@
+name: Images
+
+# E0-Platform.9: the four images Lorekeeper builds from source (docker-bake.hcl:
+# web, ml, stt's cpu target, nginx) build for linux/amd64 and linux/arm64 on
+# every PR and on main. Each arch builds natively (arm64 on GitHub's arm
+# runner, free for public repos), so no QEMU. Nothing is pushed or loaded:
+# distribution is source only, and the build result stays in the build cache.
+# No path filter on purpose: a base-image or lockfile change anywhere can
+# break one arch.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: images-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    name: build (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: amd64, runner: ubuntu-latest }
+          - { arch: arm64, runner: ubuntu-24.04-arm }
+    steps:
+      - uses: actions/checkout@v4
+
+      # The ml and stt images carry CPU torch / ctranslate2 and their baked
+      # models (GB sizes); the runner's preinstalled SDKs are not needed.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Resolved bake definition (linux/${{ matrix.arch }})
+        run: docker buildx bake --print --set '*.platform=linux/${{ matrix.arch }}'
+
+      # Cache only the small web and nginx images: the ml / stt layers would
+      # crowd out the repo's 10 GB Actions cache.
+      - name: Build web, ml, stt (cpu), nginx for linux/${{ matrix.arch }}
+        uses: docker/bake-action@v5
+        with:
+          source: .
+          files: docker-bake.hcl
+          targets: default
+          push: false
+          set: |
+            *.platform=linux/${{ matrix.arch }}
+            *.output=type=cacheonly
+            web.cache-from=type=gha,scope=bake-web-${{ matrix.arch }}
+            web.cache-to=type=gha,mode=max,scope=bake-web-${{ matrix.arch }}
+            nginx.cache-from=type=gha,scope=bake-nginx-${{ matrix.arch }}
+            nginx.cache-to=type=gha,mode=max,scope=bake-nginx-${{ matrix.arch }}
+
+  # AC 1: with the combined platform list every target resolves for both
+  # platforms, and stt is its cpu target (never gpu). A resolve-only check
+  # (no build): the two jobs above do the building.
+  multiplatform-definition:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: bake --print with linux/amd64,linux/arm64
+        run: |
+          docker buildx bake --print --set '*.platform=linux/amd64,linux/arm64' > bake.json
+          cat bake.json
+          python3 - <<'EOF'
+          import json, sys
+          bake = json.load(open("bake.json"))
+          targets = bake["target"]
+          want = {"web", "ml", "stt", "nginx"}
+          errors = []
+          if set(bake["group"]["default"]["targets"]) != want:
+              errors.append(f"default group is {bake['group']['default']['targets']}")
+          for name in sorted(want):
+              t = targets.get(name)
+              if t is None:
+                  errors.append(f"{name}: missing")
+                  continue
+              if sorted(t.get("platforms", [])) != ["linux/amd64", "linux/arm64"]:
+                  errors.append(f"{name}: platforms {t.get('platforms')}")
+              if t.get("push") or any("/" in tag.split(":")[0] for tag in t.get("tags", [])):
+                  errors.append(f"{name}: pushes or names a registry ({t.get('tags')})")
+          if targets.get("stt", {}).get("target") != "cpu":
+              errors.append(f"stt target is {targets.get('stt', {}).get('target')!r}, not 'cpu'")
+          if errors:
+              print("\n".join(f"::error::{e}" for e in errors))
+              sys.exit(1)
+          print("all four targets resolve for linux/amd64 and linux/arm64")
+          EOF

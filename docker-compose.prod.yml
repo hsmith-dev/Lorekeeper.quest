@@ -3,6 +3,8 @@
 #
 # Usage:
 #   docker compose -f docker-compose.prod.yml up -d --build
+#   (scripts/deploy-oci.sh builds the images with `docker buildx bake` from
+#   docker-bake.hcl instead, tagged lorekeeper-<svc>:${LOREKEEPER_TAG}.)
 #   With an NVIDIA GPU, add the override (speed only; no limit changes):
 #   docker compose -f docker-compose.prod.yml -f docker-compose.gpu.yml up -d --build
 #
@@ -158,6 +160,10 @@ services:
   # E0-Platform.7; that name stays as a network alias so an old .env or a
   # custom nginx config pointing at http://backend:8000 keeps working.
   web:
+    # One image for web and worker, built from source (never pulled: Lorekeeper
+    # publishes no images). LOREKEEPER_TAG picks the build; deploy-oci.sh sets
+    # it, and an old tag is how a rollback runs the previous code.
+    image: lorekeeper-web:${LOREKEEPER_TAG:-latest}
     build:
       context: ./src/backend
       dockerfile: Dockerfile.prod
@@ -183,6 +189,10 @@ services:
       # Stored files (E0-Jobs.8, FILES_ROOT): written only by
       # app/services/file_service.py, served by nginx (read-only there).
       - files_data:/data/files
+      # Pre-upgrade dumps (E0-Platform.9): scripts/boot_migrate.py writes
+      # pre-upgrade_<stamp>_<rev>.dump here before a migration runs, and
+      # scripts/restore-db.sh reads them back (docs/OCI_DEPLOYMENT.md).
+      - backups:/backups
     depends_on:
       postgres:
         condition: service_healthy
@@ -192,7 +202,11 @@ services:
     # Docker Desktop resolves the name already; on Linux this maps it.
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    # Run migrations on startup before serving. Deliberately a single line —
+    # Upgrade-safe boot before serving (E0-Platform.9): scripts/boot_migrate.py
+    # takes a Postgres advisory lock, and when a migration is pending on a
+    # database with data it writes a pg_dump to /backups first, then runs
+    # `alembic upgrade head`. A failed dump exits non-zero without migrating,
+    # so gunicorn never starts on a half-safe upgrade. Deliberately a single line —
     # a folded (`>`) multi-line YAML scalar only folds line breaks to spaces
     # for lines at the *same* indentation as the first content line; any
     # more-indented continuation (as this used to have) is instead kept
@@ -209,7 +223,7 @@ services:
     # per-IP @limiter.limit(...) decorators in auth.py, which all bucketed
     # every client together under one shared quota instead of limiting each
     # attacker individually, and (2) any IP that ends up in logs.
-    command: sh -c "python -m alembic upgrade head && gunicorn app.main:app -w 4 -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:8000 --forwarded-allow-ips='*' --timeout 180 --graceful-timeout 30 --access-logfile - --error-logfile -"
+    command: sh -c "python scripts/boot_migrate.py && exec gunicorn app.main:app -w 4 -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:8000 --forwarded-allow-ips='*' --timeout 180 --graceful-timeout 30 --access-logfile - --error-logfile -"
     # Not exposed to host — nginx is the only entry point
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
@@ -242,6 +256,7 @@ services:
   # starts after web is healthy, so after its migrations. No ports and no
   # nginx route.
   worker:
+    image: lorekeeper-web:${LOREKEEPER_TAG:-latest}
     build:
       context: ./src/backend
       dockerfile: Dockerfile.prod
@@ -281,8 +296,9 @@ services:
   # load no model themselves. Weights are baked into the image; it runs
   # offline.
   ml:
-    # Tagged so scripts/sidecar_smoke.sh ml finds it by its default name.
-    image: lorekeeper-ml:latest
+    # Tagged so scripts/sidecar_smoke.sh ml finds it by its default name
+    # (lorekeeper-ml:latest when LOREKEEPER_TAG is unset).
+    image: lorekeeper-ml:${LOREKEEPER_TAG:-latest}
     build:
       context: ./src/services/ml
       dockerfile: Dockerfile
@@ -316,10 +332,11 @@ services:
   # the first request and unloads after STT_IDLE_UNLOAD_S idle.
   # docker-compose.gpu.yml builds its `gpu` target instead.
   stt:
-    image: lorekeeper-stt:latest
+    image: lorekeeper-stt:${LOREKEEPER_TAG:-latest}
     build:
       context: ./src/services/stt
       dockerfile: Dockerfile
+      target: cpu
     restart: unless-stopped
     environment:
       STT_COMPUTE_TYPE: ${STT_COMPUTE_TYPE:-int8}
@@ -341,6 +358,7 @@ services:
           memory: ${STT_MEM_LIMIT:-1.25g}
 
   nginx:
+    image: lorekeeper-nginx:${LOREKEEPER_TAG:-latest}
     build:
       context: .
       dockerfile: nginx/Dockerfile
@@ -386,3 +404,6 @@ volumes:
   # Stored files (E0-Jobs.8): backed up with the database by
   # scripts/backup-db.sh (docs/DATABASE_BACKUPS.md).
   files_data:
+  # Pre-upgrade dumps (E0-Platform.9), mounted at /backups on web. Pruned to
+  # the newest PRE_UPGRADE_BACKUPS_KEEP (default 5) by boot_migrate.py.
+  backups:

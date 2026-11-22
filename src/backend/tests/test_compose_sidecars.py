@@ -107,3 +107,79 @@ def test_ops_scripts_name_real_prod_services():
     assert calls, "found no prod compose calls in scripts/*.sh: the pattern is stale"
     bad = [(where, name) for where, name in calls if name not in services]
     assert bad == [], f"scripts call prod services that don't exist: {bad}"
+
+
+_TAGGED_IMAGES = {
+    "web": "lorekeeper-web", "worker": "lorekeeper-web", "ml": "lorekeeper-ml",
+    "stt": "lorekeeper-stt", "nginx": "lorekeeper-nginx",
+}
+
+
+def test_prod_web_boots_through_boot_migrate():
+    """E0-Platform.9: the dump-then-migrate boot step runs before gunicorn,
+    and the bare `alembic upgrade head` is gone from the command."""
+    web = _load("docker-compose.prod.yml")["services"]["web"]
+    command = web["command"]
+    assert command.startswith('sh -c "python scripts/boot_migrate.py && exec gunicorn app.main:app ')
+    assert "alembic" not in command
+    assert "\n" not in command  # the one-line rule above
+    assert "entrypoint" not in web
+
+
+def test_prod_backups_volume_on_web_only():
+    compose = _load("docker-compose.prod.yml")
+    services = compose["services"]
+    assert "backups:/backups" in services["web"]["volumes"]
+    assert "backups" in compose["volumes"]
+    others = [n for n, s in services.items() if n != "web"
+              and any(str(v).startswith("backups:") for v in s.get("volumes", []))]
+    assert others == []
+
+
+@pytest.mark.parametrize("service", sorted(_TAGGED_IMAGES))
+def test_prod_images_are_tagged_and_local(service):
+    s = _load("docker-compose.prod.yml")["services"][service]
+    assert s["image"] == f"{_TAGGED_IMAGES[service]}:${{LOREKEEPER_TAG:-latest}}"
+    assert "build" in s  # built from source, never pulled
+
+
+def test_prod_stt_builds_the_cpu_target():
+    assert _load("docker-compose.prod.yml")["services"]["stt"]["build"]["target"] == "cpu"
+
+
+def _strip_comments(text: str) -> str:
+    return re.sub(r"#.*", "", text)
+
+
+def test_bake_file_builds_the_four_images_with_stt_cpu():
+    path = REPO / "docker-bake.hcl"
+    if not path.exists():
+        pytest.skip("docker-bake.hcl not in this checkout")
+    text = path.read_text()
+    group = re.search(r'group "default" \{\s*targets = \[([^\]]*)\]', text)
+    assert group and re.findall(r'"(\w+)"', group.group(1)) == ["web", "ml", "stt", "nginx"]
+    stt = re.search(r'target "stt" \{(.*?)\n\}', text, re.S).group(1)
+    assert re.search(r'^\s*target\s*=\s*"cpu"', stt, re.M)
+    code = _strip_comments(text)
+    assert "gpu" not in code and "output" not in code
+    compose = _load("docker-compose.prod.yml")["services"]
+    for name in ("web", "ml", "stt", "nginx"):
+        block = re.search(rf'target "{name}" \{{(.*?)\n\}}', text, re.S).group(1)
+        assert f'"lorekeeper-{name}:${{LOREKEEPER_TAG}}"' in block, name
+        context = re.search(r'context\s*=\s*"([^"]+)"', block).group(1)
+        assert Path(context) == Path(compose[name]["build"]["context"]), name
+
+
+def test_images_workflow_builds_both_arches_on_every_pr():
+    path = REPO / ".github" / "workflows" / "images.yml"
+    if not path.exists():
+        pytest.skip("images.yml not in this checkout")
+    wf = yaml.safe_load(path.read_text())
+    on = wf.get("on", wf.get(True))  # PyYAML reads the `on` key as True
+    assert on["pull_request"] in (None, {}) and on["push"] == {"branches": ["main"]}
+    runners = {i["arch"]: i["runner"] for i in wf["jobs"]["build"]["strategy"]["matrix"]["include"]}
+    assert runners == {"amd64": "ubuntu-latest", "arm64": "ubuntu-24.04-arm"}
+    text = path.read_text()
+    assert "*.platform=linux/amd64,linux/arm64" in text
+    assert "docker/login-action" not in text
+    assert wf["jobs"]["build"]["steps"][-1]["with"]["push"] is False
