@@ -2,10 +2,10 @@
 title: 'E0-WorldCore.7: Suggested Mentions backfill and Mention confirm/remove'
 type: 'feature'
 created: '2026-11-21'
-status: 'in-progress'
+status: 'done'
 baseline_revision: '9b0f01a437d70660905892cede406e07943553c9'
 review_loop_iteration: 0
-followup_review_recommended: false
+followup_review_recommended: true
 context:
   - '{project-root}/_bmad-output/implementation-artifacts/orchestration/builder-brief.md'
   - '{project-root}/_bmad-output/implementation-artifacts/epic-9-context.md'
@@ -184,3 +184,102 @@ parks it afterwards.
 ## Spec Change Log
 
 ## Review Triage Log
+
+### 2026-11-21 — Review pass
+- verdicts: 34 findings (33 from the review layers plus 1 from the first CI run): high 0, medium 3, low 23, false 8, maybe-false 0.
+- findings:
+  - **Blind Hunter**
+    - `[low]` `reject` `run_backfills` in `tests/ev4/test_job_rows.py` does not park `suggested_mentions_v1`. That test monkeypatches `campaign_owners` to one Campaign, so the real backfill touches only its own fresh Campaign. `test_world_backfill` re-queues the row itself. CI passed (2726 passed).
+    - `[low]` `reject` `select_next` reloads every gm entry on each step (O(n²)). It reads three columns; at 10k entries that is about 20 ms a step against a 120 s timeout. A SQL keyset rewrite is more than a direct correction.
+    - `[low]` `patch` The docstring says `created_at::date` (session TZ) but the code uses the UTC date. Fixed: the `app/jobs/world.py` docstring now says "the UTC date of created_at".
+    - `[medium]` `patch` Merge dedupe only matched a *suggested* survivor twin, so a survivor with a confirmed Mention kept a redundant suggestion (a later confirm would double-count). Fixed: the twin lookup in `_merge` matches any survivor Mention of the (entry, field). New test `test_merge_drops_an_absorbed_suggestion_the_survivor_has_confirmed`. The missing history row for the dropped duplicate matches the existing alias-dedupe pattern in `_merge`, so it is not changed.
+    - `[low]` `patch` `_was_removed` only honoured migration-origin removals. Fixed by deleting the `origin` condition: any removed `narrative` Mention of the pair blocks a suggestion. New test `test_a_removed_manual_mention_also_blocks_a_suggestion`; a removed `shorthand` Mention does not block. The merged-Entity history part is a separate entry (EC #2).
+    - `[low]` `reject` Confirm does not refuse a second confirmed Mention of the same pair. After the merge patch this is reachable only through E1's extraction proposals, which own their own dedupe. Adding a guard is more than a correction.
+    - `[low]` `reject` `GET /{id}/mentions` has no upper bound on `page`. An out-of-range page returns an empty list. Python paging over one Entity's Mentions follows the E0-WorldCore.5 deferred-medium pattern.
+    - `[low]` `reject` `sentence_quote` heuristics (abbreviations, no centring, closing quote marks). The quote always contains the sentence's match context and the GM sees the entry link; better heuristics add complexity.
+    - `[low]` `patch` Untested behaviours. Added tests for: a Mention on a player entry gets the "Player journal" title; an entry-less (NULL `journal_id`) Mention sorts last for the GM and is hidden from the Player; `mention_count` drops after a remove; the list updates after confirm and remove. Merged-Entity 409 and member-preview reads stay untested (low): the code paths are shared with the deleted case and `ctx.role != GM`, which are tested.
+    - `[low]` `reject` Weak test lines (`assert mira`; a fresh Job with payload `{}`). The meaningless assert was replaced by a real test (see above). The payload shape does not change `handle`: it reads only `cursor`/`done`, and `backfill` matters only to `_record_entry`, which the runner test covers.
+    - `[low]` `patch` The `remove_mention` docstring omitted the 409. Fixed in `app/api/routes/entities.py`.
+    - `[low]` `reject` Spec bookkeeping (untracked context file, a scratchpad path, status). Fixing it means editing this build's spec.
+    - `[low]` `reject` `step_key` is dead code. It is kept on purpose to document the story's key form next to the deviation (Design Notes); it is harmless.
+  - **Edge Case Hunter**
+    - `[low]` `patch` A removed non-migration narrative Mention did not block. Same fix as Blind Hunter #5.
+    - `[low]` `reject` A suggestion removed on an absorbed Entity is re-suggested for the survivor after a merge. This needs a backfill re-run after a merge; `suggested_mentions_v1` runs once at upgrade, before any merge route exists. Chasing the merge chain is more than a correction.
+    - `[medium]` `patch` Survivor confirmed plus absorbed suggestion. Same root cause and fix as Blind Hunter #4.
+    - `[false]` `reject` A match span longer than 300 characters truncates the surface. `match_names` spans are Entity names plus prefixes; nothing in `entity_types` allows a 300-character name in practice, and the quote is still bounded.
+    - `[low]` `reject` "Mr. Mira" boundary loses context. Same as Blind Hunter #8.
+    - `[false]` `reject` Claim: the long-sentence quote misses the surface. Only when `end - start > limit`, as in EC #4; for real names the window always contains `[start, end)` because `window <= start`.
+    - `[low]` `reject` Claim: removal after a merge. Same as EC #2.
+  - **Verification Gap**
+    - `[low]` `patch` The player-journal `entry_title` was untested. Added `test_player_entry_titles_and_entryless_mentions`.
+    - `[low]` `patch` The NULL-`journal_id` branch was untested. Same test; the Player-hidden part is asserted too.
+    - `[low]` `patch` The `_was_removed` negative case was untested. Added the shorthand removal case, which still suggests.
+    - `[low]` `reject` The migration dedupe runs on an empty table in the tests. Production has no `entity_mentions` rows before this revision (no writer existed); a seeded-twin migration test is more than a correction for a dev-only path.
+  - **Intent Alignment** (descriptive)
+    - `[low]` `reject` (a) The idempotency key is not `backfill.mentions:{campaign_id}:{cursor}`. The B2 runner contract (E0-Jobs.5, a dependency named by the story) re-pushes one Job id under `backfill:{name}:{cid}`, so a per-step key is never enqueued. This is documented in Design Notes and the PR.
+    - `[false]` `reject` (b) "Upsert on conflict" is not an SQL `ON CONFLICT`. On conflict the observable effect is the story's: no duplicate, no failure. An `ON CONFLICT` would have to bypass `apply_change`, the only writer.
+    - `[false]` `reject` (c) Crash and resume are not exercised. `tests/jobs/test_backfill.py::test_a_failed_step_rolls_back_and_retries_from_the_same_cursor` covers `run_cursor`'s rollback and resume, and the per-entry skip makes a retried entry add nothing (`test_rerun_adds_nothing`).
+    - `[false]` `reject` (d) The probe file name differs. It is a separate module in the same package (auto-imported); `test_coverage.py` sees every route probed.
+    - `[false]` `reject` (e) Players get no `origin`. The story's field list is in the GM clause; the Party schema carries no provenance (AD-13).
+    - `[false]` `reject` (f) The named stats surfaces do not exist yet. Every count that exists is confirmed-only, and later epics read confirmed rows.
+    - `[low]` `patch` (g) No re-read of the list after confirm or remove. Added to `test_remove_mention` and the new `test_remove_lowers_mention_count_and_confirm_updates_the_list`.
+    - `[false]` `reject` (h) Scope additions. The merge dedupe and the confirmed-only counts follow directly from the story's index and its "only confirmed count" AC.
+    - `[low]` `reject` (i) Only pure tests ran locally. CI then ran the whole suite (2726 passed); the one failure is the next row.
+  - **CI**
+    - `[medium]` `patch` `tests/access/test_write_rules.py::test_party_read_routes_are_safe_reads_with_no_hosted_ai` did not list the two new Party-read routes. Added them.
+
+## Auto Run Result
+
+Status: done. Draft PR #82; CI green on b2a9191 and later.
+
+**Summary.**
+- A `backfill.mentions` cursor Job (`app/jobs/world.py`) consumes `suggested_mentions_v1`. It runs one Job per Campaign as the Owner GM and handles one gm entry per step, in Session order. It runs `match_names` on the Narrative only and writes suggested Mentions through `apply_change(add_mention)`. The quote is the sentence of the first match, at most 300 characters.
+- It never re-creates a removed pair and never adds a suggestion where a Mention already exists.
+- Migration `eed202f2eead` adds the partial unique index `uq_entity_mentions_suggested`, after an idempotent dedupe that is a no-op in production.
+- Four routes:
+  - `GET /api/entities/{id}/mentions?confirmed=&page=` (20 per page, newest Session first)
+  - `GET /api/entities/mentions?journal_id=`
+  - `POST .../mentions/{mention_id}/confirm`
+  - `DELETE .../mentions/{mention_id}`
+- Non-GMs see only confirmed Mentions that the formula allows. `world_matching` counts are confirmed-only. Merge drops an absorbed suggestion when the survivor already has a Mention of the pair.
+
+**Files** (under `src/backend/`):
+- `app/jobs/world.py`: new; the kind, the backfill, `sentence_quote`, `suggest_mentions`, `handle`.
+- `app/jobs/registry.py`: `KIND_MODULES`.
+- `migrations/versions/eed202f2eead_suggested_mentions_unique.py`: new.
+- `app/db/models/entity.py`: the index.
+- `app/api/routes/entities.py`: the four routes.
+- `app/schemas/entities.py`: the Mention extras and list schemas.
+- `app/services/world_matching.py`: confirmed-only counts.
+- `app/services/world_service.py`: merge dedupe, additive.
+- Tests:
+  - `tests/jobs/test_world_backfill.py` (new)
+  - `tests/ev4/probes/entity_mentions.py` (new)
+  - `tests/test_entities_api.py`
+  - `tests/services/test_world_service.py`
+  - `tests/services/test_world_matching.py`
+  - `tests/migrations/test_upgrade_snapshot.py`
+  - `tests/jobs/test_backfill.py` (parks feature backfill rows)
+  - `tests/access/test_write_rules.py` (Party-read route list)
+
+**Review.** 34 findings.
+- 13 patch rows: the merge twin covers any Mention, removal blocking covers any origin, the docstrings, 6 test additions, and the CI route list.
+- 21 rejected, with reasons in the triage log. Nothing deferred.
+
+**Follow-up review recommended:** true. Two medium entries were patched: the merge twin and the CI route list. The unverified risk is the `_merge` change, which overlaps E0-WorldCore.9's merge wrapper; an independent look at the combined merge path after both land is worthwhile.
+
+**Verification.**
+- GitHub CI on b2a9191:
+  - Backend tests: 2731 passed, 4 skipped.
+  - Structural gates green (CI-2, CI-3, CI-7, CI-8, CI-10, CI-11, CI-14).
+  - EV-4: probes=158, exemptions=11, pending=0, leaks=0.
+  - Frontend CI and licences green.
+- Local: compileall, lint-imports (5 kept), CI-8/CI-7 ok, 8 pure tests passed, one alembic head.
+
+**Residual risks.**
+- The `_merge` edit is shared with E0-WorldCore.9 (a merge conflict there needs the twin check kept).
+- No on-save suggestion: new entries rely on E1 extraction.
+- The story's per-step idempotency key is replaced by the B2 runner key (Design Notes).
+- Sibling migrations from E0-WorldCore.6/9 may also revise `0f1c3b194a4b` → rebase `down_revision` at merge.
+
+**Needs desktop verification:** none beyond CI (no new service, model or image).
