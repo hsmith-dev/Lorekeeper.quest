@@ -192,6 +192,88 @@ def test_exactly_three_channels():
     assert live_channel(cid) == f"live:{cid}:out"
 
 
+# ── Cancellation is never lost ─────────────────────────────────────────────
+# Python 3.11's asyncio.wait_for returns the inner result when the caller is
+# cancelled in the step the inner call finishes, and the cancelled caller
+# runs on. A grant change's publish runs inside other tasks (the chat
+# stream's chunk in tests/access/test_grants.py): a lost cancellation there
+# kept a revoked stream open until its next chunk.
+
+def _wait_for_calls(root: Path) -> list[str]:
+    found = []
+    for path in sorted(root.rglob("*.py")):
+        tree = ast.parse(path.read_text(), str(path))
+        for node in ast.walk(tree):
+            if ((isinstance(node, ast.Attribute) and node.attr == "wait_for")
+                    or (isinstance(node, ast.Name) and node.id == "wait_for")
+                    or (isinstance(node, ast.alias) and node.name == "wait_for")):
+                found.append(f"{path.relative_to(root)}:{getattr(node, 'lineno', '?')}")
+    return found
+
+
+def test_app_never_uses_wait_for():
+    assert _wait_for_calls(BACKEND / "app") == []
+
+
+def test_the_wait_for_guard_catches_every_spelling(tmp_path):
+    (tmp_path / "a.py").write_text("import asyncio\nasync def f(c):\n    await asyncio.wait_for(c, 1)\n")
+    (tmp_path / "b.py").write_text("from asyncio import wait_for\nasync def f(c):\n    await wait_for(c, 1)\n")
+    assert len(_wait_for_calls(tmp_path)) == 3
+
+
+class CancelsItsCaller:
+    """Every call cancels `target` (the task that made the call) and returns
+    at once: the cancellation lands in the very step the call finishes."""
+
+    def __init__(self) -> None:
+        self.target: asyncio.Task | None = None
+        self.calls: list[str] = []
+
+    def _hit(self, name: str) -> None:
+        self.calls.append(name)
+        self.target.cancel()
+
+    async def publish(self, channel, message):
+        self._hit("publish")
+        return 1
+
+    async def set(self, *a, **kw):
+        self._hit("set")
+        return True
+
+
+def _grant_publish(cid):
+    from app.access.grants import publish_grant_change
+
+    return publish_grant_change(cid, uuid.uuid4())
+
+
+@pytest.mark.parametrize("call", [
+    pytest.param(lambda cid: publish_job(cid, job_data(uuid.uuid4())), id="publish"),
+    pytest.param(lambda cid: publish_campaign_event(cid, "role", None), id="throttle-acquire"),
+    pytest.param(_grant_publish, id="grant-publish"),
+])
+async def test_a_cancel_as_the_valkey_call_returns_still_cancels(call):
+    client = CancelsItsCaller()
+    previous = valkey_client.set_valkey(client)
+    task = None
+    try:
+        async def caller():
+            await call(uuid.uuid4())
+            await asyncio.sleep(10)  # only a lost cancellation gets this far and waits
+
+        task = asyncio.ensure_future(caller())
+        client.target = task
+        done, _ = await asyncio.wait({task}, timeout=2)
+        assert client.calls, "the fake was never called"
+        assert done and task.cancelled(), f"the cancellation was lost after {client.calls}"
+    finally:
+        if task is not None and not task.done():
+            task.cancel()
+        valkey_client.set_valkey(previous)
+        pubsub._TRAILING.clear()
+
+
 # ── Publish and listen ─────────────────────────────────────────────────────
 
 async def test_publish_job_reaches_listen_jobs(valkey):
