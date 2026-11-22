@@ -85,7 +85,8 @@ async def publish_grant_change(campaign_id: uuid.UUID, grant_id: uuid.UUID | Non
         return
     channel = grant_channel(campaign_id, grant_id)
     try:
-        await asyncio.wait_for(client.publish(channel, "changed"), PUBLISH_TIMEOUT_S)
+        async with asyncio.timeout(PUBLISH_TIMEOUT_S):  # not wait_for: see app/core/pubsub.py
+            await client.publish(channel, "changed")
     except Exception:
         logger.warning(json.dumps({"event": "grant_publish_failed", "channel": channel}), exc_info=True)
 

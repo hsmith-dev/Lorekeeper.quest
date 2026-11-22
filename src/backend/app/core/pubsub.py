@@ -50,6 +50,14 @@ when SUBSCRIBE fails) no `subscribed` is yielded and the listener ends.
 every listener ends at once (logged). A Valkey error, or a publish slower than
 PUBLISH_TIMEOUT_S, is logged, never raised. Delivery filtering (who may see
 which Job, which ref) is the consuming route's job, never the publisher's.
+
+**Cancellation.** Every Valkey call is bounded with `asyncio.timeout`, never
+`asyncio.wait_for`: on Python 3.11, `wait_for` drops a cancellation that
+lands in the same loop step as its inner call finishing (it returns the
+result instead), so the cancelled task runs on. A publish runs inside other
+tasks (after commit, inside a stream's chunk), so a lost cancellation kept a
+revoked chat stream open (fix/deflake-grant-stream). tests/test_pubsub.py
+scans app/ for `wait_for`.
 """
 from __future__ import annotations
 
@@ -124,7 +132,8 @@ def _client() -> Any | None:
 
 async def _send(client: Any, channel: str, message: str) -> None:
     try:
-        await asyncio.wait_for(client.publish(channel, message), PUBLISH_TIMEOUT_S)
+        async with asyncio.timeout(PUBLISH_TIMEOUT_S):
+            await client.publish(channel, message)
     except Exception:
         logger.warning(json.dumps({"event": "pubsub_publish_failed", "channel": channel}), exc_info=True)
 
@@ -168,8 +177,8 @@ def _cancel_trail(key: str) -> None:
 
 
 async def _acquire(client: Any, key: str, window_s: float) -> bool:
-    return bool(await asyncio.wait_for(client.set(key, "1", nx=True, px=max(1, int(window_s * 1000))),
-                                       PUBLISH_TIMEOUT_S))
+    async with asyncio.timeout(PUBLISH_TIMEOUT_S):
+        return bool(await client.set(key, "1", nx=True, px=max(1, int(window_s * 1000))))
 
 
 async def _run_trail(key: str, trail: _Trail) -> None:
@@ -182,7 +191,8 @@ async def _run_trail(key: str, trail: _Trail) -> None:
         if client is None:
             return
         try:
-            ttl_ms = await asyncio.wait_for(client.pttl(key), PUBLISH_TIMEOUT_S)
+            async with asyncio.timeout(PUBLISH_TIMEOUT_S):
+                ttl_ms = await client.pttl(key)
             if ttl_ms is not None and ttl_ms > 0:
                 await asyncio.sleep(ttl_ms / 1000)
             # PTTL is whole milliseconds rounded down, and Valkey keeps a key
@@ -195,7 +205,8 @@ async def _run_trail(key: str, trail: _Trail) -> None:
             for _ in range(TRAIL_SETTLE_STEPS):
                 if await _acquire(client, key, trail.window_s):
                     break
-                ttl_ms = await asyncio.wait_for(client.pttl(key), PUBLISH_TIMEOUT_S)
+                async with asyncio.timeout(PUBLISH_TIMEOUT_S):
+                    ttl_ms = await client.pttl(key)
                 if ttl_ms is not None and ttl_ms > TRAIL_SETTLE_MS:
                     return  # another process's newer publish holds the window
                 await asyncio.sleep(max(ttl_ms or 0, 0) / 1000 + 0.001)
@@ -317,7 +328,8 @@ async def _close(pubsub: Any | None) -> None:
         return
     for step in ("unsubscribe", "aclose"):
         try:
-            await asyncio.wait_for(getattr(pubsub, step)(), CLOSE_TIMEOUT_S)
+            async with asyncio.timeout(CLOSE_TIMEOUT_S):
+                await getattr(pubsub, step)()
         except Exception:
             pass
 
@@ -369,7 +381,8 @@ async def _listen(channel: str, announce: bool = False) -> AsyncIterator[tuple[s
     try:
         try:
             pubsub = client.pubsub()
-            await asyncio.wait_for(pubsub.subscribe(channel), PUBLISH_TIMEOUT_S)
+            async with asyncio.timeout(PUBLISH_TIMEOUT_S):
+                await pubsub.subscribe(channel)
         except Exception:
             logger.warning(json.dumps({"event": "pubsub_subscribe_failed", "channel": channel}), exc_info=True)
             return
