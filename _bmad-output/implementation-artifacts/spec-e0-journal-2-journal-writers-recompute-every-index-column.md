@@ -2,10 +2,10 @@
 title: 'E0-Journal.2: Journal writers recompute every index column'
 type: 'feature'
 created: '2026-11-21'
-status: 'in-review'
+status: 'done'
 baseline_revision: '90c8ea18b688baa1306717a61e03e6f3b2007475'
 review_loop_iteration: 0
-followup_review_recommended: false
+followup_review_recommended: true
 context: []
 warnings: ['oversized']
 deferred:
@@ -178,3 +178,44 @@ deferred:
 **Commands:**
 - `cd src/backend && python -m py_compile app/services/journal_service.py app/hooks/journal.py`: expected no output.
 - GitHub CI `backend-tests.yml`, `gates.yml`, `frontend-ci.yml`: expected green.
+
+## Auto Run Result
+
+Status: done. Draft PR #80 (branch `story/e0-journal.2-index-recompute`), GitHub CI green on 43dcc345f24d44ebf80e15b0409086141ab06542.
+
+**Summary:** `journal_service` holds the four journal writers, `create_journal_entry`, `update_journal_entry`, `delete_journal_entry` and `reindex_entry`, and they share one recompute path. The hash is computed on the server and collisions return 409. If `ml` fails, the save still goes through and the `journal.reembed` onsave fallback fills the index later; it is enqueued from `app/hooks/journal.py`. Each write emits its hook event and publishes a campaign event. Offline and unreviewed saves land GM-only. The seed and the Party backfill script now write through `journal_service`, and a new grep test enforces the single writer.
+
+**Files:**
+- `app/services/journal_service.py`: the writers, the recompute path, the reembed Job handler and the backfill helpers.
+- `app/hooks/journal.py` (new) and `app/hooks/__init__.py`: publish on every write, and enqueue the reembed fallback.
+- `app/jobs/registry.py`: `journal.reembed` is registered here.
+- `app/api/routes/journals.py`: `/generate` uses the server hash and the `offline` flag. `/reindex` updates search columns only and embeds in one batch. Delete calls `delete_journal_entry`. attach_tag upserts a `manual` link.
+- `app/schemas/journal.py`: `entry_hash` is optional and ignored; adds `offline`.
+- `app/services/dedup_service.py`: adds `drop_hash`.
+- `app/services/retrieval_service.py`: `index_party_fields` now delegates to `journal_service`.
+- `scripts/seed_demo.py` and `scripts/backfill_party_embeddings.py`: now write through `journal_service`.
+- `scripts/scoped_queries_baseline.txt` and `scripts/test_check_scoped_queries.py`: 3 baseline lines removed.
+- Frontend `useOfflineQueue.ts` and `types/index.ts`: the offline queue sends `offline: true`.
+- Tests: `tests/test_journal_writers.py` is new. `tests/conftest.py` now drains hook tasks before the engine is disposed. Updated `test_party_retrieval.py` and `seeds/test_demo_seed.py`.
+
+**Review:** 33 findings.
+- **Patched (9):** 1 high, 6 medium, 2 low:
+  - attach_tag no longer fails with a 500 on a hidden link;
+  - reindex embeds in one batch, updates search columns only, and returns 503 on a ValueError;
+  - the Tag upsert takes locks in a fixed order;
+  - `session_date` is validated;
+  - the seed looks entries up by hash;
+  - two missing hook tests added.
+- **Deferred (6):** see the frontmatter.
+- **Rejected:** the rest, with reasons in the triage log.
+- **Also fixed from CI:** the EV-4 reindex probe failure (reindex re-derived tags) and a 6-hour backend-test hang (hook tasks outliving their test).
+
+**Follow-up review recommended: true.** A high finding was patched (attach_tag upsert), and an independent review of the tag-link ownership between routes and `journal_service` is worthwhile.
+
+**Verification:** GitHub CI is green for `backend-tests` (full pytest), `gates` (database/EV-4 and static), frontend CI and licences. Local checks passed: py_compile, `check_scoped_queries`, `lint-imports` and `pytest scripts/`.
+
+**Residual risks:**
+- Hook delivery is at most once, and no durable NULL-vector sweep backs it up.
+- A reembed Job can race a Narrative-only edit.
+- One-step saves are now always GM-only.
+
