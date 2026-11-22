@@ -457,9 +457,10 @@ async def _status(client, build, down):
     off after SIDECAR_STATUS_TIMEOUT_S instead of its client timeout, and a
     malformed status (e.g. a non-string model state) is reported, not a 500."""
     try:
-        st = await asyncio.wait_for(client.status(), timeout=SIDECAR_STATUS_TIMEOUT_S)
+        async with asyncio.timeout(SIDECAR_STATUS_TIMEOUT_S):  # not wait_for: see app/core/pubsub.py
+            st = await client.status()
         return build(st)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         return down(f"status timed out after {SIDECAR_STATUS_TIMEOUT_S}s")
     except Exception as exc:  # noqa: BLE001 -- a status page reports, never fails
         return down(str(exc) or type(exc).__name__)

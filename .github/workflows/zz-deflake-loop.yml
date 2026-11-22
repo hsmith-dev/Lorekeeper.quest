@@ -45,7 +45,8 @@ jobs:
           POSTGRES_PASSWORD: changeme
           SECRET_KEY: ci-test-secret-key-not-used-anywhere-real
         run: |
+          set -o pipefail
           stress-ng --cpu "$(nproc)" --io 2 --timeout 0 >/dev/null 2>&1 &
+          python -m pytest tests/test_pubsub.py -k "cancel or wait_for" -p no:cacheprovider -q -rf 2>&1 | tail -40
           python -m pytest tests/access/test_grants.py -k "mid_stream or grant_watches or before_the_stream or unchanged_stream" \
-            --count "${LOOP_COUNT:-100}" -p no:cacheprovider -x -q -rf -s 2>&1 | tail -400
-          exit "${PIPESTATUS[0]}"
+            --count 200 -p no:cacheprovider -q -rf 2>&1 | tail -60
