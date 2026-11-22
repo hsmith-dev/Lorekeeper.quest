@@ -101,26 +101,107 @@ async def add_share_token(ev4, *, kind: str = "read_only", revoked: bool = False
     return token
 
 
-async def add_npc(ev4, campaign_id: uuid.UUID | None = None) -> uuid.UUID:
+# ── World Model NPCs and Quests (E0-WorldCore.6) ──────────────────────────
+#
+# The legacy /api/npcs and /api/quests routes are adapters over `entities`.
+# A seeded legacy row (`ids["npcs"]`, `ids["quests"]`) is invisible to them
+# until it has an Entity, as the F3-world copy gives it: `world_npc` /
+# `world_quest` create that Entity through apply_change (the F3 id, the legacy
+# id, the seed's canary notes as gm_notes), GM-only.
+
+async def _gm_ctx(ev4, seeded):
+    from app.access import ctx_for
+
+    return await ctx_for(ev4.db, seeded.owner_id, seeded.campaign_id)
+
+
+async def world_npc(ev4, seeded=None) -> uuid.UUID:
+    """The GM-only Entity of `seeded`'s (default A's) first seeded NPC; returns the legacy id."""
     from app.db.models.npc import NpcEntry
+    from app.domain import legacy_world as lw
+    from app.services.world_service import apply_change
+
+    seeded = seeded or ev4.a
+    legacy_id = seeded.ids["npcs"][0]
+    row = await ev4.db.get(NpcEntry, legacy_id)
+    entity_type = lw.npc_type(row.role.value)
+    await apply_change(ev4.db, await _gm_ctx(ev4, seeded), {
+        "op": "create_entity", "entity_id": lw.legacy_entity_id("npc", legacy_id), "legacy_npc_id": legacy_id,
+        "type": entity_type, "kind": lw.npc_kind(row.role.value), "name": row.name, "description": row.description,
+        "gm_notes": row.notes, "status": lw.npc_status_in(entity_type, row.status.value)})
+    await ev4.db.commit()
+    return legacy_id
+
+
+async def world_quest(ev4, seeded=None) -> uuid.UUID:
+    """The GM-only Entity of `seeded`'s (default A's) first seeded Quest; returns the legacy id."""
+    from app.db.models.quest import Quest
+    from app.domain import legacy_world as lw
+    from app.services.world_service import apply_change
+
+    seeded = seeded or ev4.a
+    legacy_id = seeded.ids["quests"][0]
+    row = await ev4.db.get(Quest, legacy_id)
+    await apply_change(ev4.db, await _gm_ctx(ev4, seeded), {
+        "op": "create_entity", "entity_id": lw.legacy_entity_id("quest", legacy_id), "legacy_quest_id": legacy_id,
+        "type": "quest", "name": row.title, "description": row.description, "gm_notes": row.notes,
+        "status": lw.quest_status_in(row.status.value)})
+    await ev4.db.commit()
+    return legacy_id
+
+
+async def add_npc(ev4, campaign_id: uuid.UUID | None = None, *, entity_type: str = "character") -> uuid.UUID:
+    """A new GM-only Character (or Faction) in A whose gm_notes are a canary; its Entity id."""
+    from app.access import ctx_for
+    from app.services.world_service import apply_change
 
     cid = campaign_id or ev4.a.campaign_id
-    npc = NpcEntry(id=uuid.uuid4(), user_id=ev4.a.owner_id, campaign_id=cid, name=f"Npc {uuid.uuid4().hex[:6]}",
-                   notes=mint_canary("XNOTES", cid).token)
-    ev4.db.add(npc)
+    owner = ev4.a.owner_id if cid == ev4.a.campaign_id else None
+    if owner is None:
+        from app.db.models.campaign import Campaign
+        owner = (await ev4.db.get(Campaign, cid)).user_id
+    change = await apply_change(ev4.db, await ctx_for(ev4.db, owner, cid), {
+        "op": "create_entity", "type": entity_type, "kind": "npc" if entity_type == "character" else None,
+        "name": f"Npc {uuid.uuid4().hex[:6]}", "gm_notes": mint_canary("XNOTES", cid).token})
     await ev4.db.commit()
-    return npc.id
+    return change.entity_id
 
 
 async def add_quest(ev4, campaign_id: uuid.UUID | None = None) -> uuid.UUID:
-    from app.db.models.quest import Quest
+    """A new GM-only Quest in A whose gm_notes are a canary; its Entity id."""
+    from app.access import ctx_for
+    from app.services.world_service import apply_change
 
     cid = campaign_id or ev4.a.campaign_id
-    quest = Quest(id=uuid.uuid4(), user_id=ev4.a.owner_id, campaign_id=cid, title=f"Quest {uuid.uuid4().hex[:6]}",
-                  notes=mint_canary("XNOTES", cid).token)
-    ev4.db.add(quest)
+    change = await apply_change(ev4.db, await ctx_for(ev4.db, ev4.a.owner_id, cid), {
+        "op": "create_entity", "type": "quest", "name": f"Quest {uuid.uuid4().hex[:6]}",
+        "gm_notes": mint_canary("XNOTES", cid).token})
     await ev4.db.commit()
-    return quest.id
+    return change.entity_id
+
+
+async def publish(ev4, entity_id: uuid.UUID, field: str | None = None, value: str = "party",
+                  seeded=None) -> None:
+    """set_visibility on one Entity (or one field of it) as the Owner, committed."""
+    from app.access import set_visibility
+    from app.schemas.sources import RecordRef
+
+    await set_visibility(ev4.db, await _gm_ctx(ev4, seeded or ev4.a), RecordRef(kind="entity", id=entity_id,
+                                                                                 field=field), value)
+    await ev4.db.commit()
+
+
+async def entity_rows(ev4, campaign_id: uuid.UUID | None = None) -> list:
+    """Every Entity and history row of a Campaign (default A), for a nothing-written check."""
+    from app.db.models.entity import Entity, EntityChange
+
+    cid = campaign_id or ev4.a.campaign_id
+    out = []
+    for model in (Entity, EntityChange):
+        rows = (await ev4.db.execute(sa.select(sa.func.to_jsonb(sa.literal_column(model.__tablename__)))
+                                     .select_from(model).where(model.campaign_id == cid))).scalars().all()
+        out.append(sorted(str(r) for r in rows))
+    return out
 
 
 async def add_sheet(ev4, *, visibility: str = "gm", author: uuid.UUID | None = None, seeded=None,

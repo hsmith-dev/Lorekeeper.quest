@@ -389,9 +389,12 @@ async def test_tags_counts_only_visible_links(client, scene):
 
 
 async def test_gm_put_npc_and_quest_return_gm_schemas(client, scene):
+    from tests.ev4.probes._support import world_npc, world_quest
+
     ev4 = scene.ev4
     gm = (await ev4.actor("co_gm")).headers
-    npc_id, quest_id = ev4.a.ids["npcs"][0], ev4.a.ids["quests"][0]
+    # The adapters read entities (E0-WorldCore.6): the seeded rows' GM-only Entities.
+    npc_id, quest_id = await world_npc(ev4), await world_quest(ev4)
     r = await client.put(f"/api/npcs/{npc_id}", json={"description": "d"}, headers=gm)
     assert r.status_code == 200 and set(r.json()) == set(NpcGMResponse.model_fields)
     r = await client.put(f"/api/quests/{quest_id}", json={"description": "d"}, headers=gm)

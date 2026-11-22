@@ -294,6 +294,11 @@ class CreateEntity(_Change):
     status: str | None = None  # None: the type's default status
     attributes: dict[str, Any] = Field(default_factory=dict)
     gm_notes: str | None = None
+    # E0-WorldCore.6: the legacy row this Entity stands for (the resync job and
+    # tests only; the HTTP body EntityCreate has no such field). At most one;
+    # an NPC is a Character or a Faction, a Quest a Quest.
+    legacy_npc_id: uuid.UUID | None = None
+    legacy_quest_id: uuid.UUID | None = None
 
     @field_validator("name")
     @classmethod
@@ -301,6 +306,16 @@ class CreateEntity(_Change):
         if not value.strip():
             raise ValueError("name must not be blank")
         return value
+
+    @model_validator(mode="after")
+    def _legacy(self) -> "CreateEntity":
+        if self.legacy_npc_id is not None and self.legacy_quest_id is not None:
+            raise ValueError("an Entity stands for at most one legacy row")
+        if self.legacy_npc_id is not None and self.type not in (EntityType.CHARACTER, EntityType.FACTION):
+            raise ValueError("legacy_npc_id needs a character or faction")
+        if self.legacy_quest_id is not None and self.type is not EntityType.QUEST:
+            raise ValueError("legacy_quest_id needs a quest")
+        return self
 
 
 class UpdateField(_Change):

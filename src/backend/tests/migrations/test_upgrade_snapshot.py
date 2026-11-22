@@ -39,6 +39,12 @@ index is unique and partial (`WHERE (NOT confirmed)`), and
 test_eed202f2eead_downgrade_drops_its_index proves the downgrade removes only
 the index and the upgrade puts it back.
 
+E0-WorldCore.6 (9c4fbee4bdd1) only queues `data_backfills('legacy_resync_v1')`
+(the job re-copies legacy edits through apply_change): its check proves the
+row is queued and untouched and no history row was written, and
+test_9c4fbee4bdd1_downgrade_removes_only_its_untouched_row proves the downgrade
+removes just that row and the upgrade queues it again.
+
 pytest collects tests/migrations/ before tests/test_*.py, so the module
 fixture rebuilds the clean session schema in teardown.
 """
@@ -94,6 +100,7 @@ f3_world = _load(
 WRITE_VISIBILITY = "0f1c3b194a4b"
 SUGGESTED_UNIQUE = "eed202f2eead"
 SUGGESTED_INDEX = "uq_entity_mentions_suggested"
+LEGACY_RESYNC = "9c4fbee4bdd1"
 
 # Seed ids from scripts/make_snapshot.py.
 SEED_ID = "00000000-0000-4000-8000-000000000{}".format
@@ -348,8 +355,9 @@ async def _f2_indexes(conn: AsyncConnection) -> dict[str, str]:
 @post_upgrade_check(F2_JOBS_FILES)
 async def f2_tables_exist_empty_with_their_indexes(conn: AsyncConnection) -> None:
     for table in F2_TABLES:
-        # F3-world's backfill row is the one row any of them holds at head.
-        where = f" WHERE name <> '{f3_world.BACKFILL_NAME}'" if table == "data_backfills" else ""
+        # The backfill rows of F3-world and E0-WorldCore.6 are the only rows any of them holds at head.
+        where = (f" WHERE name NOT IN ('{f3_world.BACKFILL_NAME}', 'legacy_resync_v1')"
+                 if table == "data_backfills" else "")
         assert await conn.scalar(sa.text(f"SELECT count(*) FROM {table}{where}")) == 0, table
     defs = await _f2_indexes(conn)
     assert set(defs) == {
@@ -508,7 +516,8 @@ async def every_campaign_has_the_default_relationship_types(conn: AsyncConnectio
 
 @post_upgrade_check(F3_WORLD)
 async def suggested_mentions_backfill_is_queued(conn: AsyncConnection) -> None:
-    rows = (await conn.execute(sa.text("SELECT name, status, cursor, job_id FROM data_backfills"))).all()
+    rows = (await conn.execute(sa.text("SELECT name, status, cursor, job_id FROM data_backfills "
+                                       "WHERE name = 'suggested_mentions_v1'"))).all()
     assert [tuple(r) for r in rows] == [("suggested_mentions_v1", "queued", None, None)]
     # Nothing else of the world: no Mentions, aliases, edges or steps yet.
     for table in ("entity_aliases", "entity_mentions", "entity_relationships", "quest_steps"):
@@ -556,6 +565,16 @@ async def suggested_mentions_are_unique_per_entry_entity_and_field(conn: AsyncCo
     assert indexdef.startswith("CREATE UNIQUE INDEX"), indexdef
     assert "(journal_id, entity_id, source_field)" in indexdef, indexdef
     assert "WHERE (NOT confirmed)" in indexdef, indexdef
+
+
+@post_upgrade_check(LEGACY_RESYNC)
+async def legacy_resync_backfill_is_queued(conn: AsyncConnection) -> None:
+    rows = (await conn.execute(sa.text("SELECT name, status, cursor, job_id FROM data_backfills ORDER BY name"))).all()
+    assert [tuple(r) for r in rows] == [("legacy_resync_v1", "queued", None, None),
+                                        ("suggested_mentions_v1", "queued", None, None)]
+    # The revision only queues the job: no Entity or history row is written by it.
+    counts = dict((await conn.execute(sa.text("SELECT op, count(*) FROM entity_changes GROUP BY op"))).all())
+    assert counts == {"migrated": len(expected_seed_entities())}, counts
 
 
 # Every F1-core column, by table: (key columns, F1-core columns). The
@@ -995,3 +1014,29 @@ def test_eed202f2eead_downgrade_drops_its_index(upgraded_snapshot):
     assert index is None
     assert tables_before == tables
     assert "WHERE (NOT confirmed)" in asyncio.run(_with_conn(TEST_DB_URL, _suggested_index))
+
+
+async def _legacy_resync_rows(conn: AsyncConnection) -> list:
+    return [tuple(r) for r in (await conn.execute(sa.text(
+        "SELECT name, status FROM data_backfills WHERE name = 'legacy_resync_v1'"))).all()]
+
+
+def test_9c4fbee4bdd1_downgrade_removes_only_its_untouched_row(upgraded_snapshot):
+    # Dev only (NFR-8): the downgrade deletes the queued, untouched row; a
+    # re-upgrade queues it again; the rest of the database is unchanged.
+    cfg = alembic_config(TEST_DB_URL)
+    changes = asyncio.run(_with_conn(TEST_DB_URL, _all_changes))
+    tables = asyncio.run(_with_conn(TEST_DB_URL, _public_tables))
+    command.downgrade(cfg, SUGGESTED_UNIQUE)
+    try:
+        version = asyncio.run(_state(TEST_DB_URL))[0]
+        at_down = asyncio.run(_with_conn(TEST_DB_URL, _legacy_resync_rows))
+        changes_down = asyncio.run(_with_conn(TEST_DB_URL, _all_changes))
+    finally:
+        command.upgrade(cfg, "head")
+    assert version == SUGGESTED_UNIQUE
+    assert at_down == []
+    assert changes_down == changes
+    assert asyncio.run(_with_conn(TEST_DB_URL, _legacy_resync_rows)) == [("legacy_resync_v1", "queued")]
+    assert asyncio.run(_with_conn(TEST_DB_URL, _public_tables)) == tables
+

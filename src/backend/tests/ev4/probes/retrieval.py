@@ -128,13 +128,33 @@ async def probe_journal_search(ev4, actor):
 
 # ── Entries for an NPC / a Quest ───────────────────────────────────────────
 
-async def _entity_entries_probe(ev4, actor, url: str, name: str, missing_url: str) -> None:
-    """NPCs and Quests are always_gm until F3-world (B1-D4, E0-Access.4): a
+async def _mention(ev4, legacy_kind: str, legacy_id, journal_id, *, confirmed: bool = True) -> None:
+    from app.access import ctx_for
+    from app.domain import legacy_world as lw
+    from app.services.world_service import apply_change
+
+    await apply_change(ev4.db, await ctx_for(ev4.db, ev4.a.owner_id, ev4.a.campaign_id), {
+        "op": "add_mention", "entity_id": lw.legacy_entity_id(legacy_kind, legacy_id), "journal_id": journal_id,
+        "confirmed": confirmed})
+    await ev4.db.commit()
+
+
+async def _entity_entries_probe(ev4, actor, legacy_kind: str, name: str) -> None:
+    """The seeded NPC/Quest as its GM-only Entity (E0-WorldCore.6), with a
+    confirmed Mention in a Party entry and an unconfirmed one in another: a
     non-GM of A gets the one 404, exactly as for a missing id, before and
-    after a GM-only change. A GM of A (co_gm) gets the list."""
+    after a GM-only change. A GM of A (co_gm) gets only the confirmed entry."""
+    from tests.ev4.probes._support import world_npc, world_quest
+
+    legacy_id = await (world_npc(ev4) if legacy_kind == "npc" else world_quest(ev4))
+    base = "/api/npcs" if legacy_kind == "npc" else "/api/quests"
+    url, missing_url = f"{base}/{legacy_id}/entries", f"{base}/{MISSING_ID}/entries"
     with fake_embeddings():
         await index_seeded(ev4)
-        await add_entry(ev4, f"The party met {name} on the road and shared a meal.")
+        confirmed = await add_entry(ev4, f"The party met {name} on the road and shared a meal.")
+        suggested = await add_entry(ev4, f"Someone like {name} was seen at the gate.")
+        await _mention(ev4, legacy_kind, legacy_id, confirmed)
+        await _mention(ev4, legacy_kind, legacy_id, suggested, confirmed=False)
         r = await actor.get(url)
         assert_no_canary(actor, r)
         if actor.grants.get(ev4.a.campaign_id) != "gm":
@@ -142,21 +162,17 @@ async def _entity_entries_probe(ev4, actor, url: str, name: str, missing_url: st
             await gm_only_change(ev4, name)
             await assert_hidden_equals_missing(actor, url, missing_url)
             return
-        assert r.status_code == 200 and len(r.json()) >= 1, r.text
+        assert r.status_code == 200 and [i["id"] for i in r.json()] == [str(confirmed)], r.text
 
 
 @ev4_probe("GET", "/api/npcs/{npc_id}/entries", actors=("anon_share", "player", "cross_gm_player", "co_gm"))
 async def probe_npc_entries(ev4, actor):
-    npc_id = ev4.a.ids["npcs"][0]
-    await _entity_entries_probe(ev4, actor, f"/api/npcs/{npc_id}/entries", "Barnaby",
-                                f"/api/npcs/{MISSING_ID}/entries")
+    await _entity_entries_probe(ev4, actor, "npc", "Barnaby")
 
 
 @ev4_probe("GET", "/api/quests/{quest_id}/entries", actors=("anon_share", "player", "cross_gm_player", "co_gm"))
 async def probe_quest_entries(ev4, actor):
-    quest_id = ev4.a.ids["quests"][0]
-    await _entity_entries_probe(ev4, actor, f"/api/quests/{quest_id}/entries", "Find the missing caravan",
-                                f"/api/quests/{MISSING_ID}/entries")
+    await _entity_entries_probe(ev4, actor, "quest", "Find the missing caravan")
 
 
 # ── Reindex ────────────────────────────────────────────────────────────────

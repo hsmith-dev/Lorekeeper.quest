@@ -590,14 +590,14 @@ async def test_a_player_sees_confirmed_allowed_mentions_only(ev4, db):
     assert await _mention_history(db, mira, "remove_mention") == 0
 
 
-# ── Wiring: 17 routes, each in nginx's /api/entities/ location (zone api) ───
+# ── Wiring: 17 routes + the E0-WorldCore.6 old-link resolver, each in nginx's /api/entities/ location (zone api) ───
 
 def test_every_entity_route_is_in_the_api_zone():
     from app.main import app
     from tests.ev4.routes import api_routes, resolve_route
 
     routes = [r for r in api_routes(app) if r.path.startswith("/api/entities")]
-    assert len(routes) == 17, sorted(f"{r.method} {r.path}" for r in routes)
+    assert len(routes) == 18, sorted(f"{r.method} {r.path}" for r in routes)
     for route in routes:
         loc = resolve_route(route)
         assert loc is not None and (loc.modifier, loc.uri) == ("", "/api/entities/"), (route, loc)

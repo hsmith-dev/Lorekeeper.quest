@@ -1,15 +1,12 @@
 """AD-18: after F3-world (03c0b504f1d1), `npcs` and `quests` are frozen.
 
 The F3-world revision copied every legacy row into `entities`; the world is
-the source of truth from then on, and E0-WorldCore.6 turns the legacy routes
-into adapters over it. Until then this is a ratchet: the modules that write
-`npcs` or `quests` today are LEGACY_WRITERS, and E0-WorldCore.6 empties the
-list. Any other module under src/backend/app or src/backend/scripts that
-writes them fails, and an allowlisted module that no longer writes them
-fails too (delete its line). The list only shrinks (FROZEN_CEILING).
-
-A row written through an allowlisted writer after the upgrade reaches
-`entities` only when E0-WorldCore.6 re-applies the (idempotent) copy.
+the source of truth from then on. E0-WorldCore.6 turned the legacy routes
+into adapters over it, moved the demo seeder to Entities and re-copies, once
+(the `legacy_resync_v1` backfill), what the old pages changed in between. So
+nothing under src/backend/app or src/backend/scripts writes `npcs` or
+`quests` any more: LEGACY_WRITERS and its ceiling are empty, and any module
+that writes them fails.
 
 "Writes" (found through the AST, so prose and docstrings never count):
 
@@ -30,14 +27,10 @@ BACKEND = Path(__file__).resolve().parents[1]
 SCANNED = ("app", "scripts")
 LEGACY_MODELS = frozenset({"NpcEntry", "Quest"})
 
-# Module -> why it still writes. E0-WorldCore.6 empties this.
-LEGACY_WRITERS: dict[str, str] = {
-    "app/api/routes/npcs.py": "legacy NPC CRUD; E0-WorldCore.6 turns it into an adapter over entities",
-    "app/api/routes/quests.py": "legacy Quest CRUD; E0-WorldCore.6 turns it into an adapter over entities",
-    "scripts/seed_demo.py": "the demo seeder writes the legacy format; E0-WorldCore.6 moves it to entities",
-}
+# Module -> why it still writes. Empty since E0-WorldCore.6, and it stays empty.
+LEGACY_WRITERS: dict[str, str] = {}
 # The allowlist may only shrink.
-FROZEN_CEILING = frozenset({"app/api/routes/npcs.py", "app/api/routes/quests.py", "scripts/seed_demo.py"})
+FROZEN_CEILING: frozenset[str] = frozenset()
 
 # Not services: they write a database that is older than F3-world.
 EXEMPT: dict[str, str] = {

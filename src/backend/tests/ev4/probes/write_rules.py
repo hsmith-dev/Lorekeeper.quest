@@ -109,15 +109,19 @@ async def probe_preview_delete_tag_category(ev4, actor):
 
 @ev4_probe("POST", "/api/npcs/", actors=GM_SOMEWHERE)
 async def probe_preview_create_npc(ev4, actor):
-    from app.db.models.npc import NpcEntry
+    from app.db.models.entity import Entity, EntityChange
 
     seeded = _own_gm_campaign(ev4, actor)
     pv = previewing(actor)
-    before = await row_count(ev4, NpcEntry, NpcEntry.campaign_id == seeded.campaign_id)
+
+    async def counts():  # NPCs are Entities (E0-WorldCore.6)
+        return [await row_count(ev4, m, m.campaign_id == seeded.campaign_id) for m in (Entity, EntityChange)]
+
+    before = await counts()
     body = {"name": "Spy", "notes": "secret"}
     assert_same_answer(pv, await pv.post("/api/npcs/", json={**body, "campaign_id": str(seeded.campaign_id)}),
                        await pv.post("/api/npcs/", json={**body, "campaign_id": MISSING}), "NPC create in preview")
-    assert await row_count(ev4, NpcEntry, NpcEntry.campaign_id == seeded.campaign_id) == before
+    assert await counts() == before
 
 
 @ev4_probe("POST", "/api/shorthand/", actors=GM_SOMEWHERE)

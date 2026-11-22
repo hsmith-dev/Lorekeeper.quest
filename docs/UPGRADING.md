@@ -40,6 +40,25 @@ again: it never duplicates an Entity. A value it does not recognise takes
 the default status (or kind NPC) and is written to the upgrade log instead
 of stopping the upgrade.
 
+## The old NPC and Quest pages show your World (E0-WorldCore.6)
+
+The NPC and Quest pages, and old NPC/Quest links, now read and write your
+World: an NPC is a Character or Faction, a Quest is a Quest. An edit on
+either page shows up in World, and an Entity created in World shows up on
+the old page. Locations and Items appear only in World. Players see only
+what you have published.
+
+If you upgraded to the release with the F3-world copy and kept using the old
+pages, the edits you made there afterwards are copied into World once, in
+the background, shortly after the worker starts (a Job per Campaign). New
+NPCs and Quests come over GM-only. Where you also changed the same thing in
+World, or the Entity is already published, World keeps its version and the
+old page's value is kept as a GM-only note in the Entity's history. An NPC
+or Quest you deleted on the old page is deleted from World too (you can
+revert it from its history), unless you had changed it in World. Nothing
+you published or changed in World is lost or unpublished, and the old rows
+are not changed. A fresh upgrade has nothing to re-copy.
+
 ## One 16 GB profile: `backend` is now `web` (E0-Platform.7)
 
 `docker-compose.prod.yml` now gives every container a memory limit from

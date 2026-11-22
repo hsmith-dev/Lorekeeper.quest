@@ -11,8 +11,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app.clients.errors import ModelServiceUnavailable
 from app.db.models.campaign import Campaign
 from app.db.models.journal import JournalEntry
-from app.db.models.npc import NpcEntry, NpcStatus
-from app.db.models.quest import Quest
+from app.db.models.entity import Entity
 from app.db.models.user import User
 from app.schemas.share import PublicJournalResponse, PublicNpcResponse, PublicQuestResponse
 from app.services import embedding_service
@@ -49,10 +48,12 @@ async def _seed_in_new_session(seed=SEED, owner_email=None, embedder=None):
 
 async def _counts(db, campaign_id) -> dict[str, int]:
     out = {}
-    for name, model in (("entries", JournalEntry), ("npcs", NpcEntry), ("quests", Quest)):
-        out[name] = await db.scalar(
-            sa.select(sa.func.count()).select_from(model).where(model.campaign_id == campaign_id)
-        )
+    out["entries"] = await db.scalar(
+        sa.select(sa.func.count()).select_from(JournalEntry).where(JournalEntry.campaign_id == campaign_id))
+    # NPCs and Quests are World Model Entities (E0-WorldCore.6).
+    for name, types in (("npcs", ("character", "faction")), ("quests", ("quest",))):
+        out[name] = await db.scalar(sa.select(sa.func.count()).select_from(Entity).where(
+            Entity.campaign_id == campaign_id, Entity.type.in_(types)))
     return out
 
 
@@ -260,20 +261,26 @@ async def test_rows_match_the_seed(db):
     ))
     assert hit == e01.id
 
-    mira = await db.scalar(sa.select(NpcEntry).where(
-        NpcEntry.campaign_id == res.campaign_id, NpcEntry.name == "Mira"))
-    assert mira.status == NpcStatus.dead
+    from app.access import MEMBER_VIEW, audience_ctx, ctx_for, project, set_visibility_many
+    from app.schemas.sources import RecordRef
 
-    # GM secrets stay out of what a share viewer is served.
+    entities = (await db.scalars(sa.select(Entity).where(Entity.campaign_id == res.campaign_id)
+                                 .order_by(Entity.name))).all()
+    assert all(e.visibility == "gm" for e in entities)  # every seeded Entity starts GM-only
+    mira = next(e for e in entities if e.name == "Mira")
+    assert (mira.type, mira.status) == ("character", "deceased")  # the seed's final status, dead
+    assert {e.type for e in entities} >= {"character", "faction", "quest"}
+
+    # GM secrets stay out of what the Party is served, even once everything is published.
+    gm = await ctx_for(db, res.owner_id, res.campaign_id)
+    await set_visibility_many(db, gm, [RecordRef(kind="entity", id=e.id) for e in entities], "party")
+    await db.commit()
+    entities = (await db.scalars(sa.select(Entity).where(Entity.campaign_id == res.campaign_id)
+                                 .execution_options(populate_existing=True))).all()
+    party = audience_ctx(res.campaign_id, MEMBER_VIEW, by=gm)
     phrases = [s["phrase"] for s in SEED["gm_secrets"]]
-    npcs = (await db.scalars(sa.select(NpcEntry).where(NpcEntry.campaign_id == res.campaign_id))).all()
-    quests = (await db.scalars(sa.select(Quest).where(Quest.campaign_id == res.campaign_id))).all()
-    public = " ".join(
-        [PublicNpcResponse.model_validate(n).model_dump_json() for n in npcs]
-        + [PublicQuestResponse.model_validate(q).model_dump_json() for q in quests]
-        + [e.narrative for e in entries]
-    )
-    private = " ".join([e.shorthand for e in entries] + [n.notes or "" for n in npcs] + [q.notes or "" for q in quests])
+    public = " ".join([project(e, party).model_dump_json() for e in entities] + [e.narrative for e in entries])
+    private = " ".join([e.shorthand for e in entries] + [e.gm_notes or "" for e in entities])
     for p in phrases:
         assert p not in public and p in private, p
 
