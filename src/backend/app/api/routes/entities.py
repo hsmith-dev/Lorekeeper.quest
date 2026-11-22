@@ -656,7 +656,8 @@ async def remove_mention(
     db: AsyncSession = Depends(get_db),
 ):
     """Remove one of this Entity's Mentions: one `remove_mention` history row.
-    A removed migration suggestion is never suggested again."""
+    The backfill never suggests a removed (entry, Entity, narrative) pair again.
+    A deleted or merged Entity is 409."""
     await _entity_mention(db, ctx, entity_id, mention_id)
 
     async def work():

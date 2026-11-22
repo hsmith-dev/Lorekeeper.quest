@@ -246,7 +246,23 @@ async def test_a_removed_suggestion_is_not_recreated(db):
     await db.commit()
     assert await suggest_mentions(db, gm, await _load(db, gm, e1)) == 0
     assert await _pairs(db, c.id) == [] and await _history(db, c.id, "remove_mention") == 1
-    assert mira  # the Entity is still there
+
+
+async def test_a_removed_manual_mention_also_blocks_a_suggestion(db):
+    c = await _campaign(db)
+    gm = await _gm(db, c)
+    mira = await _entity(db, gm, "Mira")
+    e1 = await _entry(db, c, "Mira ran.")
+    row = await apply_change(db, gm, AddMention(entity_id=mira, journal_id=e1, quote="manual"))
+    await apply_change(db, gm, RemoveMention(mention_id=uuid.UUID(row.new_value["mention_id"])))
+    await db.commit()
+    assert await suggest_mentions(db, gm, await _load(db, gm, e1)) == 0
+    # A removed Shorthand Mention of the pair does not block the Narrative suggestion.
+    e2 = await _entry(db, c, "Mira hid.")
+    row = await apply_change(db, gm, AddMention(entity_id=mira, journal_id=e2, source_field="shorthand"))
+    await apply_change(db, gm, RemoveMention(mention_id=uuid.UUID(row.new_value["mention_id"])))
+    await db.commit()
+    assert await suggest_mentions(db, gm, await _load(db, gm, e2)) == 1
 
 
 async def test_an_existing_mention_blocks_a_suggestion(db):

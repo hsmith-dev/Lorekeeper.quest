@@ -88,8 +88,8 @@ re-exported here with `normalize_name` and `NAME_PREFIXES`.
 to the survivor, floored `gm`/`private` when the absorbed Entity is not
 `party` (an existing floor that is already restrictive is kept); its name
 becomes a survivor alias; self-loops are dropped; an absorbed suggested
-Mention whose entry and source field the survivor already has a suggestion
-for is deleted (the survivor's row and its floor are kept); Quest steps move only when
+Mention whose entry and source field the survivor already has a Mention
+for (suggested or confirmed) is deleted (the survivor's row and its floor are kept); Quest steps move only when
 that cannot widen them; `merged_into_id` is set and both are marked stale. Its
 history stays on the absorbed Entity (moving it could widen GM-only history);
 the one `merge` row is on the survivor.
@@ -940,9 +940,10 @@ async def _merge(run: _Run, c: Merge) -> _MergePlan | EntityChange:
     for mention in await run.all(scoped_select(EntityMention, run.ctx).where(EntityMention.entity_id == absorbed.id)):
         if not mention.confirmed and mention.journal_id is not None:
             # One suggestion per (entry, Entity, field) (uq_entity_mentions_suggested, E0-WorldCore.7).
+            # Any survivor Mention of the pair (suggested or confirmed) makes it redundant.
             twin = await run.first(scoped_select(EntityMention, run.ctx).where(
                 EntityMention.entity_id == survivor.id, EntityMention.journal_id == mention.journal_id,
-                EntityMention.source_field == mention.source_field, EntityMention.confirmed.is_(False)))
+                EntityMention.source_field == mention.source_field))
             if twin is not None:
                 await run.delete(mention)
                 continue

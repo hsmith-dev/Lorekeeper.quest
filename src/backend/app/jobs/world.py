@@ -5,7 +5,7 @@ The `data_backfills` row `suggested_mentions_v1` (inserted by F3-world,
 Campaign, as the Campaign Owner's GM ctx (never `as_system`), key
 `backfill:suggested_mentions_v1:{campaign_id}`. The Job is a cursor Job
 (`run_cursor`) over the Campaign's `kind = gm` entries in Session order,
-`(coalesce(session_date, created_at::date), created_at, id)`, one entry per
+`(session_date, else the UTC date of created_at; created_at; id)`, one entry per
 step ("Entry 3 of 140").
 
 Per entry (`suggest_mentions`): `match_names` on the Narrative only (never
@@ -16,7 +16,7 @@ sentence (at most QUOTE_LIMIT characters, `sentence_quote`) as the quote.
 
 **Idempotent and resumable.** A pair (entry, Entity) is skipped when any
 Mention of it with source field `narrative` exists (confirmed or not, any
-origin) or when the GM removed a migration suggestion of it (a
+origin) or when the GM removed a `narrative` Mention of it, of any origin (a
 `remove_mention` history row). The partial unique index
 `uq_entity_mentions_suggested` backs that up: a conflicting insert is
 `CanonChangeError("invalid")` inside apply_change's savepoint, which is
@@ -114,8 +114,7 @@ async def _was_removed(db: AsyncSession, ctx: CampaignContext, entry_id: uuid.UU
     stmt = (scoped_select(EntityChange, ctx)
             .where(EntityChange.entity_id == entity_id, EntityChange.op == EntityChangeOp.REMOVE_MENTION.value,
                    old["journal_id"].astext == str(entry_id),
-                   old["source_field"].astext == MentionSourceField.NARRATIVE.value,
-                   old["origin"].astext == MentionOrigin.MIGRATION.value)
+                   old["source_field"].astext == MentionSourceField.NARRATIVE.value)
             .with_only_columns(EntityChange.id).limit(1))
     return (await db.execute(stmt)).first() is not None
 

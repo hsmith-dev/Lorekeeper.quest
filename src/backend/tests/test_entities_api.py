@@ -510,6 +510,52 @@ async def test_remove_mention(ev4, db):
     assert gone is None
     assert await _mention_history(db, mira, "remove_mention") == 1
     assert (await gm.delete(f"{BASE}/{mira}/mentions/{mention}")).status_code == 404
+    listed = await _ok(await gm.get(f"{BASE}/{mira}/mentions"))
+    assert listed["items"] == [] and listed["total"] == 0
+
+
+async def test_remove_lowers_mention_count_and_confirm_updates_the_list(ev4, db):
+    gm = await ev4.actor("gm_owner")
+    ctx = await _gm_ctx(ev4, db)
+    mira = await _new_entity(db, ctx, "Mira")
+    entry = await _journal(db, ev4, "Mira ran.")
+    mention = await _add_mention(db, ctx, mira, entry)
+    await db.commit()
+    await _ok(await gm.post(f"{BASE}/{mira}/mentions/{mention}/confirm"))
+    listed = await _ok(await gm.get(f"{BASE}/{mira}/mentions?confirmed=true"))
+    assert [i["id"] for i in listed["items"]] == [str(mention)]
+    assert (await _ok(await gm.get(f"{BASE}/{mira}")))["mention_count"] == 1
+    await _ok(await gm.delete(f"{BASE}/{mira}/mentions/{mention}"), 204)
+    assert (await _ok(await gm.get(f"{BASE}/{mira}")))["mention_count"] == 0
+
+
+async def test_player_entry_titles_and_entryless_mentions(ev4, db):
+    from datetime import date
+
+    from app.db.models.journal import JournalEntry
+
+    gm = await ev4.actor("gm_owner")
+    player = await ev4.actor("player")
+    ctx = await _gm_ctx(ev4, db)
+    mira = await _new_entity(db, ctx, "Mira", party=True)
+    mine = await _journal(db, ev4, "Mira at camp.", session_date=date(2026, 2, 2), kind="player")
+    gm_entry = await _journal(db, ev4, "Mira at sea.", session_date=date(2026, 2, 1))
+    on_player = await _add_mention(db, ctx, mira, mine, confirmed=True)
+    on_gm = await _add_mention(db, ctx, mira, gm_entry, confirmed=True)
+    doomed_entry = await _journal(db, ev4, "Mira, gone.", session_date=date(2026, 2, 3))
+    orphan = await _add_mention(db, ctx, mira, doomed_entry, confirmed=True)
+    await db.commit()
+    # The entry goes away under the Mention (journal_id SET NULL).
+    await db.execute(sa.delete(JournalEntry).where(JournalEntry.id == doomed_entry))
+    await db.commit()
+    body = await _ok(await gm.get(f"{BASE}/{mira}/mentions"))
+    assert [i["id"] for i in body["items"]] == [str(on_player), str(on_gm), str(orphan)] and body["total"] == 3
+    titles = {i["id"]: i["entry_title"] for i in body["items"]}
+    assert titles[str(on_player)] == "Player journal · 2026-02-02"
+    assert titles[str(on_gm)] == "Journal entry · 2026-02-01"
+    assert titles[str(orphan)] is None and body["items"][2]["journal_id"] is None
+    seen = await _ok(await player.get(f"{BASE}/{mira}/mentions"))
+    assert str(orphan) not in {i["id"] for i in seen["items"]}
 
 
 async def test_a_player_sees_confirmed_allowed_mentions_only(ev4, db):
