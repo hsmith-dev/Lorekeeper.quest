@@ -212,9 +212,11 @@ async def test_create_with_ml_down_saves_and_enqueues_reembed(db, world, ml_down
                                                              "entry_hash": row.entry_hash}
 
     # ml down: the Job raises (so it retries).
+    job_id = job.id
     with pytest.raises(ModelServiceUnavailable):
         await journal_service.reembed_job(job, world.gm, db)
     await db.rollback()
+    job = (await db.execute(sa.select(Job).where(Job.id == job_id))).scalar_one()
 
     # ml back: the Job fills both vectors and the tags.
     _ml(monkeypatch, FakeMLClient())
@@ -329,9 +331,16 @@ async def test_update_text_recomputes_every_index_column(db, world, emitted, val
 async def test_update_keeps_manual_and_legacy_links(db, world):
     entry = await _create(db, world, notes="nothing much", narrative="quiet day.")
     assert await _links(db, entry.id) == {}
-    tags = {name: Tag(name=name, tag_type=TagType.character) for name in ("Mira", "Pelor", "Ghost", "Stale")}
-    db.add_all(tags.values())
-    await db.flush()
+    # Tags are global (unique by name and type): reuse a row an earlier test made.
+    tags = {}
+    for name in ("Mira", "Pelor", "Ghost", "Stale"):
+        tag = (await db.execute(sa.select(Tag).where(Tag.name == name, Tag.tag_type == TagType.character))
+               ).scalar_one_or_none()
+        if tag is None:
+            tag = Tag(name=name, tag_type=TagType.character)
+            db.add(tag)
+            await db.flush()
+        tags[name] = tag
     db.add_all([
         JournalTag(journal_id=entry.id, tag_id=tags["Mira"].id, source_field=None),        # legacy, re-derived
         JournalTag(journal_id=entry.id, tag_id=tags["Ghost"].id, source_field=None),       # legacy, not
@@ -348,7 +357,7 @@ async def test_update_keeps_manual_and_legacy_links(db, world):
 async def test_update_collision_is_409_and_writes_nothing(db, world, valkey):
     a = await _create(db, world, notes="alpha notes", narrative="A.")
     b = await _create(db, world, notes="beta notes", narrative="B.")
-    b_id = b.id
+    a_id, b_id = a.id, b.id
     # The Valkey key (set by the create) catches it first.
     with pytest.raises(HTTPException) as exc:
         await journal_service.update_journal_entry(db, world.gm, b, {"notes": " Alpha Notes"})
@@ -364,7 +373,7 @@ async def test_update_collision_is_409_and_writes_nothing(db, world, valkey):
     row = await _row(db, b_id)
     assert (row.shorthand, row.narrative, row.entry_hash) == (
         "beta notes", "B.", journal_service.compute_entry_hash("beta notes"))
-    assert (await _row(db, a.id)).shorthand == "alpha notes"
+    assert (await _row(db, a_id)).shorthand == "alpha notes"
 
 
 async def test_update_date_or_visibility_recomputes_nothing(db, world, emitted, monkeypatch):
