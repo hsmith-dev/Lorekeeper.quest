@@ -39,6 +39,8 @@ E0-Jobs.7 adds the Job reads (`get_job`,
 `list_jobs`, `queue_positions`, `job_response`, `visible_result_ref`,
 `register_result_kind`, `result_kinds`) and the `jobs:{id}` stream filter
 (`job_event_stream`, `deliverable_job_event`, `JobEventCheckFailed`).
+E0-WorldCore.9 adds `resolve_merged` (app/access/merged.py): an old Entity id
+after a merge resolves to its survivor only for a ctx that may follow it.
 """
 from app.access.audience import (
     ALWAYS_GM_FIELDS, GM_AUDIENCE, MEMBERS, PUBLIC, AnyOf, Audience, AudienceLevel, covers, ctx_audience,
@@ -88,12 +90,14 @@ from app.access.jobs import (
     JobEventCheckFailed, deliverable_job_event, get_job, job_event_stream, job_response, list_jobs,
     queue_positions, register_result_kind, result_kinds, visible_result_ref,
 )
+from app.access.merged import resolve_merged
 from app.access.grants import _check_watchable
 from app.core import sse as _sse
 
 _sse.register_close_watch(grant_watch, check=_check_watchable)
 
 __all__ = [
+    "resolve_merged",
     "JobEventCheckFailed",
     "deliverable_job_event",
     "get_job",

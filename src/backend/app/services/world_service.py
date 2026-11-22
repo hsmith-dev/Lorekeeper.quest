@@ -64,18 +64,30 @@ registered below (kinds `entity` and `entity_relationship`), with a private
 token: an Entity change is one `update_field` row (`visibility` or
 `field_visibility.<key>`), an edge change one `update_relationship` row. A
 `visibility_floor` path is 422. The only literal `visibility_floor` write is
-the merge branch of `apply_change` (scripts/check_scoped_queries.py). The
-only other floor value written is a revert of `remove_alias` /
-`remove_mention`: it re-creates the row with its earlier `visibility_floor`
-(a constructor restore), so a floored row never comes back unfloored.
+in `apply_change`, for a handler result that is a `_MergePlan` (a merge, or a
+merge's revert restoring the floors it replaced; scripts/check_scoped_queries.py).
+The only other floor values written are constructor restores: a revert of
+`remove_alias` / `remove_mention`, and a merge revert re-creating the rows the
+merge deleted, each with its earlier `visibility_floor`, so a floored row
+never comes back unfloored.
 
 **Revert.** `revert_change(db, ctx, change_id, force=False)` applies the
 inverse through `apply_change(op=revert)`: one `revert` row with
 `reverted_change_id`. A field change whose field no longer holds the row's
 `new_value` (or a row change whose row is gone or changed) is `superseded`
 unless `force=True`. Reverting `create_entity` soft-deletes the Entity.
-`merge`, Visibility changes, `migrated`, `source_deleted`, `canon_note` and
-reverts of non-field changes are `not_revertible`.
+Reverting a `merge` (E0-WorldCore.9) un-merges it from the merge row's undo
+record: `merged_into_id` back to NULL; the moved aliases, Mentions, edges
+(with their old ends) and Quest steps back on the absorbed Entity with the
+floors they had; the deleted duplicate aliases and self-loop edges re-created
+with their ids and values; the added name alias deleted; the repointed
+ENTITY_REF attributes put back; the survivor, the absorbed Entity and each
+holder marked stale. A moved row that is gone or no longer on the survivor,
+or a ref no longer naming the survivor, is `superseded` unless `force`
+(which skips it); a survivor merged or deleted since is `merged` /
+`deleted`. The revert row is on the survivor with field NULL (GM).
+Visibility changes, `migrated`, `source_deleted`, `canon_note`, a merge
+without an undo record and reverts of non-field changes are `not_revertible`.
 
 **Names** (E0-WorldCore.4). Every alias key is `normalize_name(alias)`
 (app/domain/names.py), recomputed from the stored surface form when compared;
@@ -83,14 +95,33 @@ reverts of non-field changes are `not_revertible`.
 `match_names` and `candidates` (app/services/world_matching.py) are
 re-exported here with `normalize_name` and `NAME_PREFIXES`.
 
-**Merge primitive** (`op=merge`, E0-WorldCore.9's wrapper calls it under
-`as_system("merge")`): the absorbed Entity's aliases, Mentions and edges move
-to the survivor, floored `gm`/`private` when the absorbed Entity is not
-`party` (an existing floor that is already restrictive is kept); its name
-becomes a survivor alias; self-loops are dropped; Quest steps move only when
-that cannot widen them; `merged_into_id` is set and both are marked stale. Its
-history stays on the absorbed Entity (moving it could widen GM-only history);
-the one `merge` row is on the survivor.
+**Merge primitive** (`op=merge`, under `as_system("merge")`): both Entities
+are locked in sorted-id order (concurrent A→B and B→A merges cannot
+deadlock). The absorbed Entity's aliases, Mentions and edges move to the
+survivor, floored `gm`/`private` when the absorbed Entity is not `party`;
+a moved alias is floored by the stricter of that and the absorbed Entity's
+`field_visibility.aliases` (an existing floor that is already restrictive is
+kept). Its name becomes a survivor alias (floored like a Mention); duplicate
+aliases and self-loops are dropped; Quest steps move only when that cannot
+widen them. An ENTITY_REF attribute of another live Entity naming the
+absorbed one is repointed to the survivor only when that cannot widen it
+(the absorbed Entity was `party`, or the survivor is not), never to point an
+Entity at itself; each holder is marked stale either way. The survivor's own
+Visibility and fields are untouched and none of the absorbed Entity's field
+values are copied. `merged_into_id` is set and both are marked stale. Its
+history stays on the absorbed Entity (moving it could widen GM-only
+history); the one `merge` row is on the survivor, field NULL (GM), and its
+`new_value` holds `{absorbed_id, floor, moved, downgrades, warning, undo}`.
+
+**The GM's merge** (E0-WorldCore.9): `merge_entities(db, ctx, survivor_id,
+absorbed_id, *, preview=False)` (alias `merge`) is the only caller of
+`as_system("merge")`: for a writable GM user ctx it runs one
+`apply_change(op=merge)` and returns a `MergeResult{downgrades, moved_counts,
+warning, ...}`; with `preview=True` it makes the same checks and returns the
+same report plus the survivor's combined aliases, the Mention count and the
+moved Relationships, and writes nothing. A merged-away id resolves to its
+survivor through `access.resolve_merged` (the GET route and the
+`entity_field` resolver).
 """
 from __future__ import annotations
 
@@ -108,10 +139,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.access import (
-    GM, AudienceLevel, CampaignContext, SystemReason, VisibilityError, audience_of, mark_dependents_stale, not_found,
-    project, register_resolver, register_visibility_kind, register_writer, registration, scoped_select,
+    GM, AudienceLevel, CampaignContext, NotFound, SystemReason, VisibilityError, audience_of, mark_dependents_stale,
+    not_found, project, register_resolver, register_visibility_kind, register_writer, registration, resolve_merged,
+    scoped_select,
 )
-from app.access.projection import entity_ref_ids
+from app.access.projection import ENTITY_REF_KEYS, entity_ref_ids
 from app.access.sources import QUOTE_MAX
 from app.core.hooks import HookEvent, emit
 from app.db.models.entity import (
@@ -144,7 +176,7 @@ DOMAIN = "entities"  # the campaign-events domain canon_changed publishes
 HIDEABLE_FIELDS = frozenset({"status", "description", "attributes", "aliases"})
 # Status and kind have their own ops; every other field-based row is update_field.
 _FIELD_OPS = frozenset({Op.UPDATE_FIELD, Op.SET_STATUS, Op.SET_KIND})
-_NOT_REVERTIBLE = frozenset({Op.MERGE, Op.MIGRATED, Op.SOURCE_DELETED, Op.CANON_NOTE})
+_NOT_REVERTIBLE = frozenset({Op.MIGRATED, Op.SOURCE_DELETED, Op.CANON_NOTE})
 _VISIBILITY_PREFIX = "field_visibility."
 _VISIBILITY = "visibility"
 
@@ -894,80 +926,471 @@ async def _canon_note(run: _Run, c: CanonNote) -> EntityChange:
 
 @dataclass
 class _MergePlan:
+    """A handler result whose `visibility_floor` writes apply_change makes
+    (a merge, and a merge's revert restoring the floors it replaced)."""
+
     change: EntityChange
-    floors: list[tuple[Any, str]]
+    floors: list[tuple[Any, str | None]]
 
 
-async def _merge(run: _Run, c: Merge) -> _MergePlan | EntityChange:
-    absorbed = await _entity(run, c.entity_id, allow_deleted=True, allow_merged=True)
-    survivor = await _entity(run, c.survivor_id, allow_deleted=True, allow_merged=True)
-    repeat = await _repeat(run, Op.MERGE, survivor.id, None,
-                           lambda r: _val(r, "new", "absorbed_id") == str(absorbed.id))
-    if repeat is not None:
-        return repeat
-    absorbed = await _entity(run, absorbed.id)  # now the liveness checks
-    survivor = await _entity(run, survivor.id)
+PARTY_WITH_GM_ONLY = "party_with_gm_only"  # MergeResult.warning
+_FLOOR_RANK = {Visibility.PARTY.value: 0, Visibility.GM.value: 1, Visibility.PRIVATE.value: 2}
+
+
+def _vis_value(value: Any) -> str | None:
+    if value is None:
+        return None
+    return str(getattr(value, "value", value))
+
+
+def _stricter(*values: Any) -> str | None:
+    """The most restrictive of some Visibility values as a floor (None: no floor)."""
+    best, rank = None, 0
+    for value in values:
+        v = _vis_value(value)
+        if v is None:
+            continue
+        r = _FLOOR_RANK.get(v, 1)
+        if r > rank:
+            best, rank = v, r
+    return best
+
+
+def _is_party(entity: Entity) -> bool:
+    return _vis_value(entity.visibility) == Visibility.PARTY.value
+
+
+def _aliases_hidden(entity: Entity) -> bool:
+    return _restrictive_floor(_vis_value((entity.field_visibility or {}).get("aliases")))
+
+
+def _ref_uuid(value: Any) -> uuid.UUID | None:
+    if isinstance(value, uuid.UUID):
+        return value
+    try:
+        return uuid.UUID(str(value)) if value is not None else None
+    except ValueError:
+        return None
+
+
+def _entity_ref_keys(entity_type: str) -> list[str]:
+    """The ENTITY_REF attribute keys of one Entity type."""
+    out = []
+    for key in et.attribute_keys(entity_type):
+        if key in ENTITY_REF_KEYS and et.attribute(entity_type, key).value_kind is et.ValueKind.ENTITY_REF:
+            out.append(key)
+    return out
+
+
+def _check_live(entity: Entity) -> Entity:
+    if entity.merged_into_id is not None:
+        raise CanonChangeError("merged", "This Entity was merged into another")
+    if entity.deleted_at is not None:
+        raise CanonChangeError("deleted", "This Entity was deleted")
+    return entity
+
+
+async def _merge_pair(run: _Run, absorbed_id: uuid.UUID, survivor_id: uuid.UUID, *,
+                      lock: bool = True) -> tuple[Entity, Entity]:
+    """Both Entities, looked up (and with `lock`, locked FOR UPDATE) in
+    sorted-id order, so concurrent A→B and B→A merges cannot deadlock."""
+    rows: dict[uuid.UUID, Entity] = {}
+    for entity_id in sorted({absorbed_id, survivor_id}):
+        stmt = scoped_select(Entity, run.ctx).where(Entity.id == entity_id)
+        row = await run.first(stmt.with_for_update() if lock else stmt)
+        if row is None:
+            raise CanonChangeError("not_found", "No such Entity")
+        run.loaded(row)
+        rows[entity_id] = row
+    return rows[absorbed_id], rows[survivor_id]
+
+
+def _check_mergeable(absorbed: Entity, survivor: Entity) -> None:
+    _check_live(absorbed)
+    _check_live(survivor)
     if absorbed.id == survivor.id:
         raise CanonChangeError("invalid", "An Entity cannot be merged into itself")
     if absorbed.type != survivor.type:
         raise CanonChangeError("invalid", "Only Entities of the same type merge")
-    floor = None if absorbed.visibility == Visibility.PARTY.value else str(absorbed.visibility)
-    floors: list[tuple[Any, str]] = []
 
-    def floored(row: Any) -> None:
+
+@dataclass
+class _MergeWork:
+    """What a merge of `absorbed` into `survivor` does, read before anything
+    is written (the merge executes it; a preview only reports it)."""
+
+    absorbed: Entity
+    survivor: Entity
+    floor: str | None             # Mentions, edges and the name alias
+    alias_floor: str | None       # moved aliases: also the absorbed `aliases` field
+    move_aliases: list[EntityAlias]
+    drop_aliases: list[EntityAlias]
+    name_alias: str | None        # the absorbed name, when it becomes a survivor alias
+    mentions: list[EntityMention]
+    move_edges: list[tuple[EntityRelationship, uuid.UUID, uuid.UUID]]  # (edge, new source, new target)
+    drop_edges: list[EntityRelationship]
+    steps: list[QuestStep]
+    ref_holders: list[Entity]     # live Entities with an ENTITY_REF naming the absorbed one
+    repoint: list[tuple[Entity, str]]
+    downgrades: list[dict[str, Any]]
+    warning: str | None
+
+    def moved(self) -> dict[str, int]:
+        return {"aliases": len(self.move_aliases), "mentions": len(self.mentions),
+                "relationships": len(self.move_edges), "self_loops_dropped": len(self.drop_edges),
+                "quest_steps": len(self.steps), "attribute_refs": len(self.repoint)}
+
+
+async def _merge_work(run: _Run, absorbed: Entity, survivor: Entity, *, lock: bool) -> _MergeWork:
+    floor = None if _is_party(absorbed) else _vis_value(absorbed.visibility)
+    alias_floor = _stricter(floor, (absorbed.field_visibility or {}).get("aliases"))
+
+    keys = {normalize_name(a.alias) for a in await _aliases(run, survivor.id)}
+    move_aliases, drop_aliases = [], []
+    for alias in sorted(await _aliases(run, absorbed.id), key=lambda a: (a.alias, str(a.id))):
+        alias_key = normalize_name(alias.alias)
+        if alias_key in keys:
+            drop_aliases.append(alias)
+            continue
+        move_aliases.append(alias)
+        keys.add(alias_key)
+    name_key = normalize_name(absorbed.name)
+    name_alias = None
+    if name_key and name_key not in keys and name_key != normalize_name(survivor.name):
+        name_alias = " ".join(absorbed.name.split())
+
+    mentions = await run.all(scoped_select(EntityMention, run.ctx).where(EntityMention.entity_id == absorbed.id)
+                             .order_by(EntityMention.id))
+    move_edges, drop_edges = [], []
+    for edge in await run.all(scoped_select(EntityRelationship, run.ctx).where(sa.or_(
+            EntityRelationship.source_entity_id == absorbed.id,
+            EntityRelationship.target_entity_id == absorbed.id)).order_by(EntityRelationship.id)):
+        source = survivor.id if edge.source_entity_id == absorbed.id else edge.source_entity_id
+        target = survivor.id if edge.target_entity_id == absorbed.id else edge.target_entity_id
+        if source == target:
+            drop_edges.append(edge)
+        else:
+            move_edges.append((edge, source, target))
+    # Steps have no floor: they move only when that cannot widen them.
+    steps: list[QuestStep] = []
+    if _is_party(absorbed) or not _is_party(survivor):
+        steps = await run.all(scoped_select(QuestStep, run.ctx).where(QuestStep.quest_entity_id == absorbed.id)
+                              .order_by(QuestStep.id))
+
+    # ENTITY_REF attributes of other live Entities that name the absorbed one.
+    holders: list[Entity] = []
+    repoint: list[tuple[Entity, str]] = []
+    if ENTITY_REF_KEYS:
+        stmt = scoped_select(Entity, run.ctx).where(
+            Entity.id != absorbed.id, Entity.deleted_at.is_(None), Entity.merged_into_id.is_(None),
+            sa.or_(*[Entity.attributes[k].astext == str(absorbed.id) for k in sorted(ENTITY_REF_KEYS)]),
+        ).order_by(Entity.id)
+        # Repointing it cannot widen what the Party sees (the survivor's id is shown only where the absorbed one was).
+        safe = _is_party(absorbed) or not _is_party(survivor)
+        for holder in await run.all(stmt.with_for_update() if lock else stmt):
+            keys_here = [k for k in _entity_ref_keys(holder.type)
+                         if _ref_uuid((holder.attributes or {}).get(k)) == absorbed.id]
+            if not keys_here:
+                continue
+            holders.append(holder)
+            if safe and holder.id != survivor.id:  # never a ref of the survivor to itself
+                repoint.extend((holder, k) for k in keys_here)
+
+    # Downgrades (entity-level, MergeResult): the row's Party audience before vs on the survivor.
+    downgrades: list[dict[str, Any]] = []
+
+    def report(kind: str, row_id: uuid.UUID, before: bool, after: bool) -> None:
+        if before != after:
+            downgrades.append({"kind": kind, "id": row_id, "from": Visibility.PARTY.value,
+                               "to": Visibility.GM.value})
+
+    alias_before = _is_party(absorbed) and not _aliases_hidden(absorbed)
+    alias_after = _is_party(survivor) and not _aliases_hidden(survivor)
+    for alias in move_aliases:
+        report("alias", alias.id, alias_before, alias_after)
+    for mention in mentions:
+        report("mention", mention.id, _is_party(absorbed), _is_party(survivor))
+    for edge, _source, _target in move_edges:
+        report("relationship", edge.id, _is_party(absorbed), _is_party(survivor))
+    warning = PARTY_WITH_GM_ONLY if _is_party(absorbed) != _is_party(survivor) else None
+    return _MergeWork(absorbed, survivor, floor, alias_floor, move_aliases, drop_aliases, name_alias, mentions,
+                      move_edges, drop_edges, steps, holders, repoint, downgrades, warning)
+
+
+def _alias_record(alias: EntityAlias) -> dict[str, Any]:
+    return {"id": alias.id, "alias": alias.alias, "normalized_alias": alias.normalized_alias,
+            "visibility_floor": _json(alias.visibility_floor)}
+
+
+def _edge_record(edge: EntityRelationship) -> dict[str, Any]:
+    return {"id": edge.id, "source_entity_id": edge.source_entity_id, "target_entity_id": edge.target_entity_id,
+            "relationship_type_id": edge.relationship_type_id, "note": edge.note,
+            "visibility": _json(edge.visibility), "visibility_floor": _json(edge.visibility_floor),
+            "source_journal_id": edge.source_journal_id, "source_deleted_at": edge.source_deleted_at,
+            "started_at": edge.started_at, "ended_at": edge.ended_at}
+
+
+async def _merge(run: _Run, c: Merge) -> _MergePlan | EntityChange:
+    absorbed, survivor = await _merge_pair(run, c.entity_id, c.survivor_id)
+    repeat = await _repeat(run, Op.MERGE, survivor.id, None,
+                           lambda r: _val(r, "new", "absorbed_id") == str(absorbed.id))
+    if repeat is not None:
+        return repeat
+    _check_mergeable(absorbed, survivor)  # now the liveness checks
+    work = await _merge_work(run, absorbed, survivor, lock=True)
+    floors: list[tuple[Any, str | None]] = []
+
+    def floored(row: Any, floor: str | None) -> None:
         if floor is not None and not _restrictive_floor(row.visibility_floor):
             floors.append((row, floor))
 
-    keys = {normalize_name(a.alias) for a in await _aliases(run, survivor.id)}
-    moved = {"aliases": 0, "mentions": 0, "relationships": 0, "self_loops_dropped": 0, "quest_steps": 0}
-    for alias in await _aliases(run, absorbed.id):
-        alias_key = normalize_name(alias.alias)
-        if alias_key in keys:
-            await run.delete(alias)
-            continue
+    # The undo record (revert_change un-merges from it): each moved row with
+    # its floor (and an edge with its ends) before the merge, the deleted rows
+    # in full, the added name alias, the moved steps and the repointed refs.
+    undo: dict[str, Any] = {"aliases": [], "mentions": [], "relationships": [], "dropped_aliases": [],
+                            "dropped_relationships": [], "name_alias_id": None, "quest_steps": [],
+                            "attribute_refs": []}
+    for alias in work.drop_aliases:
+        undo["dropped_aliases"].append(_alias_record(alias))
+        await run.delete(alias)
+    for alias in work.move_aliases:
+        undo["aliases"].append({"id": alias.id, "floor": _json(alias.visibility_floor)})
         alias.entity_id = survivor.id
-        alias.normalized_alias = alias_key
+        alias.normalized_alias = normalize_name(alias.alias)
         run.touch(alias)
-        floored(alias)
-        keys.add(alias_key)
-        moved["aliases"] += 1
-    name_key = normalize_name(absorbed.name)
-    if name_key and name_key not in keys and name_key != normalize_name(survivor.name):
-        floored(run.add(EntityAlias(campaign_id=run.ctx.campaign_id, entity_id=survivor.id,
-                                    alias=" ".join(absorbed.name.split()), normalized_alias=name_key)))
-    for mention in await run.all(scoped_select(EntityMention, run.ctx).where(EntityMention.entity_id == absorbed.id)):
+        floored(alias, work.alias_floor)
+    if work.name_alias is not None:
+        name_row = run.add(EntityAlias(id=uuid.uuid4(), campaign_id=run.ctx.campaign_id, entity_id=survivor.id,
+                                       alias=work.name_alias, normalized_alias=normalize_name(work.name_alias)))
+        floored(name_row, work.floor)
+        undo["name_alias_id"] = name_row.id
+    for mention in work.mentions:
+        undo["mentions"].append({"id": mention.id, "floor": _json(mention.visibility_floor)})
         mention.entity_id = survivor.id
         run.touch(mention)
-        floored(mention)
-        moved["mentions"] += 1
-    edges = await run.all(scoped_select(EntityRelationship, run.ctx).where(sa.or_(
-        EntityRelationship.source_entity_id == absorbed.id, EntityRelationship.target_entity_id == absorbed.id)))
-    for edge in edges:
-        if edge.source_entity_id == absorbed.id:
-            edge.source_entity_id = survivor.id
-        if edge.target_entity_id == absorbed.id:
-            edge.target_entity_id = survivor.id
-        if edge.source_entity_id == edge.target_entity_id:
-            await run.delete(edge)
-            moved["self_loops_dropped"] += 1
-            continue
+        floored(mention, work.floor)
+    for edge in work.drop_edges:
+        undo["dropped_relationships"].append(_edge_record(edge))
+        await run.delete(edge)
+    for edge, source, target in work.move_edges:
+        undo["relationships"].append({"id": edge.id, "floor": _json(edge.visibility_floor),
+                                      "source_entity_id": edge.source_entity_id,
+                                      "target_entity_id": edge.target_entity_id})
+        edge.source_entity_id, edge.target_entity_id = source, target
         run.touch(edge)
-        floored(edge)
-        run.ref(edge.source_entity_id, edge.target_entity_id)
-        moved["relationships"] += 1
-    # Steps have no floor: they move only when that cannot widen them.
-    if absorbed.visibility == Visibility.PARTY.value or survivor.visibility != Visibility.PARTY.value:
-        for step in await run.all(scoped_select(QuestStep, run.ctx).where(QuestStep.quest_entity_id == absorbed.id)):
-            step.quest_entity_id = survivor.id
-            run.touch(step)
-            moved["quest_steps"] += 1
+        floored(edge, work.floor)
+        run.ref(source, target)
+    for step in work.steps:
+        undo["quest_steps"].append(step.id)
+        step.quest_entity_id = survivor.id
+        run.touch(step)
+    for holder, key in work.repoint:
+        attrs = dict(holder.attributes or {})
+        attrs[key] = str(survivor.id)
+        holder.attributes = attrs  # a new dict: JSONB change tracking sees it
+        run.touch(holder)
+        run.ref(holder.id)
+        undo["attribute_refs"].append({"entity_id": holder.id, "key": key})
     absorbed.merged_into_id = survivor.id
     run.touch(absorbed)
-    run.narrow(survivor.id, absorbed.id)
+    run.narrow(survivor.id, absorbed.id, *(h.id for h in work.ref_holders))
     run.ref(absorbed.id)
-    row = run.history(survivor.id, Op.MERGE, None, None,
-                      {"absorbed_id": absorbed.id, "floor": floor, "moved": moved})
+    row = run.history(survivor.id, Op.MERGE, None, None, {
+        "absorbed_id": absorbed.id, "floor": work.floor, "moved": work.moved(), "downgrades": work.downgrades,
+        "warning": work.warning, "undo": undo})
     return _MergePlan(row, floors)
+
+
+async def _revert_merge(run: _Run, c: Revert, target: EntityChange) -> _MergePlan:
+    """Un-merge from the merge row's undo record (module docstring, Revert)."""
+    new = target.new_value if isinstance(target.new_value, dict) else {}
+    undo = new.get("undo")
+    absorbed_id = _ref_uuid(new.get("absorbed_id"))
+    if not isinstance(undo, dict) or absorbed_id is None:
+        raise CanonChangeError("not_revertible", "This merge has no undo record")
+    absorbed, survivor = await _merge_pair(run, absorbed_id, target.entity_id)
+    _check_live(survivor)  # merged or deleted since: `merged` / `deleted`
+    if absorbed.merged_into_id != survivor.id:
+        raise CanonChangeError("superseded", "This Entity is no longer merged into the survivor")
+    floors: list[tuple[Any, str | None]] = []
+    skipped = 0
+
+    def touched() -> None:
+        nonlocal skipped
+        _superseded(c.force)  # force: skip it
+        skipped += 1
+
+    async def locked(model: type, row_id: Any) -> Any:
+        rid = _ref_uuid(row_id)
+        if rid is None:
+            return None
+        return await run.first(scoped_select(model, run.ctx).where(model.id == rid).with_for_update())
+
+    for item in undo.get("aliases") or []:
+        alias = await locked(EntityAlias, item.get("id"))
+        if alias is None or alias.entity_id != survivor.id:
+            touched()
+            continue
+        alias.entity_id = absorbed.id
+        run.touch(alias)
+        floors.append((alias, item.get("floor")))
+    for item in undo.get("mentions") or []:
+        mention = await locked(EntityMention, item.get("id"))
+        if mention is None or mention.entity_id != survivor.id:
+            touched()
+            continue
+        mention.entity_id = absorbed.id
+        run.touch(mention)
+        floors.append((mention, item.get("floor")))
+    for item in undo.get("relationships") or []:
+        edge = await locked(EntityRelationship, item.get("id"))
+        source, target_end = _ref_uuid(item.get("source_entity_id")), _ref_uuid(item.get("target_entity_id"))
+        expected = (survivor.id if source == absorbed.id else source,
+                    survivor.id if target_end == absorbed.id else target_end)
+        if edge is None or (edge.source_entity_id, edge.target_entity_id) != expected:
+            touched()
+            continue
+        edge.source_entity_id, edge.target_entity_id = source, target_end
+        run.touch(edge)
+        floors.append((edge, item.get("floor")))
+        run.ref(source, target_end)
+    for step_id in undo.get("quest_steps") or []:
+        step = await locked(QuestStep, step_id)
+        if step is None or step.quest_entity_id != survivor.id:
+            touched()
+            continue
+        step.quest_entity_id = absorbed.id
+        run.touch(step)
+    name_alias = await locked(EntityAlias, undo.get("name_alias_id")) if undo.get("name_alias_id") else None
+    if undo.get("name_alias_id"):
+        if name_alias is None or name_alias.entity_id != survivor.id:
+            touched()
+        else:
+            await run.delete(name_alias)
+    absorbed_keys = {normalize_name(a.alias) for a in await _aliases(run, absorbed.id)}
+    for item in undo.get("dropped_aliases") or []:
+        key = normalize_name(str(item.get("alias") or ""))
+        if not key or key in absorbed_keys or await locked(EntityAlias, item.get("id")) is not None:
+            touched()
+            continue
+        # A constructor restore: the row comes back with the floor it had.
+        run.add(EntityAlias(id=_ref_uuid(item.get("id")), campaign_id=run.ctx.campaign_id, entity_id=absorbed.id,
+                            alias=item.get("alias"), normalized_alias=item.get("normalized_alias") or key,
+                            visibility_floor=item.get("visibility_floor")))
+        absorbed_keys.add(key)
+    for item in undo.get("dropped_relationships") or []:
+        if await locked(EntityRelationship, item.get("id")) is not None:
+            touched()
+            continue
+        type_id = _ref_uuid(item.get("relationship_type_id"))
+        rel_type = await run.first(scoped_select(RelationshipType, run.ctx).where(RelationshipType.id == type_id))
+        if rel_type is None:
+            touched()
+            continue
+        journal_id = _ref_uuid(item.get("source_journal_id"))
+        if journal_id is not None and await run.first(
+                scoped_select(JournalEntry, run.ctx).where(JournalEntry.id == journal_id)) is None:
+            journal_id = None  # the entry is gone (SET NULL, like any edge of it)
+        run.add(EntityRelationship(
+            id=_ref_uuid(item.get("id")), campaign_id=run.ctx.campaign_id,
+            source_entity_id=_ref_uuid(item.get("source_entity_id")),
+            target_entity_id=_ref_uuid(item.get("target_entity_id")), relationship_type_id=rel_type.id,
+            note=item.get("note"), visibility=item.get("visibility") or Visibility.GM.value,
+            visibility_floor=item.get("visibility_floor"), source_journal_id=journal_id,
+            source_deleted_at=_parse_dt(item.get("source_deleted_at")), started_at=_parse_dt(item.get("started_at")),
+            ended_at=_parse_dt(item.get("ended_at")),
+        ))
+    holders: list[uuid.UUID] = []
+    for item in undo.get("attribute_refs") or []:
+        holder = await locked(Entity, item.get("entity_id"))
+        key = item.get("key")
+        if holder is None or not isinstance(key, str) or _ref_uuid((holder.attributes or {}).get(key)) != survivor.id:
+            touched()
+            continue
+        attrs = dict(holder.attributes or {})
+        attrs[key] = str(absorbed.id)
+        holder.attributes = attrs
+        run.touch(holder)
+        run.ref(holder.id)
+        holders.append(holder.id)
+    absorbed.merged_into_id = None
+    run.touch(absorbed)
+    run.narrow(survivor.id, absorbed.id, *holders)
+    run.ref(survivor.id, absorbed.id)
+    row = run.history(survivor.id, Op.REVERT, None, {"absorbed_id": absorbed.id, "merged_into_id": survivor.id},
+                      {"absorbed_id": absorbed.id, "merged_into_id": None, "skipped": skipped},
+                      reverted=target.id)
+    return _MergePlan(row, floors)
+
+
+# ── The GM's merge (E0-WorldCore.9) ────────────────────────────────────────
+
+@dataclass
+class MergeResult:
+    """What `merge_entities` did (or, with `preview`, would do).
+
+    `downgrades` are `{kind, id, from, to}` for each moved alias, Mention or
+    Relationship whose Party audience differs before the merge and on the
+    survivor; `warning` is `"party_with_gm_only"` when exactly one of the two
+    is `party`. `change_id` is the merge row (None for a preview). A preview
+    also gives the survivor's `aliases` after the merge, the moved
+    `mention_count` and the moved `relationships` (with their new ends)."""
+
+    survivor_id: uuid.UUID
+    absorbed_id: uuid.UUID
+    change_id: uuid.UUID | None
+    downgrades: list[dict[str, Any]]
+    moved_counts: dict[str, int]
+    warning: str | None
+    aliases: list[str] | None = None
+    mention_count: int | None = None
+    relationships: list[dict[str, Any]] | None = None
+
+
+def _merge_id(value: Any) -> uuid.UUID:
+    found = _ref_uuid(value)
+    if found is None:
+        raise CanonChangeError("not_found", "No such Entity")
+    return found
+
+
+async def merge_entities(db: AsyncSession, ctx: CampaignContext, survivor_id: Any, absorbed_id: Any, *,
+                         preview: bool = False) -> MergeResult:
+    """Merge `absorbed_id` into `survivor_id` for a GM: one
+    `apply_change(op=merge)` under `ctx.as_system("merge")`, or with
+    `preview=True` the same checks and report with nothing written. Does
+    not commit. Errors are apply_change's: `not_found` (missing, another
+    Campaign's, or a non-GM ctx), `merged`, `deleted`, `invalid` (self or a
+    type mismatch)."""
+    _check_ctx(ctx)  # a Player, anon or reduced ctx: the uniform 404
+    if ctx.is_system:
+        not_found()
+    survivor_uuid, absorbed_uuid = _merge_id(survivor_id), _merge_id(absorbed_id)
+    if preview:
+        run = _Run(db, ctx, Merge(entity_id=absorbed_uuid, survivor_id=survivor_uuid))
+        absorbed, survivor = await _merge_pair(run, absorbed_uuid, survivor_uuid, lock=False)
+        _check_mergeable(absorbed, survivor)
+        work = await _merge_work(run, absorbed, survivor, lock=False)
+        aliases = sorted({a.alias for a in await _aliases(run, survivor.id)} | {a.alias for a in work.move_aliases}
+                         | ({work.name_alias} if work.name_alias else set()), key=lambda s: (s.lower(), s))
+        return MergeResult(
+            survivor_id=survivor.id, absorbed_id=absorbed.id, change_id=None, downgrades=work.downgrades,
+            moved_counts=work.moved(), warning=work.warning, aliases=aliases, mention_count=len(work.mentions),
+            relationships=[{"id": e.id, "source_entity_id": s, "target_entity_id": t,
+                            "relationship_type_id": e.relationship_type_id} for e, s, t in work.move_edges])
+    try:
+        system = ctx.as_system("merge")
+    except ValueError:
+        not_found()
+    row = await apply_change(db, system, Merge(entity_id=absorbed_uuid, survivor_id=survivor_uuid))
+    new = row.new_value if isinstance(row.new_value, dict) else {}
+    return MergeResult(
+        survivor_id=row.entity_id, absorbed_id=absorbed_uuid, change_id=row.id,
+        downgrades=list(new.get("downgrades") or []), moved_counts=dict(new.get("moved") or {}),
+        warning=new.get("warning"))
+
+
+merge = merge_entities  # the story's name for it
 
 
 # ── Visibility (only through the registry writer) ──────────────────────────
@@ -1042,7 +1465,7 @@ async def _gone_is_superseded(lookup: Any) -> Any:
         raise
 
 
-async def _revert(run: _Run, c: Revert) -> EntityChange:
+async def _revert(run: _Run, c: Revert) -> _MergePlan | EntityChange:
     target = await run.first(scoped_select(EntityChange, run.ctx).where(EntityChange.id == c.change_id))
     if target is None:
         raise CanonChangeError("not_found", "No such change")
@@ -1053,6 +1476,8 @@ async def _revert(run: _Run, c: Revert) -> EntityChange:
                            lambda r: r.reverted_change_id == target.id)
     if repeat is not None:
         return repeat
+    if op is Op.MERGE:
+        return await _revert_merge(run, c, target)
 
     def done(old: Any, new: Any, entity_id: uuid.UUID = target.entity_id) -> EntityChange:
         return run.history(entity_id, Op.REVERT, target.field, old, new, reverted=target.id)
@@ -1204,6 +1629,7 @@ _HANDLERS: dict[Op, Callable[[_Run, Any], Any]] = {
     Op.CONFIRM_MENTION: _confirm_mention,
     Op.REMOVE_MENTION: _remove_mention,
     Op.DELETE_ENTITY: _delete_entity,
+    Op.MERGE: _merge,
     Op.REVERT: _revert,
     Op.SOURCE_DELETED: _source_deleted,
     Op.CANON_NOTE: _canon_note,
@@ -1237,17 +1663,14 @@ async def apply_change(db: AsyncSession, ctx: CampaignContext, change: Any, *, _
             await _check_source(run)
             if isinstance(change, _VisibilityChange):
                 result = await _visibility(run, change)
-            elif op is Op.MERGE:
-                plan = await _merge(run, change)
-                if isinstance(plan, _MergePlan):
-                    # The one literal visibility_floor write (AD-10, CI-8).
-                    for row, floor in plan.floors:
-                        row.visibility_floor = floor
-                    result = plan.change
-                else:
-                    result = plan
             else:
                 result = await _HANDLERS[op](run, change)
+            if isinstance(result, _MergePlan):
+                # The one literal visibility_floor write (AD-10, CI-8): a
+                # merge's floors, or a merge revert restoring the earlier ones.
+                for row, floor in result.floors:
+                    row.visibility_floor = floor
+                result = result.change
             _stamp_write_visibility(run)
             await db.flush()
             if run.stale:
@@ -1295,7 +1718,17 @@ async def resolve_entity_field(entity: Entity, ref: SourceRef, ctx: CampaignCont
     (the ref is dropped) for an `attributes.<key>` the Entity's type does not
     define and for one with no value in ctx's projection (unset, hidden, or an
     ENTITY_REF naming an Entity ctx may not see: indistinguishable).
-    `field=None` (the whole record, GM only) quotes the description."""
+    `field=None` (the whole record, GM only) quotes the description.
+    A merged-away Entity (E0-WorldCore.9) is followed to its survivor
+    (`access.resolve_merged`) for a GM only; the citation then carries the
+    survivor's name and value. Anyone else's ref to it is dropped."""
+    if entity.merged_into_id is not None:
+        if ctx.role != GM:
+            return None
+        try:
+            entity = await resolve_merged(db, ctx, entity.id)
+        except NotFound:
+            return None
     name = ref.field
     key = name[len(ATTRIBUTES_PREFIX):] if name is not None and name.startswith(ATTRIBUTES_PREFIX) else None
     if key is not None and key not in et.attribute_keys(entity.type):
@@ -1329,6 +1762,7 @@ register_resolver(SourceKind.ENTITY_FIELD, resolve_entity_field, model=Entity, w
 
 
 __all__ = [
-    "CanonChangeError", "DOMAIN", "HIDEABLE_FIELDS", "NAME_PREFIXES", "NameCandidate", "NameMatch", "STALE_KIND",
-    "apply_change", "candidates", "match_names", "normalize_name", "resolve_entity_field", "revert_change",
+    "CanonChangeError", "DOMAIN", "HIDEABLE_FIELDS", "MergeResult", "NAME_PREFIXES", "NameCandidate", "NameMatch",
+    "PARTY_WITH_GM_ONLY", "STALE_KIND", "apply_change", "candidates", "match_names", "merge", "merge_entities",
+    "normalize_name", "resolve_entity_field", "revert_change",
 ]

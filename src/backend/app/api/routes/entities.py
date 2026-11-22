@@ -13,6 +13,7 @@
     GET    /{entity_id}/history                                       history, newest first (Party read)
     POST   /{entity_id}/history/{change_id}/revert                    revert one change (GM)
     POST   /{entity_id}/visibility                                    the Entity's or one field's Visibility (GM)
+    POST   /{entity_id}/merge                                         merge `absorbed_id` into it, or preview (GM)
 
 Every Canon write goes through `world_service.apply_change` / `revert_change`,
 every Visibility write through `access.set_visibility(_many)`, every read
@@ -30,6 +31,17 @@ Canon errors: `superseded`, `deleted`, `merged` are 409 and `invalid`,
 `normalize_name` as a live Entity of the type that ctx can see) is
 `409 {"detail", "code": "duplicate", "existing_id"}`. The `visibility`
 filter applies for a GM only (a non-GM's is ignored). Any error rolls the session back.
+
+Merge (E0-WorldCore.9): `POST /{survivor}/merge {absorbed_id, preview}` runs
+`world_service.merge_entities` and answers the GM-only `MergeResponse`; an
+absorbed or survivor id that is missing, another Campaign's, merged or
+deleted is the uniform 404, a type mismatch or a self-merge 422 `invalid`.
+`GET /{id}` of a merged-away id answers the survivor's body
+(`access.resolve_merged`): any GM follows it; anyone else only from an id the
+Party could see before the merge (stored `party`, not deleted) to a survivor
+they can see, else the uniform 404. `GET /{survivor}/history` includes the
+rows of the Entities merged into it (recursively); they are GM-only, so a
+Player's page and total do not change.
 
 Filters on the list are applied to what the viewer sees: `status` matches the
 rendered status (a hidden status reads as the type's default), so a filter
@@ -49,7 +61,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.access import (
     GM, CampaignContext, ctx_for_request, not_found, project_all, require_campaign, require_campaign_for,
-    scoped_get, scoped_select, set_visibility, set_visibility_many,
+    resolve_merged, scoped_get, scoped_select, set_visibility, set_visibility_many,
 )
 from app.api.deps import PARTY_READ, get_current_user
 from app.db.models.entity import Entity, EntityAlias, EntityChange, EntityMention, QuestStep
@@ -59,10 +71,12 @@ from app.domain.enums import EntityType, Visibility
 from app.schemas.entities import (
     MAX_PAGE, AliasCreate, BulkEntityVisibilityRequest, EntityAliasGMResponse, EntityChangeGMResponse, EntityCreate,
     EntityGMResponse, EntityHistoryGMResponse, EntityListGMResponse, EntityPatch, EntityVisibilityRequest,
-    QuestStepGMResponse, RevertRequest, StepCreate, StepPatch, UpdatedResponse,
+    MergeRequest, MergeResponse, QuestStepGMResponse, RevertRequest, StepCreate, StepPatch, UpdatedResponse,
 )
 from app.schemas.sources import RecordRef
-from app.services.world_service import CanonChangeError, apply_change, candidates, normalize_name, revert_change
+from app.services.world_service import (
+    CanonChangeError, apply_change, candidates, merge_entities, normalize_name, revert_change,
+)
 
 router = APIRouter()
 
@@ -249,7 +263,7 @@ async def get_entity(
     ctx: CampaignContext = Depends(_read_ctx),
     db: AsyncSession = Depends(get_db),
 ):
-    entity = await scoped_get(db, Entity, ctx, entity_id)
+    entity = await resolve_merged(db, ctx, entity_id)  # a merged-away id: its survivor, or the 404
     return (await _project_entities(db, ctx, [entity]))[0]
 
 
@@ -412,6 +426,23 @@ async def update_step(
 
 # ── History ────────────────────────────────────────────────────────────────
 
+MAX_MERGE_DEPTH = 16
+
+
+async def _merged_family(db: AsyncSession, ctx: CampaignContext, entity_id: uuid.UUID) -> list[uuid.UUID]:
+    """`entity_id` and every Entity ctx can see that was merged into it,
+    recursively (through scoped_select: a non-GM sees none, they are GM-only)."""
+    family, frontier = [entity_id], [entity_id]
+    for _ in range(MAX_MERGE_DEPTH):
+        found = (await db.execute(scoped_select(Entity, ctx).where(Entity.merged_into_id.in_(frontier))
+                                  .with_only_columns(Entity.id))).scalars().all()
+        frontier = [i for i in found if i not in family]
+        if not frontier:
+            break
+        family.extend(frontier)
+    return family
+
+
 @router.get("/{entity_id}/history", response_model=None, openapi_extra=PARTY_READ,
             responses={200: {"model": EntityHistoryGMResponse, "description": _GM_OR_PARTY}})
 async def entity_history(
@@ -421,9 +452,11 @@ async def entity_history(
     ctx: CampaignContext = Depends(_read_ctx),
     db: AsyncSession = Depends(get_db),
 ):
-    """The rows ctx may read (registry rule plus the write-time floor), newest first."""
+    """The rows ctx may read (registry rule plus the write-time floor), newest
+    first, with those of the Entities merged into this one."""
     await scoped_get(db, Entity, ctx, entity_id)
-    stmt = scoped_select(EntityChange, ctx).where(EntityChange.entity_id == entity_id)
+    ids = await _merged_family(db, ctx, entity_id)
+    stmt = scoped_select(EntityChange, ctx).where(EntityChange.entity_id.in_(ids))
     total = (await db.execute(stmt.with_only_columns(func.count(EntityChange.id)))).scalar_one()
     rows = await _rows(db, stmt.order_by(EntityChange.created_at.desc(), EntityChange.id.desc())
                        .offset(offset).limit(limit))
@@ -478,3 +511,40 @@ async def entity_visibility(
     if isinstance(result, Response):
         return result
     return UpdatedResponse(updated=result)
+
+
+# ── Merge (E0-WorldCore.9) ─────────────────────────────────────────────────
+
+_MERGE_HIDDEN = frozenset({"merged", "deleted"})
+
+
+@router.post("/{entity_id}/merge", response_model=MergeResponse, response_model_exclude_unset=True,
+             responses={200: {"description": "The merge (or preview) report (GM schema)."}})
+async def merge_entity(
+    entity_id: uuid.UUID,
+    body: MergeRequest,
+    ctx: CampaignContext = Depends(_gm_ctx),
+    db: AsyncSession = Depends(get_db),
+):
+    """Merge `absorbed_id` into this Entity (`preview`: report only, write
+    nothing). Missing, another Campaign's, merged or deleted (either id) is
+    the uniform 404; a type mismatch or a self-merge is 422 `invalid`."""
+
+    async def work():
+        try:
+            return await merge_entities(db, ctx, entity_id, body.absorbed_id, preview=body.preview)
+        except CanonChangeError as exc:
+            if exc.code in _MERGE_HIDDEN:
+                raise CanonChangeError("not_found") from None
+            raise
+
+    result = await _write(db, work)
+    if isinstance(result, Response):
+        return result
+    out: dict[str, Any] = {
+        "survivor_id": result.survivor_id, "change_id": result.change_id, "downgrades": result.downgrades,
+        "moved_counts": result.moved_counts, "warning": result.warning,
+    }
+    if body.preview:
+        out.update(aliases=result.aliases, mention_count=result.mention_count, relationships=result.relationships)
+    return MergeResponse.model_validate(out)
