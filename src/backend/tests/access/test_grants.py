@@ -462,7 +462,29 @@ def _chat_body(campaign_id, **extra) -> dict:
 async def _stream_closed(db, client, monkeypatch, user, campaign_id, during, **extra):
     state = _scripted_stream(monkeypatch, during)
     body = _chat_body(campaign_id, **extra)
-    r = await asyncio.wait_for(client.post("/api/chat/stream", headers=bearer(user), json=body), 8)
+    task = asyncio.ensure_future(client.post("/api/chat/stream", headers=bearer(user), json=body))
+    done, _ = await asyncio.wait({task}, timeout=8)
+    if not done:  # TEMP DIAGNOSTIC (fix/deflake-grant-stream): dump where everything is
+        import io
+        import sys
+        out = io.StringIO()
+        for t in asyncio.all_tasks():
+            out.write(f"\n--- {t!r}\n")
+            t.print_stack(limit=40, file=out)
+        engine = create_async_engine(db.bind.url.render_as_string(hide_password=False))
+        async with engine.connect() as conn:
+            for q in ("select pid, state, wait_event_type, wait_event, xact_start, left(query, 300) "
+                      "from pg_stat_activity where datname = current_database()",
+                      "select locktype, relation::regclass, mode, granted, pid from pg_locks where not granted"):
+                out.write(f"\n=== {q}\n")
+                for row in (await conn.execute(sa.text(q))).all():
+                    out.write(f"{row}\n")
+        await engine.dispose()
+        sys.stderr.write("DEFLAKE-DIAG" + out.getvalue())
+        print("DEFLAKE-DIAG" + out.getvalue())
+        task.cancel()
+        raise AssertionError("DEFLAKE-DIAG timeout")
+    r = task.result()
     assert r.status_code == 200, r.text
     events = _events(r.text)
     assert [e for e, _ in events] == ["meta", "delta", "error"], events
