@@ -354,7 +354,7 @@ async def _prepare_chat(
         else:
             # No Campaign: the user's own uploads, only in Campaigns the role
             # map makes them GM of now (never a Campaign they were demoted in).
-            canon_context, canon_sources = await own_canon_context(db, search_query, roles=scope)
+            canon_context, canon_sources = await own_canon_context(db, search_query, roles=scope, user_id=user.id)
     except Exception:
         pass  # RAG failure must not break chat
 

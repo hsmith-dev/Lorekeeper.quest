@@ -452,12 +452,13 @@ async def test_retry_behind_a_hidden_holder_answers_like_a_free_key(client, worl
     key. A 409 would reveal it exists, so the Player's retry answers exactly
     like one whose key is free; the row waits behind the holder, unpushed,
     on a per-retry key, and the holder is untouched."""
+    player_h = bearer(world.player)
     key = f"test-jr:{uuid.uuid4().hex}"
     own = await world.job(world.player, status="failed", key=key)
     holder = await world.job(world.owner, status="queued", key=key)
     free = await world.job(world.player, status="failed")
-    r_free = await client.post(f"/api/jobs/{free}/retry", headers=bearer(world.player))
-    r_held = await client.post(f"/api/jobs/{own}/retry", headers=bearer(world.player))
+    r_free = await client.post(f"/api/jobs/{free}/retry", headers=player_h)
+    r_held = await client.post(f"/api/jobs/{own}/retry", headers=player_h)
     assert r_held.status_code == 202 and r_held.json() == {"job_id": str(own)}, r_held.text
     assert _shape(r_held, own) == _shape(r_free, free)
     row = await world.row(own)
@@ -468,7 +469,7 @@ async def test_retry_behind_a_hidden_holder_answers_like_a_free_key(client, worl
     held = await world.row(holder)
     assert held.status == JobStatus.QUEUED and held.idempotency_key == key and held.depends_on_job_id is None
     # The Player's view of their Job: queued, no trace of the holder.
-    r = await client.get(f"/api/jobs/{own}", headers=bearer(world.player))
+    r = await client.get(f"/api/jobs/{own}", headers=player_h)
     assert r.status_code == 200 and r.json()["status"] == "queued", r.text
     assert str(holder) not in r.text and "depends_on" not in r.text
     # Released when the holder ends.
@@ -480,14 +481,22 @@ async def test_retry_behind_a_holder_in_another_campaign_is_held(client, world, 
     """A GM of this Campaign cannot see another Campaign's Job either: held,
     then released when that Job ends (here, it fails in the worker's way: an
     ORM write of a terminal status)."""
+    owner_h = bearer(world.owner)  # once: the rollback below expires world.owner
     key = f"test-jr:{uuid.uuid4().hex}"
     own = await world.job(world.owner, status="failed", key=key)
     holder = await world.job(world.other_owner, status="running", key=key, campaign_id=world.other_cid,
                              ctx_kind="gm")
-    r = await client.post(f"/api/jobs/{own}/retry", headers=bearer(world.owner))
+    r = await client.post(f"/api/jobs/{own}/retry", headers=owner_h)
     assert r.status_code == 202 and r.json() == {"job_id": str(own)}, r.text
     row = await world.row(own)
     assert row.status == JobStatus.QUEUED and row.depends_on_job_id == holder
+    assert Queue("interactive", connection=rq_conn).job_ids == []
+    # The held row still dedups its base key: an enqueue of the same work in
+    # this Campaign returns it instead of starting the work a second time.
+    from app.jobs.enqueue import enqueue
+
+    assert await enqueue(world.db, await world.ctx(world.owner), "system.noop", {"n": 1}, idempotency_key=key) == own
+    await world.db.commit()
     assert Queue("interactive", connection=rq_conn).job_ids == []
     assert await worker._claim(world.db, own, "w-held") is None  # not runnable while the holder runs
     await world.db.rollback()
@@ -500,7 +509,7 @@ async def test_retry_behind_a_holder_in_another_campaign_is_held(client, world, 
     row = await world.row(own)
     row.status = JobStatus.FAILED
     await world.db.commit()
-    r = await client.post(f"/api/jobs/{own}/retry", headers=bearer(world.owner))
+    r = await client.post(f"/api/jobs/{own}/retry", headers=owner_h)
     assert r.status_code == 202, r.text
     row = await world.row(own)
     assert row.idempotency_key == key and row.depends_on_job_id is None
@@ -509,20 +518,79 @@ async def test_retry_behind_a_holder_in_another_campaign_is_held(client, world, 
 async def test_retry_behind_a_visible_holder_is_409(client, world, rq_conn):
     """A holder the ctx can see is still the 409: the actor's own active Job,
     or (for a GM) any Job of the Campaign."""
+    player_h, co_gm_h = bearer(world.player), bearer(world.co_gm)
     key = f"test-jr:{uuid.uuid4().hex}"
     own = await world.job(world.player, status="failed", key=key)
     await world.job(world.player, status="running", key=key)
-    r = await client.post(f"/api/jobs/{own}/retry", headers=bearer(world.player))
+    r = await client.post(f"/api/jobs/{own}/retry", headers=player_h)
     assert r.status_code == 409 and r.json() == {"detail": control.KEY_IN_USE}
     await world.db.commit()
     key2 = f"test-jr:{uuid.uuid4().hex}"
     theirs = await world.job(world.player2, status="failed", key=key2)
     await world.job(world.owner, status="queued", key=key2)
-    r = await client.post(f"/api/jobs/{theirs}/retry", headers=bearer(world.co_gm))
+    r = await client.post(f"/api/jobs/{theirs}/retry", headers=co_gm_h)
     assert r.status_code == 409 and r.json() == {"detail": control.KEY_IN_USE}
     await world.db.commit()
     assert (await world.row(own)).status == JobStatus.FAILED
     assert (await world.row(theirs)).status == JobStatus.FAILED
+    assert Queue("interactive", connection=rq_conn).job_ids == []
+
+
+def _race_key_holder(world, monkeypatch, starter_id, ctx_kind: str) -> list:
+    """control._key_holder that, on its first call only, commits a queued Job
+    of `starter_id` holding the key from another session (a concurrent
+    enqueue landing between the check and the flush) and reports the key
+    free. Later calls are the real check. The racing Job's id is appended
+    to the returned list."""
+    real = control._key_holder
+    raced: list = []
+
+    async def racing(db, ctx, job_id, key):
+        if raced:
+            return await real(db, ctx, job_id, key)
+        async with _factory(world)() as s:
+            row = Job(id=uuid.uuid4(), campaign_id=world.cid, kind="system.noop", queue="interactive",
+                      status="queued", payload={}, idempotency_key=key, ctx_kind=ctx_kind,
+                      ctx_user_id=starter_id, created_by=starter_id)
+            s.add(row)
+            await s.commit()
+            raced.append(row.id)
+        return None
+
+    monkeypatch.setattr(control, "_key_holder", racing)
+    return raced
+
+
+async def test_a_lost_race_to_a_hidden_holder_reruns_the_check_and_holds(client, world, rq_conn, monkeypatch):
+    """The Owner's Job takes the key after the check: the index refuses the
+    flush, the check runs again, finds a holder the Player cannot see and
+    answers like a free key (held, per-retry key, not pushed)."""
+    player_h, owner_id = bearer(world.player), world.owner.id
+    key = f"test-jr:{uuid.uuid4().hex}"
+    own = await world.job(world.player, status="failed", key=key)
+    raced = _race_key_holder(world, monkeypatch, owner_id, "gm")
+    r = await client.post(f"/api/jobs/{own}/retry", headers=player_h)
+    assert r.status_code == 202 and r.json() == {"job_id": str(own)}, r.text
+    (holder,) = raced
+    row = await world.row(own)
+    assert row.status == JobStatus.QUEUED and row.depends_on_job_id == holder
+    assert row.idempotency_key == f"{key}{control.RETRY_KEY_MARK}{own}"
+    assert Queue("interactive", connection=rq_conn).job_ids == []
+    assert (await world.row(holder)).status == JobStatus.QUEUED
+
+
+async def test_a_lost_race_to_a_visible_holder_is_409(client, world, rq_conn, monkeypatch):
+    """The racing Job is the Player's own: the re-run check sees it, 409."""
+    player_h, player_id = bearer(world.player), world.player.id
+    key = f"test-jr:{uuid.uuid4().hex}"
+    own = await world.job(world.player, status="failed", key=key)
+    raced = _race_key_holder(world, monkeypatch, player_id, "player")
+    r = await client.post(f"/api/jobs/{own}/retry", headers=player_h)
+    assert r.status_code == 409 and r.json() == {"detail": control.KEY_IN_USE}
+    assert len(raced) == 1
+    await world.db.commit()
+    row = await world.row(own)
+    assert row.status == JobStatus.FAILED and row.idempotency_key == key
     assert Queue("interactive", connection=rq_conn).job_ids == []
 
 

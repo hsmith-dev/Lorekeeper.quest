@@ -2,13 +2,34 @@
 title: 'E0-QA.14: EV-4 is a zero-leak hard gate, with chat and captured-context probes'
 type: 'feature'
 created: '2026-11-21'
-status: 'in-progress'
+status: 'in-review'
 baseline_revision: 'fadca8ae75f41f41afe5371e73c5b422702c93b1'
 review_loop_iteration: 0
 followup_review_recommended: false
 context: []
 warnings: ['oversized']
-deferred: []
+deferred:
+  - summary: >-
+      A retry held behind a hidden key holder answers like a free retry, but afterwards stays queued until the holder ends, so a Player watching it over time could infer a busy hidden Job.
+    evidence: |-
+      Any non-revealing answer has this property while idempotency keys are global. queue_position counts only visible Jobs and depends_on_job_id is never serialised, so the only signal is how long the Job waits. Scoping keys per Campaign would not remove the same-Campaign case (another starter's Job). Owner decision: accept this (it looks like a busy queue), or make Player-started kinds use starter-scoped keys when E1 adds the first one.
+    location: >-
+      src/backend/app/jobs/control.py retry_job
+    severity: medium
+  - summary: >-
+      A campaign-less chat POST builds its role map without X-Lorekeeper-Preview narrowing, so in member preview it still reads the user's GM Campaigns (own journals and, now, own canon).
+    evidence: |-
+      This predates the change: hybrid_search_own_journals in _prepare_chat behaves the same. To settle it, check whether a campaign-less chat POST in preview should be 404 (as a Campaign one is) or narrowed to a Player everywhere.
+    location: >-
+      src/backend/app/api/routes/chat.py _prepare_chat
+    severity: medium (unverified)
+  - summary: >-
+      The live-model spoiler eval (AC4, SM-4) has not run yet: the desktop was offline.
+    evidence: |-
+      docs/SPOILER_EVAL.md results regions read "Not run yet". Needs the desktop run against Ollama lorekeeper, with the command in the Auto Run Result.
+    location: >-
+      docs/SPOILER_EVAL.md
+    severity: medium
 ---
 
 <intent-contract>
@@ -104,6 +125,52 @@ deferred: []
 - Given the EV-4 run in CI, when any probe leaks, skips, a route is uncovered or `pending_baseline.txt` has a line, then the step fails. The uncovered-route message names the route and `tests/ev4/probes/`.
 - Given the chat probes as `player`, when they run, then `leaks=0` and every captured-context check saw at least one call.
 - Given the live run on the desktop, when `eval_spoiler.py` runs against Ollama `lorekeeper`, then `docs/SPOILER_EVAL.md` records the probe count, leaks (target 0), the inference-channel checks and the command.
+
+## Spec Change Log
+
+## Review Triage Log
+
+### 2026-11-21 — Review pass (blind, edge-case, verification-gap, intent-alignment)
+- verdicts: 38 findings — high 0, medium 4, low 21, false 7, maybe-false 6
+- findings:
+  - `[medium]` `[patch]` (blind, edge) A held retry keeps `{key}#retry:{id}` while it waits and runs, so an enqueue with the base key would miss dedup. → `enqueue._active_with_key` also matches active rows with the per-retry suffix; tested.
+  - `[low]` `[reject]` (blind, edge) After 3 lost index races, `for…else` gives 409 whatever the last holder's visibility. Reaching it needs three successive racers each taking the key between check and flush (a hidden racer goes down the held path, which never conflicts). Unlikely, and a fix adds branches.
+  - `[medium]` `[defer]` (blind, edge, intent) After the 202, a held retry stays `queued` until the holder ends, while a free one runs. A Player watching over time could infer a busy hidden holder. This is inherent to any non-revealing answer while the keys are global; owner decision (see deferred).
+  - `[low]` `[reject]` (blind) Scope the unique index per Campaign or starter instead. It wouldn't remove the same-Campaign case (another starter's Job), and the index is owned by E0-Jobs; recorded in the deferred item.
+  - `[low]` `[patch]` (blind) `own_canon_context` relies on the role map's implicit `user_id`, and a failure is swallowed. → the route passes `user_id=user.id`.
+  - `[maybe-false]` `[defer]` (blind) `own_canon_context` ignores the RoleMap's preview. A campaign-less chat POST builds its role map without preview narrowing, and that predates this change (`hybrid_search_own_journals` is the same). Settled by checking how `role_map` treats `X-Lorekeeper-Preview` on a campaign-less POST.
+  - `[low]` `[reject]` (blind, gap) The `campaign_id IS NULL` branch is untested. `SourceChunk.campaign_id` is a non-Optional `Mapped`, so the branch is defensive and unreachable today; harmless.
+  - `[low]` `[reject]` (blind) The caravan Shorthand marker has no GM positive control. It is an extra marker beyond the five controlled questions; adding a question costs chat rate-limit budget (20/min) for no new path.
+  - `[low]` `[reject]` (blind) The probe and the eval duplicate their questions and markers and have drifted. They serve different runs (CI fake vs live model); sharing them would couple a test package to a script.
+  - `[low]` `[patch]` (blind, edge) The SPOILER_EVAL "no secret word is in a question" claim is wrong ("lich"). → the rule is now stated per case, and the cases checked.
+  - `[maybe-false]` `[defer]` (blind) The live-run inference diff may be flaky with a nondeterministic model. With no session history there is no query rewrite, so the prompts are deterministic; settled by the desktop live run.
+  - `[low]` `[patch]` (blind) The eval writes canary rows to any database. → it refuses a database whose name doesn't end in `_test`.
+  - `[false]` `[reject]` (blind) The jobs probe imports the private `_headers`. `_support.py` already does (an existing pattern).
+  - `[low]` `[patch]` (blind) The GM control uses json.dumps while the Player check uses `_prompt_text`. → the control uses `_prompt_text`.
+  - `[false]` `[reject]` (blind) New canary kinds aren't in the seed. `mint_canary` registers every token in `CANARIES`; the seed lists only seeded rows.
+  - `[low]` `[reject]` (blind, gap) `-k` deselection or an xfail bypasses or mislabels the skip gate. CI runs the full directory with no `-k`, and there are no xfail probes.
+  - `[false]` `[reject]` (blind) The pending-baseline AC has no code. `test_coverage.py::test_pending_baseline_is_empty` (E0-QA.13) enforces it inside the same step.
+  - `[maybe-false]` `[reject]` (blind) Spec status and uncommitted state. That is a workflow artifact; status is finalised at the end of this step.
+  - `[low]` `[reject]` (edge) A held retry overwrites a real original `depends_on_job_id`. A failed Job's dependency is already terminal, and no registered kind reads `dependency_status`; a fix needs a new column.
+  - `[low]` `[reject]` (edge) A cross-Campaign holder's status reaches the handler as `dependency_status`. That is a status value only, not content, and a cross-Campaign key collision is already a caller bug (enqueue raises).
+  - `[low]` `[patch]` (edge) `forbidden` as a bare str iterates characters. → normalised to a tuple.
+  - `[maybe-false]` `[reject]` (edge) Forbidden markers on campaign-less and B asks have no control. Those bodies pass `forbidden=()` (only canaries are checked), so no vacuous marker check exists.
+  - `[low]` `[reject]` (edge) A secrets aren't checked in cross_gm_player's campaign-less prompt. Campaign-less retrieval reads only the user's own rows in GM Campaigns; the canary check covers A.
+  - `[low]` `[patch]` (edge) An eval stream without `meta` or `done` gives empty traces that compare equal. → counted as vacuous.
+  - `[low]` `[patch]` (edge) Eval vacuous checks only warn. → exit 1.
+  - `[low]` `[patch]` (edge) Eval ignores `--campaign-id`, `--seed` and `--owner-email`. → `parser.error`.
+  - `[maybe-false]` `[reject]` (edge, claim) "Every captured-context check is non-vacuous" covers only A. A is the only Campaign whose hidden content a Player could reach; the other bodies carry canary checks, which need no control.
+  - `[low]` `[reject]` (edge, claim) The retry looks exactly like a normal one. Covered by the deferred lifecycle item and the rejected exhaustion row.
+  - `[false]` `[reject]` (edge, claim) Secret words in questions. Duplicate of the patched doc row; the claim is fixed there.
+  - `[medium]` `[patch]` (verification-gap) The lost-race re-check in `retry_job` is untested. → a test with the first holder check blind and the Owner's Job inserted (hidden → 202 held), plus a visible variant (409).
+  - `[false]` `[reject]` (gap, other) Campaign-less uploads may not exist. Same as the unreachable-branch row above.
+  - `[false]` `[reject]` (gap, other) xfail counted as a skip. Duplicate of the deselection row.
+  - `[low]` `[reject]` (gap, other) Only the retry answer is compared. Same as the deferred lifecycle item.
+  - `[medium]` `[defer]` (intent) AC4's live-model run hasn't executed. The desktop is offline; recorded under Needs desktop verification.
+  - `[maybe-false]` `[reject]` (intent) AC2 probes only a `co_gm` demotion. The story's demotion is Co-GM → Player, which is exactly that.
+  - `[false]` `[reject]` (intent) The gates.yml step command is unchanged. The step already runs `pytest tests/ev4` on PRs and main; the hard-gate behaviour lives in the harness it runs.
+  - `[low]` `[reject]` (intent) The AC1 surfaces run on fake vectors and a fake LLM. That is the CI design (AD-21 fakes); the live run is AC4's eval.
+  - `[low]` `[patch]` (CI) `test_retry_behind_a_holder_in_another_campaign_is_held` failed with MissingGreenlet (an expired `world.owner` in `bearer`). → headers computed once.
 
 ## Design Notes
 

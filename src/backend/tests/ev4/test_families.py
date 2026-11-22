@@ -314,6 +314,8 @@ async def test_captured_context_forbidden_markers(toy, monkeypatch):
         sink.append({"messages": [{"role": "system", "content": "- Chronicle: the inn was quiet"},
                                   {"role": "user", "content": "who is Barnaby?"}]})
     await assert_captured_context_clean(player, clean_run, forbidden=forbidden, min_calls=1)
+    # A bare str is one marker, not its characters (each of which is in the prompt).
+    await assert_captured_context_clean(player, clean_run, forbidden="Barnaby!")
 
     async def leaky_run():
         # Non-ASCII and a newline around the marker: matched as written, not JSON-escaped.

@@ -257,6 +257,8 @@ async def assert_captured_context_clean(actor: Actor, run: Callable[[], Awaitabl
     note_family_call()
     from app.services import llm_provider
 
+    if isinstance(forbidden, str):
+        forbidden = (forbidden,)  # one marker, not its characters
     capture = getattr(llm_provider, "capture", None)
     if capture is None:
         raise RuntimeError("EV-4: llm_provider.capture() is missing (E0-LLM.5), so the captured-context "

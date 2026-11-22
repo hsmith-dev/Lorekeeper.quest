@@ -25,14 +25,18 @@ reply itself is measured too:
      difference is an inference-channel leak.
 
 The results table and failures go to the docs/SPOILER_EVAL.md regions.
-Exit 1 on any leak (canary, marker, secret word or inference diff), or
-when the run cannot complete.
+Exit 1 on any leak (canary, marker, secret word or inference diff), on any
+vacuous check (a GM control that missed, or an incomplete answer), or when
+the run cannot complete.
 
-  python scripts/eval_spoiler.py --out ../../docs/SPOILER_EVAL.md \\
-      --llm-url http://localhost:11434 --llm-model lorekeeper
-  python scripts/eval_spoiler.py --fake-llm          # offline, deterministic
+  python scripts/eval_spoiler.py --database-url <url of a *_test db> \\
+      --out ../../docs/SPOILER_EVAL.md --llm-url http://localhost:11434 --llm-model lorekeeper
+  python scripts/eval_spoiler.py --database-url <url of a *_test db> --fake-llm   # offline
 
-Rows are committed to --database-url (a fresh canary Campaign per run).
+Rows are committed to --database-url (a fresh canary Campaign per run), so
+the database name must end in `_test` (or `_test_<lane>`); anything else is
+refused. --campaign-id, --seed and --owner-email are refused too (the eval
+always seeds the canary Campaign).
 """
 
 from __future__ import annotations
@@ -188,14 +192,20 @@ def _sse_event(text: str, name: str) -> dict:
     return {}
 
 
-def _body_and_reply(url: str, r) -> tuple[dict, str]:
+def _body_and_reply(url: str, r) -> tuple[dict, str, bool]:
+    """(body, reply, complete): complete is False for a stream without its
+    `meta` or `done` event, or a body that is not the chat reply (its trace
+    would be empty and compare equal to any other empty trace)."""
     if url.endswith("/stream"):
-        return _sse_event(r.text, "meta"), str(_sse_event(r.text, "done").get("reply") or "")
+        meta, done = _sse_event(r.text, "meta"), _sse_event(r.text, "done")
+        return meta, str(done.get("reply") or ""), bool(meta) and "reply" in done
     try:
         body = r.json()
     except ValueError:
-        return {}, ""
-    return (body, str(body.get("reply") or "")) if isinstance(body, dict) else ({}, "")
+        return {}, "", False
+    if not isinstance(body, dict):
+        return {}, "", False
+    return body, str(body.get("reply") or ""), "reply" in body and "retrieval" in body
 
 
 @dataclass
@@ -206,6 +216,7 @@ class Ask:
     calls: int
     body: dict
     reply: str
+    complete: bool     # the whole answer arrived (stream: meta and done)
 
 
 async def ask(client, headers: dict, url: str, payload: dict) -> Ask:
@@ -214,8 +225,8 @@ async def ask(client, headers: dict, url: str, payload: dict) -> Ask:
     with llm_provider.capture() as cap:
         r = await client.post(url, json=payload, headers=headers)
     prompt = "\n".join(str(m.get("content", "")) for c in cap.calls for m in c.messages)
-    body, reply = _body_and_reply(url, r)
-    return Ask(r.status_code, r.text, prompt, len(cap.calls), body, reply)
+    body, reply, complete = _body_and_reply(url, r)
+    return Ask(r.status_code, r.text, prompt, len(cap.calls), body, reply, complete)
 
 
 def trace(a: Ask, *, with_reply: bool) -> list:
@@ -288,7 +299,7 @@ async def evaluate(db, llm) -> SpoilerResult:
                     gm = await ask(client, gm_h, url, {"message": case.question, "campaign_id": a})
                     must = [m.replace("{gm_entry}", gm_entry) for m in case.gm_must]
                     missing = [m for m in must if m not in gm.prompt]
-                    if gm.status != 200 or gm.calls == 0 or missing:
+                    if gm.status != 200 or gm.calls == 0 or not gm.complete or missing:
                         controls[url].append((case.key, f"GM ask {gm.status}, {gm.calls} call(s), prompt lacks "
                                                         f"{missing}"))
 
@@ -307,9 +318,9 @@ async def evaluate(db, llm) -> SpoilerResult:
                     p = await ask(client, player_h, url, {"message": case.question, "campaign_id": a})
                     counts["probes"] += 1
                     label = f"{case.key} ({phase})"
-                    if p.status != 200 or p.calls == 0:
-                        fail(label, "vacuous", f"Player ask {p.status} with {p.calls} LLM call(s): {p.text[:200]}",
-                             expected="200 with an LLM call")
+                    if p.status != 200 or p.calls == 0 or not p.complete:
+                        fail(label, "vacuous", f"Player ask {p.status} with {p.calls} LLM call(s), complete="
+                             f"{p.complete}: {p.text[:200]}", expected="200 with an LLM call and the whole answer")
                         return None
                     for token in canaries_in(p.prompt, p.text):
                         fail(label, "canary leaks", token)
@@ -345,13 +356,55 @@ async def evaluate(db, llm) -> SpoilerResult:
     return result
 
 
+# The eval writes canary rows: only into a database named like a test one
+# (the suite's rule, tests/conftest.py: '..._test' or '..._test_<lane>').
+_TEST_DB_NAME_RE = re.compile(r"^.+_test(_[A-Za-z0-9]+)?$")
+
+
+def require_test_database(url: str | None) -> None:
+    """SeedError unless `url` names a database ending in '_test' (or
+    '_test_<lane>'): the run commits a canary Campaign and users there."""
+    from sqlalchemy.engine import make_url
+    from sqlalchemy.exc import ArgumentError
+
+    if not url:
+        raise SeedError("no database: pass --database-url or set DATABASE_URL")
+    try:
+        name = make_url(url).database
+    except ArgumentError as exc:
+        raise SeedError(f"--database-url is not a database URL: {exc}") from None
+    if not name or not _TEST_DB_NAME_RE.fullmatch(name):
+        raise SeedError(f"refusing to run against database {name!r}: the eval commits canary rows, so the "
+                        "database name must end in '_test' (or '_test_<lane>'); point --database-url at a "
+                        "test database")
+
+
+_UNSUPPORTED = "not supported: the eval always seeds a fresh EV-4 canary Campaign (seeds/ev4_canary.json)"
+
+
 def build_parser() -> argparse.ArgumentParser:
+    """The shared eval flags, minus the ones about the demo Campaign
+    (--campaign-id, --seed, --owner-email): given, they are an error."""
     p = eval_common.build_parser(__doc__)
     p.set_defaults(embeddings="auto")
+    default_seed = p.get_default("seed")
+    parse = p.parse_args
+
+    def parse_args(args=None, namespace=None):
+        ns = parse(args, namespace)
+        given = [flag for flag, on in (("--campaign-id", ns.campaign_id is not None),
+                                        ("--seed", ns.seed != default_seed),
+                                        ("--owner-email", ns.owner_email is not None)) if on]
+        if given:
+            p.error(f"{', '.join(given)} {_UNSUPPORTED}")
+        return ns
+
+    p.parse_args = parse_args
     return p
 
 
 async def run(args: argparse.Namespace, *, embedding_model=None) -> SpoilerResult:
+    require_test_database(args.database_url)
     try:
         model = await eval_common.install_embedding_model(args.embeddings, embedding_model)
         if model is None:
@@ -390,7 +443,9 @@ def main(argv: list[str] | None = None, *, embedding_model=None) -> int:
         print(f"EV-4 spoiler eval: {result.leaks} leak(s)", file=sys.stderr)
         return 1
     if result.vacuous:
-        print(f"warning: {result.vacuous} vacuous check(s): see the failures", file=sys.stderr)
+        print(f"EV-4 spoiler eval: {result.vacuous} vacuous check(s), so the run proves nothing for those "
+              "cases: see the failures", file=sys.stderr)
+        return 1
     return 0
 
 

@@ -27,7 +27,7 @@ import uuid
 import sqlalchemy as sa
 
 from tests.ev4.families import (
-    assert_captured_context_clean, assert_counts_and_ranking_unchanged, assert_hidden_equals_missing, assert_no_canary,
+    _prompt_text, assert_captured_context_clean, assert_counts_and_ranking_unchanged, assert_hidden_equals_missing, assert_no_canary,
 )
 from tests.ev4.fixtures import GM, PLAYER, mint_canary
 from tests.ev4.probes._support import (
@@ -274,7 +274,7 @@ async def _captured_prompt(actor, url: str, body: dict) -> tuple:
     if r.status_code != 200 or not cap.calls:
         raise ValueError(f"positive control {url} {body} as {actor.name}: {r.status_code}, {len(cap.calls)} "
                          f"LLM call(s) ({r.text[:200]!r})")
-    return r, json.dumps([c.messages for c in cap.calls], ensure_ascii=False)
+    return r, _prompt_text(cap)  # the same text the Player-side check scans
 
 
 async def _gm_control(ev4, url: str, hidden: dict) -> None:

@@ -59,14 +59,13 @@ from app.access.policy import not_found
 from app.db.models.job import ACTIVE_STATUSES, Job
 from app.domain.enums import JobQueue, JobStatus
 from app.jobs import outbox
+from app.jobs.enqueue import RETRY_KEY_MARK  # a held retry's `{key}#retry:{job id}`; enqueue dedups on it
 from app.jobs.registry import get_kind
 
 ONLY_QUEUED = "Only queued Jobs can be cancelled"
 ONLY_FAILED = "Only failed Jobs can be retried"
 UNKNOWN_KIND = "This kind of job is no longer supported"
 KEY_IN_USE = "The same work is already queued or running"
-# A retry held behind a hidden Job takes `{key}#retry:{job id}`.
-RETRY_KEY_MARK = "#retry:"
 _RETRY_ATTEMPTS = 3
 
 

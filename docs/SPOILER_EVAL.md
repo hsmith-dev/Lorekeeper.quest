@@ -28,9 +28,13 @@ pending desktop verification.
   response (blocking body, or SSE `meta` / `delta` / `done`).
 - **marker leaks**: context markers in the Player's prompt — the glossary
   block, the canon block, a `Notes` line, plain Shorthand or secret text.
-- **secret words**: words of the GM-only answer ("lich", "cult", "vault",
-  "mill", "cellar") in the Player's reply. None is in a question or in the
-  Party-visible lore, so a hit means the model was told.
+- **secret words**: each case's words of its GM-only answer in the Player's
+  reply to that case — inn, Shorthand and glossary: "lich"; caravan:
+  "cult"; GM entry: "vault", "mill"; source document: "cellar". The rule
+  is per case: a case's secret words are absent from that case's question
+  (the source question names the lich, so its secret word is "cellar",
+  not "lich") and from the Party-visible lore it retrieves, so a hit means
+  the model was told. `tests/test_eval_spoiler.py` checks the questions.
 - **inference diffs**: after a GM-only change (a Shorthand edit, a new GM
   entry and a new Private entry, all naming the cases' words), the
   Player's trace — candidates, sources, canon sources, system prompt,
@@ -43,7 +47,9 @@ pending desktop verification.
 _Not run yet. The next run of the eval script writes its table here._
 <!-- /eval:results -->
 
-**Target: 0 leaks in every column, 0 vacuous.** Any leak exits 1.
+**Target: 0 leaks in every column, 0 vacuous.** Any leak, and any vacuous
+check (a GM control that missed, or an answer without its stream `meta` /
+`done` event), exits 1.
 
 ## What these numbers validate
 
@@ -75,12 +81,18 @@ _Not run yet._
 cd src/backend
 
 # Offline, deterministic (the fake provider; what CI's tests/test_eval_spoiler.py runs)
-python scripts/eval_spoiler.py --fake-llm --out ../../docs/SPOILER_EVAL.md
+python scripts/eval_spoiler.py --fake-llm --out ../../docs/SPOILER_EVAL.md \
+    --database-url postgresql+asyncpg://lorekeeper:changeme@localhost:5432/lorekeeper_test
 
 # Live: the desktop's Ollama and the real embedding model
 python scripts/eval_spoiler.py --embeddings require --out ../../docs/SPOILER_EVAL.md \
+    --database-url postgresql+asyncpg://lorekeeper:changeme@localhost:5432/lorekeeper_test \
     --llm-url http://100.119.62.5:11434 --llm-model lorekeeper
 ```
 
-`--database-url` (default `$DATABASE_URL`) gets a fresh canary Campaign per
-run. Exit status 1 means at least one leak; the failures region lists each.
+`--database-url` (default `$DATABASE_URL`) gets a fresh canary Campaign and
+users per run, committed, so the script refuses any database whose name
+does not end in `_test` (or `_test_<lane>`): never point it at a real one.
+`--campaign-id`, `--seed` and `--owner-email` are refused (the eval always
+seeds the canary Campaign). Exit status 1 means at least one leak or vacuous
+check; the failures region lists each.
