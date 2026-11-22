@@ -2,7 +2,7 @@
 title: 'E0-WorldCore.6: Legacy NPC and Quest adapters and old-link resolver'
 type: 'feature'
 created: '2026-11-21'
-status: 'in-progress'
+status: 'in-review'
 baseline_revision: '9b0f01a437d70660905892cede406e07943553c9'
 review_loop_iteration: 0
 followup_review_recommended: false
@@ -11,7 +11,14 @@ context:
   - '{project-root}/_bmad-output/implementation-artifacts/spec-e0-worldcore-5-entity-api-gm-party-projections.md'
   - '{project-root}/_bmad-output/implementation-artifacts/spec-e0-worldcore-2-f3-world-migration-legacy-npc-quest-copy.md'
 warnings: ['oversized']
-deferred: []
+deferred:
+  - summary: >-
+      Share-link NPC/Quest lists and the admin feedback context still read the frozen legacy tables.
+    evidence: |-
+      share.py get_shared_npcs/quests scoped_select(NpcEntry/Quest) (always_gm, so empty before and after this story); published Entities never reach share viewers. feedback.py builds its context with raw selects on npcs/quests and goes stale after the freeze; moving it to Entities needs a scoped ctx or a CI-8 baseline change. Belongs with the Player Portal / share work.
+    location: >-
+      src/backend/app/api/routes/share.py, src/backend/app/api/routes/feedback.py
+    severity: low
 ---
 
 <intent-contract>
@@ -142,3 +149,44 @@ Backend root `src/backend/`. DB tests run only in CI (desktop may be offline). L
 ## Spec Change Log
 
 ## Review Triage Log
+
+### 2026-11-22 — Review pass
+- verdicts: 36 findings — high 0, medium 2, low 18, false 16, maybe-false 0 (+5 CI failures fixed in the same patch round)
+- findings:
+  - `[false]` `[reject]` (intent) Party shape narrowed (no timestamps, Entity ids) — deliberate privacy-first choice (WC.5 precedent); no Player ever received legacy rows (always_gm).
+  - `[false]` `[reject]` (intent) re-copy runs as a Job, not in the migration — the owner rule "every Canon write via apply_change" and the three-way rule need history; recorded in Design Notes.
+  - `[low]` `[reject]` (intent) ratchet is source-AST only, not a DB block — matches the established AD-18 ratchet; a DB trigger adds complexity for an unlikely bypass.
+  - `[false]` `[reject]` (intent) pages not retired in the frontend — the story requires the pages to keep working unchanged until E0-UX/E0-WorldCore.10.
+  - `[false]` `[reject]` (intent) resolver probe in entity_legacy.py, not entities.py — the coordinator asked for a new legacy-specific probe file.
+  - `[false]` `[reject]` (intent) non-GMs never follow a merge — AC answers "for a ctx that can see the Entity"; a merged-away Entity is GM-only, so a Player gets the 404.
+  - `[low]` `[reject]` (intent) generate routes still ILIKE — AC removes ILIKE only from /entries; pre-existing.
+  - `[false]` `[reject]` (intent) DELETE becomes soft delete — through apply_change as required; documented in UPGRADING.md.
+  - `[false]` `[reject]` (intent) data-safety section not in diff — it is in the committed spec (Design Notes) and the migration docstring.
+  - `[medium]` `[patch]` (vgap) session-plan context from Entities untested — added test_session_plan_draft_reads_live_entities.
+  - `[medium]` `[patch]` (vgap) quest generate GM success path untested — added test_quest_generate_reads_the_entity (legacy and Entity id).
+  - `[low]` `[defer]` (vgap other) share/feedback read frozen tables — deferred (frontmatter); share was empty before and after.
+  - `[low]` `[defer]` (blind) share routes read frozen tables — same as above.
+  - `[low]` `[defer]` (blind) feedback context stale — same as above.
+  - `[false]` `[reject]` (blind) npcs event domain / npc visibility kinds stale — nothing ever published the npcs domain; the npc/quest visibility kinds still answer 422 always_gm, which stays correct for the frozen rows.
+  - `[false]` `[reject]` (blind) frontend types require timestamps — the pages only read entry timestamps; GM bodies keep theirs.
+  - `[low]` `[patch]` (blind) entries lists go blank until Mentions are confirmed, undocumented — UPGRADING.md now says so (plus soft delete).
+  - `[low]` `[reject]` (blind) generate ILIKE not escaped — pre-existing behaviour, unchanged by this story.
+  - `[low]` `[patch]` (blind) completed_at failure notes status as not applied — completed_at update has its own try and note.
+  - `[low]` `[reject]` (blind) completed_at written twice — intended: set_status stamps now, the follow-up restores the legacy time as F3 does.
+  - `[low]` `[patch]` (blind) adapter PUT computes skip-unchanged from an unlocked row — legacy_entity(lock=True) loads FOR UPDATE in update routes.
+  - `[low]` `[reject]` (blind) resync counts remaining rows each step — Campaign-sized lists; one-shot backfill.
+  - `[false]` `[reject]` (blind) Party NPC list ordered by a hideable name — `name` is not in HIDEABLE_FIELDS.
+  - `[low]` `[patch]` (blind) dead `legacy_only` parameter — removed.
+  - `[low]` `[reject]` (blind) duplicate lookups per item request — two indexed queries; not worth restructuring.
+  - `[low]` `[reject]` (blind) no tests for MAX_HOPS/cycle/deleted survivor, survivor type unchecked — merge refuses cross-type and cycles today; guard and tests add complexity for unreachable states.
+  - `[false]` `[reject]` (blind) seeder lost enum validation — validate_seed still checks NpcRole/NpcStatus/QuestStatus before writing.
+  - `[low]` `[reject]` (blind) hard-coded type strings in session_plans — cosmetic.
+  - `[low]` `[reject]` (blind) hand-maintained PARKED_BACKFILLS in conftest — test-harness convenience; a new migration backfill fails loudly if missed.
+  - `[low]` `[patch]` (edge) Quest completed_at failure misreports status — same fix as blind row.
+  - `[false]` `[reject]` (edge) a source_deleted first row reads as a World edit — nothing emits source_deleted yet (E0-WorldCore.8 unbuilt), and its field is NULL by default.
+  - `[false]` `[reject]` (edge) delete_entity/canon_note raising stalls the cursor — the Entity was just loaded live under lock, so delete cannot hit deleted/merged; a raise fails the Job, which the runner records as failed and finishes.
+  - `[low]` `[patch]` (edge) adapter PUT race — same fix as blind row.
+  - `[false]` `[reject]` (edge) blank names now 422 — the old pages require a name; the Entity rule (non-blank) is correct.
+  - `[false]` `[reject]` (edge) seeder idempotency by live name — the seeder was name-keyed before too; renamed demo rows are a dev-only edge.
+  - `[false]` `[reject]` (edge) survivor type unchecked — merge refuses cross-type merges.
+- CI failures fixed: PARTY_READ_ROUTES gains the resolver; co_gm write probes now run a family check; crash test no longer lazy-loads after rollback; canary-notes assertion; share key sets follow the Party shape.
