@@ -827,6 +827,55 @@ async def test_merge_revert_superseded_force_and_gone_survivor(db, ev4, gm):
     assert await _code(revert_change(db, gm, m3.change_id)) == "merged"
 
 
+async def test_a_merge_reverted_once_is_superseded_after_a_re_merge(db, ev4, gm):
+    survivor, absorbed = await _create(db, gm, name="Mira"), await _create(db, gm, name="Old Mira")
+    await apply_change(db, gm, AddAlias(entity_id=absorbed.id, alias="Grey Lady"))
+    m1 = await ws.merge_entities(db, gm, survivor.id, absorbed.id)
+    await revert_change(db, gm, m1.change_id)
+    m2 = await ws.merge_entities(db, gm, survivor.id, absorbed.id)
+    await db.commit()
+    count = len(await _changes(db, survivor.id))
+    for force in (False, True):
+        assert await _code(revert_change(db, gm, m1.change_id, force=force)) == "superseded"
+    assert len(await _changes(db, survivor.id)) == count
+    assert (await _get(db, Entity, absorbed.id)).merged_into_id == survivor.id
+    # m2's own revert still works.
+    await revert_change(db, gm, m2.change_id)
+    assert (await _get(db, Entity, absorbed.id)).merged_into_id is None
+    assert {a.alias for a in await _rows_of(db, EntityAlias, EntityAlias.entity_id, absorbed.id)} == {"Grey Lady"}
+
+
+async def test_merge_revert_moves_quest_steps_back(db, ev4, gm):
+    survivor, absorbed = await _create(db, gm, type="quest"), await _create(db, gm, type="quest")
+    step = await apply_change(db, gm, AddQuestStep(entity_id=absorbed.id, text="moves"))
+    step_id = uuid.UUID(step.new_value["step_id"])
+    merge = await ws.merge_entities(db, gm, survivor.id, absorbed.id)
+    assert (await _get(db, QuestStep, step_id)).quest_entity_id == survivor.id
+    await revert_change(db, gm, merge.change_id)
+    assert (await _get(db, QuestStep, step_id)).quest_entity_id == absorbed.id
+
+
+async def test_merge_revert_restores_a_stale_normalized_alias(db, ev4, gm):
+    survivor, absorbed = await _create(db, gm, name="Mira"), await _create(db, gm, name="Old Mira")
+    db.add(EntityAlias(campaign_id=ev4.a.campaign_id, entity_id=absorbed.id, alias="Sister Grey",
+                       normalized_alias="sister grey"))  # the old casefold key
+    await db.flush()
+    merge = await ws.merge_entities(db, gm, survivor.id, absorbed.id)
+    await revert_change(db, gm, merge.change_id)
+    rows = await _rows_of(db, EntityAlias, EntityAlias.entity_id, absorbed.id)
+    assert [(a.alias, a.normalized_alias) for a in rows] == [("Sister Grey", "sister grey")]
+
+
+async def test_merge_counts_refs_left_on_the_absorbed_id(db, ev4, gm):
+    party, secret = await _create(db, gm, name="Wren"), await _create(db, gm, name="Shadow")
+    await _publish(db, gm, party.id)
+    await _create(db, gm, type="item", name="Cup", attributes={"holder_entity_id": str(secret.id)})
+    preview = await ws.merge_entities(db, gm, party.id, secret.id, preview=True)
+    done = await ws.merge_entities(db, gm, party.id, secret.id)
+    for result in (preview, done):
+        assert (result.moved_counts["attribute_refs"], result.moved_counts["attribute_refs_left"]) == (0, 1)
+
+
 async def test_merge_locks_both_entities_in_id_order(db, ev4, gm, monkeypatch):
     locked: list[uuid.UUID] = []
     pair: set[uuid.UUID] = set()

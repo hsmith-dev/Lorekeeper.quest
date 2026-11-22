@@ -63,6 +63,7 @@ from app.access import (
     GM, CampaignContext, ctx_for_request, not_found, project_all, require_campaign, require_campaign_for,
     resolve_merged, scoped_get, scoped_select, set_visibility, set_visibility_many,
 )
+from app.access.merged import MAX_HOPS
 from app.api.deps import PARTY_READ, get_current_user
 from app.db.models.entity import Entity, EntityAlias, EntityChange, EntityMention, QuestStep
 from app.db.models.user import User
@@ -426,21 +427,18 @@ async def update_step(
 
 # ── History ────────────────────────────────────────────────────────────────
 
-MAX_MERGE_DEPTH = 16
-
-
 async def _merged_family(db: AsyncSession, ctx: CampaignContext, entity_id: uuid.UUID) -> list[uuid.UUID]:
     """`entity_id` and every Entity ctx can see that was merged into it,
     recursively (through scoped_select: a non-GM sees none, they are GM-only)."""
-    family, frontier = [entity_id], [entity_id]
-    for _ in range(MAX_MERGE_DEPTH):
+    family, frontier = {entity_id}, [entity_id]
+    for _ in range(MAX_HOPS):
         found = (await db.execute(scoped_select(Entity, ctx).where(Entity.merged_into_id.in_(frontier))
                                   .with_only_columns(Entity.id))).scalars().all()
         frontier = [i for i in found if i not in family]
         if not frontier:
             break
-        family.extend(frontier)
-    return family
+        family.update(frontier)
+    return sorted(family)
 
 
 @router.get("/{entity_id}/history", response_model=None, openapi_extra=PARTY_READ,

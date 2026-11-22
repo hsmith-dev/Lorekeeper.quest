@@ -11,9 +11,11 @@ the merge hid:
     Entity as before; anyone else gets the one 404 for what they cannot see);
   * otherwise `merged_into_id` is followed within ctx's Campaign, at most
     `MAX_HOPS` hops, with a cycle guard. A GM may follow any hop. Anyone else
-    may follow a hop only from a row whose stored `visibility` is `party` and
-    that is not deleted: a merge never changes that column, so it is the
-    Audience the Party had before the merge;
+    may follow a hop only from a row that is not deleted, whose stored
+    `visibility` is `party`, and whose newest `merge` row (on its survivor,
+    `new_value.absorbed_id` = the row) recorded no floor, i.e. it was `party`
+    when merged. The stored column alone is not enough: a GM can change a
+    merged-away row's Visibility afterwards. Anything else fails closed;
   * the row reached must be live (not deleted, not merged) and pass
     `scoped_get` for ctx.
 
@@ -32,7 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.access.context import CampaignContext
 from app.access.policy import GM, not_found
 from app.access.registry import scoped_get
-from app.db.models.entity import Entity
+from app.db.models.entity import Entity, EntityChange
 
 MAX_HOPS = 16
 _PARTY = "party"
@@ -53,6 +55,19 @@ async def _hop(db: AsyncSession, ctx: CampaignContext, entity_id: uuid.UUID) -> 
     return (await db.execute(stmt)).first()
 
 
+async def _party_at_merge(db: AsyncSession, ctx: CampaignContext, row: Any) -> bool:
+    """The newest `merge` row of `row` into its survivor recorded no floor:
+    the absorbed Entity was `party` when it was merged (its stored column
+    can be changed afterwards, the merge row cannot)."""
+    stmt = (sa.select(EntityChange.new_value["floor"].astext.label("floor"))
+            .where(EntityChange.campaign_id == ctx.campaign_id, EntityChange.op == "merge",
+                   EntityChange.entity_id == row.merged_into_id,
+                   EntityChange.new_value["absorbed_id"].astext == str(row.id))
+            .order_by(EntityChange.created_at.desc(), EntityChange.id.desc()).limit(1))
+    found = (await db.execute(stmt)).first()
+    return found is not None and found.floor is None
+
+
 async def resolve_merged(db: AsyncSession, ctx: CampaignContext, entity_id: Any) -> Entity:
     """The Entity `entity_id` names for ctx: itself, or the survivor it was
     merged into (module docstring). `not_found()` when ctx may not follow it."""
@@ -69,7 +84,7 @@ async def resolve_merged(db: AsyncSession, ctx: CampaignContext, entity_id: Any)
             not_found()
         seen.add(row.id)
         if ctx.role != GM and not (str(getattr(row.visibility, "value", row.visibility)) == _PARTY
-                                   and row.deleted_at is None):
+                                   and row.deleted_at is None and await _party_at_merge(db, ctx, row)):
             not_found()
         hops += 1
         row = await _hop(db, ctx, row.merged_into_id)

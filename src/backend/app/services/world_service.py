@@ -84,8 +84,9 @@ with their ids and values; the added name alias deleted; the repointed
 ENTITY_REF attributes put back; the survivor, the absorbed Entity and each
 holder marked stale. A moved row that is gone or no longer on the survivor,
 or a ref no longer naming the survivor, is `superseded` unless `force`
-(which skips it); a survivor merged or deleted since is `merged` /
-`deleted`. The revert row is on the survivor with field NULL (GM).
+(which skips it); a merge reverted once already is `superseded` (its undo
+record is stale), even with `force`; a survivor merged or deleted since is
+`merged` / `deleted`. The revert row is on the survivor with field NULL (GM).
 Visibility changes, `migrated`, `source_deleted`, `canon_note`, a merge
 without an undo record and reverts of non-field changes are `not_revertible`.
 
@@ -95,9 +96,8 @@ without an undo record and reverts of non-field changes are `not_revertible`.
 `match_names` and `candidates` (app/services/world_matching.py) are
 re-exported here with `normalize_name` and `NAME_PREFIXES`.
 
-**Merge primitive** (`op=merge`, under `as_system("merge")`): both Entities
-are locked in sorted-id order (concurrent A→B and B→A merges cannot
-deadlock). The absorbed Entity's aliases, Mentions and edges move to the
+**Merge primitive** (`op=merge`, under `as_system("merge")`): the pair is
+locked in sorted-id order (ENTITY_REF holders are locked after it). The absorbed Entity's aliases, Mentions and edges move to the
 survivor, floored `gm`/`private` when the absorbed Entity is not `party`;
 a moved alias is floored by the stricter of that and the absorbed Entity's
 `field_visibility.aliases` (an existing floor that is already restrictive is
@@ -993,7 +993,7 @@ def _check_live(entity: Entity) -> Entity:
 async def _merge_pair(run: _Run, absorbed_id: uuid.UUID, survivor_id: uuid.UUID, *,
                       lock: bool = True) -> tuple[Entity, Entity]:
     """Both Entities, looked up (and with `lock`, locked FOR UPDATE) in
-    sorted-id order, so concurrent A→B and B→A merges cannot deadlock."""
+    sorted-id order: the pair is always locked in the same order."""
     rows: dict[uuid.UUID, Entity] = {}
     for entity_id in sorted({absorbed_id, survivor_id}):
         stmt = scoped_select(Entity, run.ctx).where(Entity.id == entity_id)
@@ -1038,7 +1038,14 @@ class _MergeWork:
     def moved(self) -> dict[str, int]:
         return {"aliases": len(self.move_aliases), "mentions": len(self.mentions),
                 "relationships": len(self.move_edges), "self_loops_dropped": len(self.drop_edges),
-                "quest_steps": len(self.steps), "attribute_refs": len(self.repoint)}
+                "quest_steps": len(self.steps), "attribute_refs": len(self.repoint),
+                "attribute_refs_left": self.refs_left()}
+
+    def refs_left(self) -> int:
+        """Holder/key pairs naming the absorbed Entity that stay on its id (not safe to repoint)."""
+        repointed = {(h.id, k) for h, k in self.repoint}
+        return sum(1 for h in self.ref_holders for k in _entity_ref_keys(h.type)
+                   if _ref_uuid((h.attributes or {}).get(k)) == self.absorbed.id and (h.id, k) not in repointed)
 
 
 async def _merge_work(run: _Run, absorbed: Entity, survivor: Entity, *, lock: bool) -> _MergeWork:
@@ -1099,19 +1106,20 @@ async def _merge_work(run: _Run, absorbed: Entity, survivor: Entity, *, lock: bo
     # Downgrades (entity-level, MergeResult): the row's Party audience before vs on the survivor.
     downgrades: list[dict[str, Any]] = []
 
-    def report(kind: str, row_id: uuid.UUID, before: bool, after: bool) -> None:
-        if before != after:
-            downgrades.append({"kind": kind, "id": row_id, "from": Visibility.PARTY.value,
-                               "to": Visibility.GM.value})
+    def report(kind: str, row: Any, before: bool, after: bool, level: str | None) -> None:
+        # A row already floored was never Party-visible on either side.
+        if before != after and not _restrictive_floor(row.visibility_floor):
+            downgrades.append({"kind": kind, "id": row.id, "from": Visibility.PARTY.value,
+                               "to": level or Visibility.GM.value})
 
     alias_before = _is_party(absorbed) and not _aliases_hidden(absorbed)
     alias_after = _is_party(survivor) and not _aliases_hidden(survivor)
     for alias in move_aliases:
-        report("alias", alias.id, alias_before, alias_after)
+        report("alias", alias, alias_before, alias_after, alias_floor)
     for mention in mentions:
-        report("mention", mention.id, _is_party(absorbed), _is_party(survivor))
+        report("mention", mention, _is_party(absorbed), _is_party(survivor), floor)
     for edge, _source, _target in move_edges:
-        report("relationship", edge.id, _is_party(absorbed), _is_party(survivor))
+        report("relationship", edge, _is_party(absorbed), _is_party(survivor), floor)
     warning = PARTY_WITH_GM_ONLY if _is_party(absorbed) != _is_party(survivor) else None
     return _MergeWork(absorbed, survivor, floor, alias_floor, move_aliases, drop_aliases, name_alias, mentions,
                       move_edges, drop_edges, steps, holders, repoint, downgrades, warning)
@@ -1154,7 +1162,8 @@ async def _merge(run: _Run, c: Merge) -> _MergePlan | EntityChange:
         undo["dropped_aliases"].append(_alias_record(alias))
         await run.delete(alias)
     for alias in work.move_aliases:
-        undo["aliases"].append({"id": alias.id, "floor": _json(alias.visibility_floor)})
+        undo["aliases"].append({"id": alias.id, "floor": _json(alias.visibility_floor),
+                                "normalized_alias": alias.normalized_alias})
         alias.entity_id = survivor.id
         alias.normalized_alias = normalize_name(alias.alias)
         run.touch(alias)
@@ -1208,6 +1217,9 @@ async def _revert_merge(run: _Run, c: Revert, target: EntityChange) -> _MergePla
     absorbed_id = _ref_uuid(new.get("absorbed_id"))
     if not isinstance(undo, dict) or absorbed_id is None:
         raise CanonChangeError("not_revertible", "This merge has no undo record")
+    # Reverted once already: its undo record is stale (the pair may have been merged again since).
+    if await run.first(scoped_select(EntityChange, run.ctx).where(EntityChange.reverted_change_id == target.id)):
+        raise CanonChangeError("superseded", "This merge was reverted already")
     absorbed, survivor = await _merge_pair(run, absorbed_id, target.entity_id)
     _check_live(survivor)  # merged or deleted since: `merged` / `deleted`
     if absorbed.merged_into_id != survivor.id:
@@ -1232,6 +1244,8 @@ async def _revert_merge(run: _Run, c: Revert, target: EntityChange) -> _MergePla
             touched()
             continue
         alias.entity_id = absorbed.id
+        if item.get("normalized_alias"):
+            alias.normalized_alias = item["normalized_alias"]
         run.touch(alias)
         floors.append((alias, item.get("floor")))
     for item in undo.get("mentions") or []:

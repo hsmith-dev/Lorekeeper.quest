@@ -482,6 +482,75 @@ async def test_entity_field_citation_follows_a_merge_for_a_gm(ev4, db):
     assert await resolve_sources(db, refs, player) == []
 
 
+async def _publish_via(gm, entity, visibility="party"):
+    await _ok(await gm.post(f"{BASE}/{entity['id']}/visibility", json={"visibility": visibility}))
+
+
+async def test_merge_chains_resolve_and_history_spans_them(ev4, db):
+    gm = await ev4.actor("gm_owner")
+    player = await ev4.actor("player")
+    a, b, c = [await _create(gm, ev4, name=n) for n in ("Alpha", "Bravo", "Charlie")]
+    for e in (a, c):
+        await _publish_via(gm, e)  # B stays GM-only
+    await _ok(await gm.post(f"{BASE}/{b['id']}/merge", json={"absorbed_id": a["id"]}))
+    await _ok(await gm.post(f"{BASE}/{c['id']}/merge", json={"absorbed_id": b["id"]}))
+    end = await gm.get(f"{BASE}/{c['id']}")
+    assert (await gm.get(f"{BASE}/{a['id']}")).content == end.content
+    assert (await gm.get(f"{BASE}/{b['id']}")).content == end.content
+    history = await _ok(await gm.get(f"{BASE}/{c['id']}/history?limit=200"))
+    assert {i["entity_id"] for i in history["items"]} == {a["id"], b["id"], c["id"]}
+    total = sum([await _history_count(db, e["id"]) for e in (a, b, c)])
+    assert history["total"] == total == len(history["items"])
+    # A Player may not follow the hop from B (stored gm): A answers like a missing id.
+    missing = await player.get(f"{BASE}/{MISSING}")
+    hidden = await player.get(f"{BASE}/{a['id']}")
+    assert (hidden.status_code, hidden.content) == (404, missing.content)
+
+
+async def test_a_merge_loop_answers_404(ev4, db):
+    gm = await ev4.actor("gm_owner")
+    x, y = await _create(gm, ev4, name="Xan"), await _create(gm, ev4, name="Yev")
+    await db.execute(sa.update(Entity).where(Entity.id == uuid.UUID(x["id"])).values(merged_into_id=uuid.UUID(y["id"])))
+    await db.execute(sa.update(Entity).where(Entity.id == uuid.UUID(y["id"])).values(merged_into_id=uuid.UUID(x["id"])))
+    await db.commit()
+    missing = await gm.get(f"{BASE}/{MISSING}")
+    for e in (x, y):
+        r = await gm.get(f"{BASE}/{e['id']}")
+        assert (r.status_code, r.content) == (404, missing.content)
+        assert (await gm.get(f"{BASE}/{e['id']}/history")).status_code == 200  # the family walk ends too
+
+
+async def test_publishing_an_absorbed_row_does_not_open_its_old_id(ev4, db):
+    gm = await ev4.actor("gm_owner")
+    player = await ev4.actor("player")
+    survivor = await _create(gm, ev4, name="Mira")
+    absorbed = await _create(gm, ev4, name="Shadow")  # GM-only when merged
+    await _publish_via(gm, survivor)
+    await _ok(await gm.post(f"{BASE}/{survivor['id']}/merge", json={"absorbed_id": absorbed["id"]}))
+    await _publish_via(gm, absorbed)  # the stored column now says party
+    missing = await player.get(f"{BASE}/{MISSING}")
+    r = await player.get(f"{BASE}/{absorbed['id']}")
+    assert (r.status_code, r.content) == (404, missing.content)
+
+
+async def test_gm_only_into_party_merge_then_revert_leaves_party_bodies_as_before(ev4, db):
+    gm = await ev4.actor("gm_owner")
+    player = await ev4.actor("player")
+    survivor = await _create(gm, ev4, name="Mira")
+    absorbed = await _create(gm, ev4, name="Shadow")
+    await _publish_via(gm, survivor)
+    await _ok(await gm.post(f"{BASE}/{absorbed['id']}/aliases", json={"alias": "The Hood"}), 201)
+    await _ok(await gm.post(f"{BASE}/{survivor['id']}/aliases", json={"alias": "Little Mira"}), 201)
+    urls = [f"{BASE}/{survivor['id']}", f"{BASE}/?campaign_id={ev4.a.campaign_id}",
+            f"{BASE}/{survivor['id']}/history"]
+    before = [(await player.get(u)).content for u in urls]
+    done = await _ok(await gm.post(f"{BASE}/{survivor['id']}/merge", json={"absorbed_id": absorbed["id"]}))
+    assert done["warning"] == "party_with_gm_only"
+    assert [(await player.get(u)).content for u in urls] == before
+    await _ok(await gm.post(f"{BASE}/{survivor['id']}/history/{done['change_id']}/revert", json={}))
+    assert [(await player.get(u)).content for u in urls] == before
+
+
 # ── Wiring: 14 routes, each in nginx's /api/entities/ location (zone api) ───
 
 def test_every_entity_route_is_in_the_api_zone():
