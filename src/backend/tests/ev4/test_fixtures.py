@@ -96,7 +96,10 @@ async def test_canaries_are_unique_per_seeding(ev4, db):
 # ── Actors and the positive control (AC 3) ─────────────────────────────────
 
 async def test_gm_npc_listing_is_a_positive_control(ev4):
+    from tests.ev4.probes._support import world_npc
+
     gm, anon = await ev4.actor("gm_owner"), await ev4.actor("anon_share")
+    await world_npc(ev4)  # /api/npcs reads entities (E0-WorldCore.6): the seeded NPC's GM-only Entity
     r = await gm.get(f"/api/npcs/?campaign_id={ev4.a.campaign_id}")
     assert r.status_code == 200, r.text
     assert ev4.a.canary("NPCNOTES").token in r.text

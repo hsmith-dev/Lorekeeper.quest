@@ -130,6 +130,24 @@ def build_test_schema(url: str) -> None:
     asyncio.run(_reset_public_schema(url, with_vector=True))
     command.upgrade(alembic_config(url), "head")
     asyncio.run(_reset_app_config(url))
+    asyncio.run(_park_migration_backfills(url))
+
+
+# Backfill rows a migration queues whose kind is registered (so a Reaper pass
+# in any test would run them over every Campaign of the shared test DB). The
+# empty DB has nothing to backfill; tests that exercise one re-queue it
+# (tests/jobs/test_legacy_resync.py).
+PARKED_BACKFILLS = ("legacy_resync_v1",)
+
+
+async def _park_migration_backfills(url: str) -> None:
+    engine = create_async_engine(url)
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(sa.text("UPDATE data_backfills SET status = 'done' WHERE name = ANY(:names)"),
+                               {"names": list(PARKED_BACKFILLS)})
+    finally:
+        await engine.dispose()
 
 
 def drop_test_schema(url: str) -> None:

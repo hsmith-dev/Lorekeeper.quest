@@ -23,8 +23,10 @@ class QuestUpdate(BaseModel):
     status: QuestStatus | None = None
 
 
-# GM and Party projections (E0-Access.4), returned only through
-# app.access.project. The Party schema has no `notes` (GM notes).
+# The legacy shapes (E0-Access.4), served by the E0-WorldCore.6 adapters over
+# `entities` (app/api/routes/_legacy_world.py builds them from the projected
+# Entity). The Party schema has no `notes` (GM notes) and no timestamps
+# (privacy first, like EntityPartyResponse: they would date GM-only edits).
 
 class QuestGMResponse(BaseModel):
     id: uuid.UUID
@@ -45,8 +47,6 @@ class QuestPartyResponse(BaseModel):
     title: str
     description: str | None
     status: QuestStatus
-    created_at: datetime
-    updated_at: datetime
 
     model_config = {"from_attributes": True}
 

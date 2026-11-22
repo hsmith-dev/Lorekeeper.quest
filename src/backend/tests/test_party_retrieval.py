@@ -479,27 +479,42 @@ async def test_journal_search_route(db, world, client):
 
 
 async def test_entity_entries_routes(db, world, client):
-    from app.db.models.npc import NpcEntry
-    from app.db.models.quest import Quest
+    """E0-WorldCore.6: an NPC's/Quest's entries are the entries holding a
+    confirmed Mention of its Entity, as ctx may see them; no name matching."""
+    from app.access import set_visibility
+    from app.schemas.sources import RecordRef
+    from app.services.world_service import apply_change
 
-    npc = NpcEntry(user_id=world.owner.id, campaign_id=world.a, name="Barnaby")
-    quest = Quest(user_id=world.owner.id, campaign_id=world.a, title="Find the caravan")
-    db.add_all([npc, quest])
-    await add_entry(db, world.a, world.owner, "We met someone.", shorthand="Barnaby Find the caravan")
+    gm = await world.ctx(db, "owner")
+    npc = (await apply_change(db, gm, {"op": "create_entity", "type": "character", "kind": "npc",
+                                       "name": "Barnaby"})).entity_id
+    quest = (await apply_change(db, gm, {"op": "create_entity", "type": "quest",
+                                         "name": "Find the caravan"})).entity_id
+    named = await add_entry(db, world.a, world.owner, "We met someone.", shorthand="Barnaby Find the caravan")
     seen = await add_entry(db, world.a, world.owner, "Barnaby said: Find the caravan.")
-    await add_entry(db, world.a, world.owner, "Barnaby, GM-only. Find the caravan.", visibility="gm")
+    hidden = await add_entry(db, world.a, world.owner, "Barnaby, GM-only. Find the caravan.", visibility="gm")
+    suggested = await add_entry(db, world.a, world.owner, "Barnaby and the caravan, unconfirmed.")
+    for eid in (npc, quest):
+        for entry, confirmed in ((named, True), (seen, True), (hidden, True), (suggested, False)):
+            await apply_change(db, gm, {"op": "add_mention", "entity_id": eid, "journal_id": entry.id,
+                                        "confirmed": confirmed})
     await db.commit()
     missing = "00000000-0000-4000-8000-000000000000"
-    for url, missing_url in ((f"/api/npcs/{npc.id}/entries", f"/api/npcs/{missing}/entries"),
-                             (f"/api/quests/{quest.id}/entries", f"/api/quests/{missing}/entries")):
-        # NPCs and Quests are always_gm until F3-world (E0-Access.4): a Player
-        # gets the one 404, exactly as for a missing id.
+    for eid, base in ((npc, "/api/npcs"), (quest, "/api/quests")):
+        url, missing_url = f"{base}/{eid}/entries", f"{base}/{missing}/entries"
+        # GM-only Entity: a Player gets the one 404, exactly as for a missing id.
         r = await client.get(url, headers=bearer(world.p))
         m = await client.get(missing_url, headers=bearer(world.p))
         assert r.status_code == 404 and r.content == m.content, r.text
         r = await client.get(url, headers=bearer(world.owner))
-        assert len(r.json()) == 3 and all("shorthand" in i for i in r.json())
-        assert str(seen.id) in {i["id"] for i in r.json()}
+        assert {i["id"] for i in r.json()} == {str(hidden.id), str(seen.id), str(named.id)}, r.text
+        assert all("shorthand" in i for i in r.json())
+        await set_visibility(db, gm, RecordRef(kind="entity", id=eid), "party")
+        await db.commit()
+        # Published: the Player sees the confirmed Mentions in entries they may read, without Shorthand.
+        r = await client.get(url, headers=bearer(world.p))
+        assert {i["id"] for i in r.json()} == {str(seen.id), str(named.id)}, r.text
+        assert all("shorthand" not in i for i in r.json())
 
 
 async def _fake_llm_for(db, *users) -> None:

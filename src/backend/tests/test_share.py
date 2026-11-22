@@ -160,8 +160,9 @@ JOURNAL_LIST_KEYS = {"items", "total", "page", "limit"}
 JOURNAL_KEYS = {"id", "campaign_id", "narrative", "session_date", "tags", "created_at"}
 TAG_KEYS = {"id", "name", "tag_type", "custom_category"}
 TAG_CATEGORY_KEYS = {"id", "name", "campaign_id", "created_at"}
-NPC_KEYS = {"id", "campaign_id", "name", "role", "status", "description", "created_at", "updated_at"}
-QUEST_KEYS = {"id", "campaign_id", "title", "description", "status", "created_at", "updated_at"}
+# The Party shapes (E0-WorldCore.6, privacy first): no timestamps.
+NPC_KEYS = {"id", "campaign_id", "name", "role", "status", "description"}
+QUEST_KEYS = {"id", "campaign_id", "title", "description", "status"}
 
 
 async def _null_columns(db, model, *where) -> list[str]:

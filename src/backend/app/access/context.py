@@ -350,6 +350,86 @@ def require_campaign_for(model: type, id_param: str, min_role: str = "player", *
     return dependency
 
 
+# ── Entities by Entity id or legacy id (E0-WorldCore.6) ────────────────────
+
+_LEGACY_KINDS = ("npc", "quest")
+_require_entity_cache: dict[tuple[str, str, str | None, bool], Any] = {}
+
+
+async def _entity_campaign(db: AsyncSession, row_id: uuid.UUID, legacy: str | None) -> uuid.UUID | None:
+    """The Campaign of the Entity whose id or `legacy_<legacy>_id` is
+    `row_id`; an Entity-id match wins."""
+    from app.db.models.entity import Entity  # the access layer may read any table
+
+    found = (await db.execute(sa.select(Entity.campaign_id).where(Entity.id == row_id))).scalar_one_or_none()
+    if found is not None:
+        return found
+    if legacy is None:
+        return None
+    column = Entity.legacy_npc_id if legacy == "npc" else Entity.legacy_quest_id
+    return (await db.execute(sa.select(Entity.campaign_id).where(column == row_id).limit(1))).scalar_one_or_none()
+
+
+async def entity_ctx_for_request(request: Request, db: AsyncSession, user: User | uuid.UUID, row_id: Any,
+                                 min_role: str = "player", *, legacy: str | None = None,
+                                 preview: bool = True) -> CampaignContext:
+    """The caller's ctx in the Campaign of the Entity `row_id` names (its
+    Entity id, or with `legacy` its `legacy_npc_id`/`legacy_quest_id`), as
+    `require_campaign_for` builds it:
+    a non-UUID, no such Entity and too low a Role are the one `not_found()`;
+    the preview header narrows."""
+    min_role = check_min_role(min_role)
+    if legacy is not None and legacy not in _LEGACY_KINDS:
+        raise ValueError(f"entity_ctx_for_request: legacy must be one of {_LEGACY_KINDS}, got {legacy!r}")
+    parsed = row_id if isinstance(row_id, uuid.UUID) else _parse_uuid(row_id)
+    if parsed is None:
+        not_found()
+    campaign_id = await _entity_campaign(db, parsed, legacy)
+    if campaign_id is None:
+        not_found()
+    ctx = await _resolve(db, _user_id(user), campaign_id)
+    if ctx is None:
+        not_found()
+    if preview:
+        ctx = _narrow_for_preview(request, ctx)
+    if not meets(ctx, min_role):
+        not_found()
+    return ctx
+
+
+def require_campaign_for_entity(id_param: str, min_role: str = "player", *, legacy: str | None = None,
+                                preview: bool = True):
+    """FastAPI dependency for the legacy NPC/Quest item routes: like
+    `require_campaign_for(Entity, id_param, min_role)`, but the path id may
+    also be the Entity's `legacy_<legacy>_id` (`legacy` "npc" or "quest").
+    Which Entities the route then serves (type, live) is the route's check."""
+    min_role = check_min_role(min_role)
+    if legacy is not None and legacy not in _LEGACY_KINDS:
+        raise ValueError(f"require_campaign_for_entity: legacy must be one of {_LEGACY_KINDS}, got {legacy!r}")
+    if not isinstance(id_param, str) or not id_param:
+        raise ValueError("require_campaign_for_entity: id_param must be the route's path parameter name")
+    key = (id_param, min_role, legacy, bool(preview))
+    if key in _require_entity_cache:
+        return _require_entity_cache[key]
+
+    async def dependency(
+        request: Request,
+        user: User = Depends(get_current_user),
+        db: AsyncSession = Depends(get_db),
+    ) -> CampaignContext:
+        if id_param not in request.path_params:
+            raise RuntimeError(
+                f"require_campaign_for_entity: route {request.url.path!r} has no path parameter {id_param!r}")
+        return await entity_ctx_for_request(request, db, user.id, request.path_params[id_param], min_role,
+                                            legacy=legacy, preview=preview)
+
+    dependency.__name__ = (f"require_entity_{legacy or 'any'}_{id_param}_{min_role}"
+                           + ("" if preview else "_no_preview"))
+    dependency.__qualname__ = dependency.__name__
+    _require_entity_cache[key] = dependency
+    return dependency
+
+
 # ── Cross-Campaign lists ───────────────────────────────────────────────────
 
 class RoleMap(dict):

@@ -12,8 +12,7 @@ from app.db.session import get_db
 from app.db.models.user import User
 from app.db.models.campaign import Campaign
 from app.db.models.journal import JournalEntry
-from app.db.models.quest import Quest, QuestStatus
-from app.db.models.npc import NpcEntry
+from app.db.models.entity import Entity
 from app.db.models.session_plan import SessionPlan
 from app.schemas.session_plan import (
     SessionPlanGenerateRequest,
@@ -63,17 +62,21 @@ async def generate_plan_draft(
     )
     recent_entries = [{"shorthand": r} for r in entries_result.scalars().all()]
 
+    # The World Model (E0-WorldCore.6): open Quests and the Characters and
+    # Factions, live only (npcs/quests are frozen legacy tables).
+    live = (Entity.deleted_at.is_(None), Entity.merged_into_id.is_(None))
     quests_result = await db.execute(
-        scoped_select(Quest, ctx).with_only_columns(Quest.title)
-        .where(Quest.status == QuestStatus.active)
-        .order_by(Quest.created_at.desc(), Quest.id)
+        scoped_select(Entity, ctx).with_only_columns(Entity.name)
+        .where(Entity.type == "quest", Entity.status == "active", *live)
+        .order_by(Entity.created_at.desc(), Entity.id)
         .limit(10)
     )
     open_quests = list(quests_result.scalars().all())
 
     npcs_result = await db.execute(
-        scoped_select(NpcEntry, ctx).with_only_columns(NpcEntry.name)
-        .order_by(NpcEntry.updated_at.desc(), NpcEntry.id)
+        scoped_select(Entity, ctx).with_only_columns(Entity.name)
+        .where(Entity.type.in_(("character", "faction")), *live)
+        .order_by(Entity.updated_at.desc(), Entity.id)
         .limit(15)
     )
     npcs = list(npcs_result.scalars().all())

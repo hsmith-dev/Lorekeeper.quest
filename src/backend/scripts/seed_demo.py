@@ -1,8 +1,10 @@
 #!/usr/bin/env python
 """Seed the demo Campaign from seeds/demo_campaign.json.
 
-Writes one owner (if missing), the Campaign, its 12 journal entries, NPCs,
-factions and quests through the ORM. Idempotent: a second run creates
+Writes one owner (if missing), the Campaign and its 12 journal entries
+through the ORM, and its NPCs, factions and quests as World Model Entities
+through `world_service.apply_change` as the Owner (E0-WorldCore.6: `npcs`
+and `quests` are frozen legacy tables). Every Entity starts GM-only. Idempotent: a second run creates
 nothing and prints the same Campaign id. The only updates it ever makes are
 filling an entry's NULL embedding / party_embedding once the embedding model
 is available, and setting a NULL or stale party_tsv (E0-Access.7).
@@ -52,8 +54,10 @@ from app.clients.errors import ModelServiceError  # noqa: E402
 from app.db.models.campaign import Campaign, Genre  # noqa: E402
 from app.domain.embedding import EMBEDDING_MODEL  # noqa: E402,F401  (re-exported for the eval report)
 from app.db.models.journal import EMBEDDING_DIM, JournalEntry  # noqa: E402
-from app.db.models.npc import NpcEntry, NpcRole, NpcStatus  # noqa: E402
-from app.db.models.quest import Quest, QuestStatus  # noqa: E402
+from app.db.models.entity import Entity  # noqa: E402
+from app.db.models.npc import NpcRole, NpcStatus  # noqa: E402  (the seed's vocabulary is the legacy one)
+from app.db.models.quest import QuestStatus  # noqa: E402
+from app.domain import legacy_world as lw  # noqa: E402
 from app.db.models.user import User  # noqa: E402
 
 FORMAT_VERSION = 1
@@ -359,28 +363,38 @@ async def seed_campaign(
         )
         result.entry_ids[e["seed_id"]] = entry.id
 
+    # The World Model (E0-WorldCore.6): the seed's NPC/Quest vocabulary is the
+    # legacy one, mapped exactly like the F3-world copy; idempotent by the
+    # live (type, name).
+    from app.access import ctx_for, scoped_select
+    from app.services.world_service import apply_change
+
+    ctx = await ctx_for(session, user.id, campaign.id)
+
+    async def _exists(entity_type: str, name: str) -> bool:
+        found = await session.scalar(scoped_select(Entity, ctx).with_only_columns(Entity.id).where(
+            Entity.type == entity_type, Entity.name == name, Entity.deleted_at.is_(None),
+            Entity.merged_into_id.is_(None)).limit(1))
+        return found is not None
+
     for n in seed["npcs"]:
-        exists = await session.scalar(
-            select(NpcEntry.id).where(NpcEntry.campaign_id == campaign.id, NpcEntry.name == n["name"])
-        )
-        if exists is None:
+        entity_type = lw.npc_type(n["role"])
+        if not await _exists(entity_type, n["name"]):
             final = sorted(n["status_history"], key=lambda h: h["session"])[-1]["status"]
-            session.add(NpcEntry(
-                user_id=user.id, campaign_id=campaign.id, name=n["name"],
-                role=NpcRole(n["role"]), status=NpcStatus(final),
-                description=n.get("description"), notes=n.get("notes"),
-            ))
+            await apply_change(session, ctx, {
+                "op": "create_entity", "type": entity_type, "kind": lw.npc_kind(n["role"]), "name": n["name"],
+                "status": lw.npc_status_in(entity_type, final), "description": n.get("description"),
+                "gm_notes": n.get("notes"),
+            })
             result.created["npcs"] += 1
 
     for q in seed["quests"]:
-        exists = await session.scalar(
-            select(Quest.id).where(Quest.campaign_id == campaign.id, Quest.title == q["title"])
-        )
-        if exists is None:
-            session.add(Quest(
-                user_id=user.id, campaign_id=campaign.id, title=q["title"],
-                status=QuestStatus(q["status"]), description=q.get("description"), notes=q.get("notes"),
-            ))
+        if not await _exists(lw.QUEST, q["title"]):
+            await apply_change(session, ctx, {
+                "op": "create_entity", "type": lw.QUEST, "name": q["title"],
+                "status": lw.quest_status_in(q["status"]), "description": q.get("description"),
+                "gm_notes": q.get("notes"),
+            })
             result.created["quests"] += 1
 
     await session.commit()

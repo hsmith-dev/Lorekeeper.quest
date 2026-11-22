@@ -48,7 +48,8 @@ alias or a Mention, confirming a confirmed Mention, ending an ended
 Relationship (when no earlier row of that op made the state, e.g. it came
 from the migration or a merge, the repeat is `invalid` and writes nothing),
 `create_entity` with the `entity_id` of a live Entity of the same type and
-name, and any op repeated with the same `proposal_id`, op, Entity, field and
+name (a create may carry a `legacy_npc_id`/`legacy_quest_id`, E0-WorldCore.6:
+the legacy row the Entity stands for), and any op repeated with the same `proposal_id`, op, Entity, field and
 payload (the same new value, note or target row).
 
 **Quests.** `set_status` into a `closed_success` status stamps
@@ -555,6 +556,7 @@ async def _create_entity(run: _Run, c: CreateEntity) -> EntityChange:
         id=c.entity_id or uuid.uuid4(), campaign_id=run.ctx.campaign_id, type=type_,
         kind=kind.value if kind is not None else None, name=c.name, description=c.description, status=status,
         attributes=attrs, gm_notes=c.gm_notes, created_by_user_id=run.ctx.user_id,
+        legacy_npc_id=c.legacy_npc_id, legacy_quest_id=c.legacy_quest_id,
     ))
     run.after[entity.id] = entity  # no `before`: a create row is GM
     await run.db.flush()

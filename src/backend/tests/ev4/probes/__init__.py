@@ -15,7 +15,9 @@ Template (copy into tests/ev4/probes/<feature>.py):
     # actors=(...) to choose others (see tests/ev4/fixtures.py).
     @ev4_probe("GET", "/api/npcs/{npc_id}")
     async def probe_npc_detail(ev4, actor):
-        npc_id = ev4.a.ids["npcs"][0]
+        # /api/npcs is an adapter over entities (E0-WorldCore.6): the seeded
+        # legacy row needs its Entity first (_support.world_npc, GM-only).
+        npc_id = await world_npc(ev4)
         r = await actor.get(f"/api/npcs/{npc_id}")
         assert_no_canary(actor, r)
         await assert_hidden_equals_missing(

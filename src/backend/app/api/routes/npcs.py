@@ -1,36 +1,43 @@
+"""The legacy NPC routes, an adapter over `entities` (E0-WorldCore.6).
+
+Same paths and legacy shapes as before; an NPC is now a live Character or
+Faction Entity (app/api/routes/_legacy_world.py has the rules: ids, value
+maps, Party bodies, writes). Every write goes through
+`world_service.apply_change` and commits once; `npcs` is frozen (AD-18).
+"""
 import logging
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Request
-from sqlalchemy.ext.asyncio import AsyncSession
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy import or_
-from sqlalchemy.orm import selectinload
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.access import (
-    GM, LITE,
-    CampaignContext, can_write, check_create, ctx_for_request, project, project_all, require_campaign,
-    require_campaign_for,
-    scoped_get, scoped_select,
-)
-from app.clients.errors import ModelServiceError
-from app.db.session import get_db
-from app.db.models.user import User
-from app.db.models.npc import NpcEntry
-from app.db.models.campaign import Campaign
-from app.db.models.journal import JournalEntry
-from app.db.models.tag import Tag
-from app.schemas.npc import NpcCreate, NpcUpdate, NpcGMResponse, NpcExtractResponse
-from app.schemas.journal import JournalLiteResponse
+from app.access import CampaignContext, ctx_for_request, require_campaign, require_campaign_for_entity, scoped_get, \
+    scoped_select
 from app.api.deps import PARTY_READ, get_current_user, get_user_llm_config
-from app.services.nlp_service import extract_tags
+from app.api.routes import _legacy_world as legacy
+from app.api.routes.entities import _write
+from app.clients.errors import ModelServiceError
+from app.db.models.campaign import Campaign
+from app.db.models.entity import Entity
+from app.db.models.journal import JournalEntry
+from app.db.models.tag import TagType
+from app.db.models.user import User
+from app.db.session import get_db
+from app.domain import legacy_world as lw
+from app.schemas.journal import JournalLiteResponse
+from app.schemas.npc import NpcCreate, NpcExtractResponse, NpcGMResponse, NpcUpdate
+from app.services import llm_config_service
 from app.services.chat_service import generate_npc_bio
 from app.services.llm_provider import LLMConfig
-from app.services import llm_config_service
-from app.db.models.tag import TagType
+from app.services.nlp_service import extract_tags
+from app.services.world_service import apply_change
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+KIND = "npc"
 
 # NPC extract reads at most this much of the newest entries: en_core_web_trf
 # on a CPU-only box gets through roughly this in well under ML_NER_TIMEOUT_S,
@@ -38,33 +45,29 @@ router = APIRouter()
 # the client has given up on, so a smaller batch beats a timeout.
 NPC_EXTRACT_MAX_CHARS = 20_000
 
-# NPCs are always_gm until F3-world (Decision B1-D4): a Player (or a GM in
-# member preview) lists none and gets the one 404 for every item route and
-# for a create. Bodies go through access.project (response_model=None:
-# FastAPI must not coerce a Party body into the GM schema).
-_GM_OR_PARTY = "GM: NpcGMResponse; Player or member preview: NpcPartyResponse (no `notes`)."
-_npc_ctx = require_campaign_for(NpcEntry, "npc_id")
+# Bodies are built from access.project output (response_model=None: FastAPI
+# must not coerce a Party body into the GM schema). A Player sees only
+# published NPCs (migrated ones start GM-only, OD-1 A).
+_GM_OR_PARTY = ("GM: NpcGMResponse; Player or member preview: NpcPartyResponse (Entity id, no `notes`, "
+                "no timestamps).")
+_npc_ctx = require_campaign_for_entity("npc_id", "player", legacy=KIND)
 # E0-Access.6: writes and generation declare `gm` in the NPC's own Campaign,
-# so a Player gets the missing-row 404 before any LLM config is resolved
-# or any usage metered; every write also calls can_write on the row.
-# Account gate (app/api/deps.py): the list, the item and its entries are
-# Party reads (openapi_extra=PARTY_READ); every other route needs a paid
-# or granted account.
-_npc_gm = require_campaign_for(NpcEntry, "npc_id", "gm")
-
-
-async def _get_accessible_npc(db: AsyncSession, npc_id: uuid.UUID, ctx: CampaignContext) -> NpcEntry:
-    """The NPC `npc_id` if ctx (the caller's ctx in the NPC's own Campaign,
-    from `require_campaign_for`) may see it; else the one `not_found()`
-    (hidden and missing are the same)."""
-    return await scoped_get(db, NpcEntry, ctx, npc_id)
+# so a Player gets the missing-row 404 before any LLM config is resolved or
+# any usage metered. Account gate (app/api/deps.py): the list, the item and
+# its entries are Party reads (openapi_extra=PARTY_READ).
+_npc_gm = require_campaign_for_entity("npc_id", "gm", legacy=KIND)
 
 
 async def _visible_npc(npc_id: uuid.UUID, ctx: CampaignContext = Depends(_npc_gm),
-                       db: AsyncSession = Depends(get_db)) -> NpcEntry:
+                       db: AsyncSession = Depends(get_db)) -> Entity:
     """As a dependency, so a hidden NPC is the 404 before any later
     dependency (the LLM config's 402) can answer differently."""
-    return await _get_accessible_npc(db, npc_id, ctx)
+    return await legacy.legacy_entity(db, ctx, npc_id, KIND)
+
+
+async def _body(db: AsyncSession, ctx: CampaignContext, entity_id: uuid.UUID):
+    entity = await legacy.legacy_entity(db, ctx, entity_id, KIND)
+    return (await legacy.legacy_bodies(db, ctx, [entity], KIND))[0]
 
 
 @router.get("/", response_model=None, openapi_extra=PARTY_READ,
@@ -73,8 +76,8 @@ async def list_npcs(
     ctx: CampaignContext = Depends(require_campaign("player")),
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(scoped_select(NpcEntry, ctx).order_by(NpcEntry.name))
-    return await project_all(db, result.scalars().all(), ctx)
+    rows = list((await db.execute(legacy.live_entities(ctx, KIND).order_by(*legacy.by_name()))).scalars().all())
+    return await legacy.legacy_bodies(db, ctx, rows, KIND)
 
 
 @router.post("/", response_model=None, status_code=201,
@@ -86,12 +89,15 @@ async def create_npc(
     db: AsyncSession = Depends(get_db),
 ):
     ctx = await ctx_for_request(request, db, user, body.campaign_id, "gm")
-    npc = NpcEntry(user_id=user.id, **body.model_dump())
-    check_create(npc, ctx)  # a row the caller could not see is refused before writing
-    db.add(npc)
-    await db.commit()
-    await db.refresh(npc)
-    return project(npc, ctx)
+    change = legacy.npc_create(body.model_dump(mode="json"))
+
+    async def work():
+        return await apply_change(db, ctx, change)
+
+    result = await _write(db, work)
+    if isinstance(result, Response):
+        return result
+    return await _body(db, ctx, result.entity_id)
 
 
 @router.put("/{npc_id}", response_model=None,
@@ -102,14 +108,20 @@ async def update_npc(
     ctx: CampaignContext = Depends(_npc_gm),
     db: AsyncSession = Depends(get_db),
 ):
-    npc = await _get_accessible_npc(db, npc_id, ctx)
-    can_write(ctx, npc)
-    for field, value in body.model_dump(exclude_none=True).items():
-        setattr(npc, field, value)
-    await db.commit()
-    await db.refresh(npc)
+    # Locked: the skip-unchanged writes are computed from this row (held to the commit in _write).
+    entity = await legacy.legacy_entity(db, ctx, npc_id, KIND, lock=True)
+    entity_id = entity.id
+    fields = body.model_dump(exclude_none=True, mode="json")
+
+    async def work():
+        for change in legacy.npc_writes(entity, fields):
+            await apply_change(db, ctx, change)
+
+    result = await _write(db, work)
+    if isinstance(result, Response):
+        return result
     # The write response is projected like a read (AR-26).
-    return project(npc, ctx)
+    return await _body(db, ctx, entity_id)
 
 
 @router.delete("/{npc_id}", status_code=204)
@@ -117,11 +129,17 @@ async def delete_npc(
     npc_id: uuid.UUID,
     ctx: CampaignContext = Depends(_npc_gm),
     db: AsyncSession = Depends(get_db),
-) -> None:
-    npc = await _get_accessible_npc(db, npc_id, ctx)
-    can_write(ctx, npc)
-    await db.delete(npc)
-    await db.commit()
+):
+    entity = await legacy.legacy_entity(db, ctx, npc_id, KIND)
+    entity_id = entity.id
+
+    async def work():
+        return await apply_change(db, ctx, {"op": "delete_entity", "entity_id": entity_id})
+
+    result = await _write(db, work)
+    if isinstance(result, Response):
+        return result
+    return Response(status_code=204)
 
 
 @router.get("/{npc_id}", response_model=None, openapi_extra=PARTY_READ,
@@ -131,7 +149,7 @@ async def get_npc(
     ctx: CampaignContext = Depends(_npc_ctx),
     db: AsyncSession = Depends(get_db),
 ):
-    return project(await _get_accessible_npc(db, npc_id, ctx), ctx)
+    return await _body(db, ctx, npc_id)
 
 
 @router.get("/{npc_id}/entries", response_model=None, openapi_extra=PARTY_READ,
@@ -141,51 +159,32 @@ async def get_npc_entries(
     ctx: CampaignContext = Depends(_npc_ctx),
     db: AsyncSession = Depends(get_db),
 ):
-    """Entries mentioning this NPC by name, among the entries visible to
-    ctx. A GM matches the Shorthand or the Narrative and gets lite GM rows;
-    anyone else matches the Narrative only and gets Party entries, so a
-    Shorthand-only mention never shows up or reorders their list (E0-Access.7)."""
-    npc = await _get_accessible_npc(db, npc_id, ctx)
-    needle = f"%{npc.name}%"
-    match = (or_(JournalEntry.shorthand.ilike(needle), JournalEntry.narrative.ilike(needle))
-             if ctx.role == GM else JournalEntry.narrative.ilike(needle))
-    entries_result = await db.execute(
-        scoped_select(JournalEntry, ctx)
-        .where(match)
-        .options(selectinload(JournalEntry.tags).selectinload(Tag.custom_category))
-        .order_by(JournalEntry.created_at.desc(), JournalEntry.id)
-        .limit(20)
-    )
-    return await project_all(db, entries_result.scalars().all(), ctx, variant=LITE)
+    """The entries with a confirmed Mention of this NPC that ctx may see (the
+    Mention's Audience and the entry's), newest first, at most 20, lite rows."""
+    entity = await legacy.legacy_entity(db, ctx, npc_id, KIND)
+    return await legacy.confirmed_entries(db, ctx, entity)
 
 
 @router.post("/{npc_id}/generate")
 async def generate_npc_bio_route(
     npc_id: uuid.UUID,
-    npc: NpcEntry = Depends(_visible_npc),
+    npc: Entity = Depends(_visible_npc),
     ctx: CampaignContext = Depends(_npc_gm),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     config: LLMConfig = Depends(get_user_llm_config),
 ) -> dict:
+    name, role = npc.name, lw.npc_role_out(npc.type, npc.kind)
     campaign = await scoped_get(db, Campaign, ctx, ctx.campaign_id)
     entries_result = await db.execute(
         scoped_select(JournalEntry, ctx)
-        .where(
-            or_(
-                JournalEntry.shorthand.ilike(f"%{npc.name}%"),
-                JournalEntry.narrative.ilike(f"%{npc.name}%"),
-            ),
-        )
+        .where(or_(JournalEntry.shorthand.ilike(f"%{name}%"), JournalEntry.narrative.ilike(f"%{name}%")))
         .order_by(JournalEntry.created_at.desc(), JournalEntry.id)
         .limit(10)
     )
-    rows = list(entries_result.scalars().all())
-    entries_data = [{"shorthand": e.shorthand} for e in rows]
+    entries_data = [{"shorthand": e.shorthand} for e in entries_result.scalars().all()]
     bio = await generate_npc_bio(
-        npc.name,
-        npc.role.value,
-        entries_data,
+        name, role, entries_data,
         campaign.name if campaign else None,
         campaign.genre.value if campaign else None,
         config=config,
@@ -200,8 +199,8 @@ async def extract_npcs_from_journals(
     db: AsyncSession = Depends(get_db),
 ) -> NpcExtractResponse:
     """Run NER (the ml sidecar's spaCy) over recent journal entries (`campaign_id` query
-    parameter) and return PERSON entity names. GM only: it reads Shorthand
-    and the NPC list (always_gm)."""
+    parameter) and return PERSON names not yet a live Character or Faction.
+    GM only: it reads Shorthand and GM-only Entities."""
     entries_result = await db.execute(
         scoped_select(JournalEntry, ctx).with_only_columns(JournalEntry.shorthand, JournalEntry.narrative)
         .order_by(JournalEntry.created_at.desc(), JournalEntry.id)
@@ -229,8 +228,8 @@ async def extract_npcs_from_journals(
         raise HTTPException(status_code=503, detail="NER model unavailable")
     names = [t.name for t in tags if t.tag_type == TagType.character]
 
-    # Exclude names already in the wiki for this campaign
-    existing_result = await db.execute(scoped_select(NpcEntry, ctx).with_only_columns(NpcEntry.name))
+    # Exclude the names of the Campaign's live Characters and Factions.
+    existing_result = await db.execute(legacy.live_entities(ctx, KIND).with_only_columns(Entity.name))
     existing = {n.lower() for (n,) in existing_result.all()}
     suggestions = [n for n in names if n.lower() not in existing]
 

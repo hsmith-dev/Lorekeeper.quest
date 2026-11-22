@@ -119,6 +119,7 @@ def get_kind(name: str) -> JobKind:
 # worker at start (LorekeeperWorker). This module's own built-ins need no entry.
 KIND_MODULES: tuple[str, ...] = (
     "app.jobs.world",  # backfill.mentions and the suggested_mentions_v1 backfill (E0-WorldCore.7)
+    "app.jobs.legacy_resync",  # E0-WorldCore.6: backfill.legacy_resync / legacy_resync_v1
 )
 
 

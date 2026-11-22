@@ -35,7 +35,8 @@ which `campaign:{id}:events` invalidation. E0-WorldCore.5 adds the registry's
 the ENTITY_REF redaction in `project` (`visible_entity_ids`), resolvers that
 take the row's ctx (`register_resolver(..., with_ctx=True)`) and Visibility
 kinds with non-column hideable fields (`register_visibility_kind(..., fields=)`).
-E0-Jobs.7 adds the Job reads (`get_job`,
+E0-WorldCore.6 adds `require_campaign_for_entity` / `entity_ctx_for_request`
+(an Entity item route that also takes a legacy NPC/Quest id). E0-Jobs.7 adds the Job reads (`get_job`,
 `list_jobs`, `queue_positions`, `job_response`, `visible_result_ref`,
 `register_result_kind`, `result_kinds`) and the `jobs:{id}` stream filter
 (`job_event_stream`, `deliverable_job_event`, `JobEventCheckFailed`).
@@ -46,7 +47,8 @@ from app.access.audience import (
 )
 from app.access.context import (
     ANON_VIEW, MEMBER_VIEW, PREVIEW_HEADER, AsUser, CampaignContext, RoleMap, VaryMiddleware, as_user,
-    audience_ctx, ctx_for, ctx_for_request, require_campaign, require_campaign_for, role_ctx, role_map,
+    audience_ctx, ctx_for, ctx_for_request, entity_ctx_for_request, require_campaign, require_campaign_for,
+    require_campaign_for_entity, role_ctx, role_map,
     role_map_for_request,
     scoped_select_multi,
 )
@@ -225,6 +227,8 @@ __all__ = [
     "registration",
     "require_campaign",
     "require_campaign_for",
+    "require_campaign_for_entity",
+    "entity_ctx_for_request",
     "role_map",
     "role_map_for_request",
     "scoped_get",
