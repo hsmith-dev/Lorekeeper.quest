@@ -162,12 +162,21 @@ jobs:
         working-directory: src/backend
         run: python -m pytest -v tests/test_enum_check_sync.py
 
-      # CI-12 (NFR-5, AD-21), E0-QA.11 scaffold / E0-QA.14 hard gate: EV-4
-      # spoiler-leak suite. Every app route has a probe (tests/ev4/probes/),
-      # a reasoned exemption (tests/ev4/exemptions.yaml) or a line in the
-      # shrink-only tests/ev4/pending_baseline.txt, and resolves to an /api
-      # nginx location; any leak fails. The run prints (and adds to the step
-      # summary) "EV-4: probes= exemptions= pending= leaks=".
+      # CI-12 (NFR-5, AD-21), E0-QA.14: EV-4 spoiler-leak suite, a hard gate.
+      # This step fails when any probe leaks (a canary in a body, header,
+      # SSE event or captured LLM prompt; a forbidden context marker in a
+      # prompt; hidden answering unlike missing; a GM-only change moving
+      # counts, ranking or a chat trace), when any probe case skips (a
+      # missing llm_provider.capture() hook fails too, never skips), when a
+      # route has no probe in tests/ev4/probes/ and no reasoned exemption in
+      # tests/ev4/exemptions.yaml (the message names the route and
+      # tests/ev4/probes/), or when tests/ev4/pending_baseline.txt has any
+      # line (it is empty since E0-QA.13 and must stay so). Every
+      # captured-context check needs a GM positive control and at least one
+      # captured call. The run prints (and adds to the step summary)
+      # "EV-4: probes= exemptions= pending= leaks="; the target is
+      # pending=0 leaks=0. The live-model counterpart is
+      # scripts/eval_spoiler.py (docs/SPOILER_EVAL.md).
       - name: "CI-12 EV-4 spoiler-leak suite"
         working-directory: src/backend
         run: python -m pytest -v tests/ev4

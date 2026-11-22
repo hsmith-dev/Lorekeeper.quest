@@ -284,6 +284,28 @@ def test_new_route_fails_naming_it():
     errors = _check(probes=["GET /api/a"], pending=["GET /api/b/{id}"])
     assert len(errors) == 1
     assert "POST /api/c" in errors[0] and "probe" in errors[0] and "exemption" in errors[0]
+    # It says where the probe goes.
+    assert errors[0].startswith("uncovered route: POST /api/c") and "tests/ev4/probes/" in errors[0]
+
+
+def test_a_skipped_probe_case_fails_the_run(monkeypatch):
+    """EV-4 is a hard gate: a skipped test_probes.py case is a failure reason
+    naming the case; a skip elsewhere is not."""
+    import types
+
+    from tests.ev4 import conftest as ev4_conftest
+
+    monkeypatch.setattr(ev4_conftest, "_skipped_probes", [])
+    monkeypatch.setattr(ev4_conftest, "_summary_errors", ["(summary computed)"])
+    node = "tests/ev4/test_probes.py::test_probe[GET /api/a [x.probe] as player]"
+    for nodeid in (node, "tests/ev4/test_families.py::test_downgrade_suite_empty"):
+        ev4_conftest.pytest_runtest_logreport(types.SimpleNamespace(
+            skipped=True, nodeid=nodeid, longrepr=("f.py", 1, "Skipped: no capture")))
+    ev4_conftest.pytest_runtest_logreport(types.SimpleNamespace(skipped=False, nodeid=node, longrepr=None))
+    with report.scoped():
+        reasons = [r for r in ev4_conftest._failure_reasons() if r != "(summary computed)"]
+    assert len(reasons) == 1, reasons
+    assert node in reasons[0] and "skipped" in reasons[0] and "no capture" in reasons[0]
 
 
 def test_baseline_growth_fails_naming_the_line():

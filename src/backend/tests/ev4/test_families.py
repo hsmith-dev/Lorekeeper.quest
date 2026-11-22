@@ -290,12 +290,76 @@ class _FakeCapture:
         return False
 
 
-async def test_captured_context_skips_without_capture(monkeypatch):
+async def test_captured_context_fails_without_capture(monkeypatch):
+    """EV-4 never skips: a missing capture hook is a failure, not a skip."""
     from app.services import llm_provider
 
     monkeypatch.delattr(llm_provider, "capture", raising=False)
-    with pytest.raises(pytest.skip.Exception, match="capture"):
-        await assert_captured_context_clean(None, lambda: None)
+    ran = []
+    with pytest.raises(RuntimeError, match="capture") as excinfo:
+        await assert_captured_context_clean(None, lambda: ran.append(1))
+    assert not isinstance(excinfo.value, pytest.skip.Exception)
+    assert ran == []
+
+
+async def test_captured_context_forbidden_markers(toy, monkeypatch):
+    from app.services import llm_provider
+
+    sink: list = []
+    monkeypatch.setattr(llm_provider, "capture", lambda: _FakeCapture(sink), raising=False)
+    player = toy.actors["player"]
+    forbidden = ("[This campaign's shorthand glossary:]", "- Notes", "is the lich")
+
+    async def clean_run():
+        sink.append({"messages": [{"role": "system", "content": "- Chronicle: the inn was quiet"},
+                                  {"role": "user", "content": "who is Barnaby?"}]})
+    await assert_captured_context_clean(player, clean_run, forbidden=forbidden, min_calls=1)
+    # A bare str is one marker, not its characters (each of which is in the prompt).
+    await assert_captured_context_clean(player, clean_run, forbidden="Barnaby!")
+
+    async def leaky_run():
+        # Non-ASCII and a newline around the marker: matched as written, not JSON-escaped.
+        sink.append({"messages": [{"role": "system", "content": "Lore — \n[This campaign's shorthand glossary:]\n"}]})
+    with planted():
+        await assert_captured_context_clean(player, leaky_run, forbidden=forbidden)
+
+    sink.clear()
+
+    async def two_markers():
+        sink.append({"messages": [{"role": "system", "content": "- Notes: the innkeeper is the lich"}]})
+    with report.scoped() as scoped, pytest.raises(EV4Leak, match="forbidden marker"):
+        await assert_captured_context_clean(player, two_markers, forbidden=forbidden)
+    assert scoped.leaks == 2  # each marker found counts
+
+
+async def test_captured_context_with_real_capture_catches_forbidden_marker(toy, fake_llm):
+    from app.services.llm_provider import LLMConfig, complete_messages
+
+    async def leaky_run():
+        await complete_messages([{"role": "system", "content": "- Notes: innkeeper is the lich"},
+                                 {"role": "user", "content": "who is Barnaby?"}], LLMConfig(provider="fake"))
+    with report.scoped() as scoped, pytest.raises(EV4Leak):
+        await assert_captured_context_clean(toy.actors["player"], leaky_run, forbidden=("- Notes",), min_calls=1)
+    assert scoped.leaks == 1
+
+
+async def test_captured_context_min_calls(toy, monkeypatch):
+    from app.services import llm_provider
+
+    sink: list = []
+    monkeypatch.setattr(llm_provider, "capture", lambda: _FakeCapture(sink), raising=False)
+    player = toy.actors["player"]
+    with report.scoped() as scoped:
+        with pytest.raises(ValueError, match="made 0 LLM call"):
+            await assert_captured_context_clean(player, lambda: None, min_calls=1, label="no call")
+        assert scoped.leaks == 0  # probe misuse, not a leak
+    assert await assert_captured_context_clean(player, lambda: "ok") == "ok"  # min_calls=0: none needed
+
+    async def one_call():
+        sink.append({"messages": [{"role": "user", "content": "hi"}]})
+    await assert_captured_context_clean(player, one_call, min_calls=1)
+    with pytest.raises(ValueError, match="at least 2"):
+        await assert_captured_context_clean(player, lambda: None, min_calls=2)
 
 
 async def test_captured_context_passes_and_catches(toy, monkeypatch):

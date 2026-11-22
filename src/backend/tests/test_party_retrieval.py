@@ -398,6 +398,37 @@ async def test_own_journals_only_in_gm_campaigns(db, world):
     assert ids(await hybrid_search_own_journals(db, "lantern", roles=roles)) == {in_mine.id}
 
 
+async def test_own_canon_only_in_gm_campaigns(db, world):
+    """E0-QA.14: canon for a chat with no Campaign reads the user's own
+    uploads only in the Campaigns they GM now; an upload in a Campaign where
+    they are a Player (a demoted Co-GM's, say) is never read."""
+    from app.db.models.source import SourceChunk, SourceDocument
+    from app.services.retrieval_service import own_canon_context
+
+    mine = await _campaign(db, world.p, "P's own")
+    question = "Where is the lantern of the north kept?"
+    for cid, title in ((mine, "Mine doc"), (world.a, "A doc")):
+        doc = SourceDocument(id=uuid.uuid4(), user_id=world.p.id, campaign_id=cid, title=title,
+                             filename=f"{title}.txt")
+        db.add(doc)
+        await db.flush()
+        db.add(SourceChunk(id=uuid.uuid4(), source_document_id=doc.id, user_id=world.p.id, campaign_id=cid,
+                           chunk_index=0, content=f"{title}: the lantern is kept in the tower.",
+                           embedding=fake_vector(question)))
+    await db.commit()
+    roles = await role_map(db, world.p)
+    assert roles[mine] == GM and roles[world.a] == "player"
+    context, titles = await own_canon_context(db, question, roles=roles)
+    assert titles == ["Mine doc"] and "A doc" not in (context or "")
+    # The unscoped legacy read (no campaign_ids) still finds both: the filter is what changed.
+    _, legacy = await retrieval_service.source_service.retrieve_canon_context(db, question, world.p.id, None)
+    assert set(legacy) == {"Mine doc", "A doc"}
+    # GM nowhere: nothing.
+    from app.access.context import RoleMap
+
+    assert await own_canon_context(db, question, roles=RoleMap({world.a: "player"}, user_id=world.p.id)) == (None, [])
+
+
 # ── Routes ─────────────────────────────────────────────────────────────────
 
 async def test_journal_search_route(db, world, client):

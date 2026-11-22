@@ -26,7 +26,17 @@ the claim skips it.
 **Retry** only a `failed` Job of a still-registered kind: the same row goes
 back to `queued` with `attempts` 0 and its run state and error cleared, and
 is pushed after commit through the outbox (`record_pending`). Its
-idempotency key must be free: an active Job holding it now is a 409. When
+idempotency key must be free of Jobs the ctx can see: an active Job holding
+it that `scoped_select(Job, ctx)` returns is a 409. A holder the ctx cannot
+see (another starter's Job, or one in another Campaign) must not be revealed
+(E0-QA.14, EV-4): the retry answers exactly like a free key, but the row
+takes a per-retry key `{key}#retry:{campaign}:{starter}` (the partial unique index stays
+satisfied), `depends_on_job_id` = the holder (locked FOR SHARE), stays
+`queued` and is not pushed; the outbox releases it when the holder ends
+(the work runs again then: kinds are idempotent on content-derived keys).
+`queue_position` counts only visible Jobs and `depends_on_job_id` is never
+serialised, so the wait looks like a busy queue. A lost race on the index
+re-runs the check. When
 the starter retries their own Job, the row takes their current grant's
 `access_epoch` (a Job that failed `permission_changed` after a demote and a
 re-promote can run again); `ctx_kind` and `ctx_user_id` stay, so the worker
@@ -43,18 +53,20 @@ import sqlalchemy as sa
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.access import can_write, get_job
+from app.access import can_write, get_job, scoped_select
 from app.access.context import CampaignContext
 from app.access.policy import not_found
 from app.db.models.job import ACTIVE_STATUSES, Job
 from app.domain.enums import JobQueue, JobStatus
 from app.jobs import outbox
+from app.jobs.enqueue import RETRY_KEY_MARK, _like_escape  # a held retry's `{key}#retry:{campaign}:{starter}`
 from app.jobs.registry import get_kind
 
 ONLY_QUEUED = "Only queued Jobs can be cancelled"
 ONLY_FAILED = "Only failed Jobs can be retried"
 UNKNOWN_KIND = "This kind of job is no longer supported"
 KEY_IN_USE = "The same work is already queued or running"
+_RETRY_ATTEMPTS = 3
 
 
 class JobConflict(Exception):
@@ -89,11 +101,64 @@ async def cancel_job(db: AsyncSession, ctx: CampaignContext, job_id: Any) -> Job
     return job
 
 
+def _held_prefix(base: str, campaign_id: uuid.UUID) -> str:
+    return f"{base}{RETRY_KEY_MARK}{campaign_id}:"
+
+
+def _base_key(job: Job) -> str:
+    """The Job's idempotency key without the per-retry suffix
+    (`{key}#retry:{campaign}:{starter}`) a hidden-holder retry gave it.
+    `enqueue` refuses keys holding RETRY_KEY_MARK, so only a held retry has it."""
+    key = job.idempotency_key
+    cut = key.rfind(f"{RETRY_KEY_MARK}{job.campaign_id}:")
+    return key[:cut] if cut >= 0 else key
+
+
+def _held_key(base: str, job: Job, ctx: CampaignContext) -> str:
+    """The key a retry held behind a hidden Job takes: one per (Campaign,
+    starter, original key); a Job with no starter left shares `none` (only a
+    GM, who sees every Job of the Campaign, can retry it). The partial
+    unique index on active keys then allows one held copy each, so a second
+    retry (sequential or racing) by the starter or a GM, who can both see
+    that copy, finds or collides with it and answers 409 instead of queueing
+    the work twice. The Campaign in the key keeps the same starter's held
+    copies in two Campaigns from colliding (that 409 would reveal the
+    hidden holder)."""
+    return f"{_held_prefix(base, job.campaign_id)}{job.ctx_user_id or 'none'}"
+
+
+async def _key_holders(db: AsyncSession, ctx: CampaignContext, job: Job,
+                       key: str) -> tuple[uuid.UUID | None, bool]:
+    """(a hidden active Job holding `key` to wait behind, whether ctx can see
+    any active holder). Holders are the active Jobs other than `job` whose
+    key is `key` (in any Campaign: the index is global) or a held retry's
+    `{key}#retry:{job's Campaign}:...`; they are locked
+    FOR SHARE (a worker finishing one waits for this transaction, so its
+    after-commit release sees a dependent written here). The exact-key
+    holder is preferred to wait behind. (None, False) when the key is free."""
+    exact = Job.idempotency_key == key
+    rows = (await db.execute(
+        sa.select(Job.id, exact.label("exact")).where(
+            sa.or_(exact, Job.idempotency_key.like(f"{_like_escape(_held_prefix(key, job.campaign_id))}%",
+                                                   escape="\\")),
+            Job.id != job.id, Job.status.in_([s.value for s in ACTIVE_STATUSES]))
+        .order_by(sa.case((exact, 0), else_=1), Job.created_at, Job.id)
+        .with_for_update(read=True)
+    )).all()
+    if not rows:
+        return None, False
+    ids = [r.id for r in rows]
+    visible = await db.scalar(scoped_select(Job, ctx).where(Job.id.in_(ids)).with_only_columns(Job.id).limit(1))
+    return ids[0], visible is not None
+
+
 async def retry_job(db: AsyncSession, ctx: CampaignContext, job_id: Any) -> uuid.UUID:
     """Put a failed Job back in `queued` (same row, `attempts` 0) and commit;
     it is pushed after commit. JobConflict (nothing written) when the Job
     is not failed, its kind is no longer registered, or another active Job
-    holds its idempotency key."""
+    the ctx can see holds its idempotency key. A holder the ctx cannot see
+    answers the same as a free key: the row waits `queued` behind it,
+    unpushed, on a per-retry key (module docstring)."""
     _require_writer(ctx)
     job = await get_job(db, ctx, job_id, for_update=True)
     can_write(ctx, job)  # the single write gate: a GM, or the Job's starter
@@ -103,35 +168,54 @@ async def retry_job(db: AsyncSession, ctx: CampaignContext, job_id: Any) -> uuid
         kind = get_kind(job.kind)
     except ValueError:
         raise JobConflict(UNKNOWN_KIND) from None
-    holder = await db.scalar(
-        sa.select(Job.id).where(Job.idempotency_key == job.idempotency_key, Job.id != job.id,
-                                Job.status.in_([s.value for s in ACTIVE_STATUSES])).limit(1)
-    )
-    if holder is not None:
+    job_pk, base = job.id, _base_key(job)
+    for _ in range(_RETRY_ATTEMPTS):
+        hidden_holder, seen = await _key_holders(db, ctx, job, base)
+        if seen:
+            raise JobConflict(KEY_IN_USE)  # the ctx can see a Job holding the key
+        try:
+            # A concurrent enqueue may take the key between the check and here:
+            # the partial unique index decides. The savepoint opens BEFORE the
+            # row changes (begin_nested flushes pending changes first, so a
+            # change made earlier would fail outside it and break the whole
+            # transaction); a conflict rolls back only the savepoint, writes
+            # nothing and leaves the session usable.
+            async with db.begin_nested():
+                job.status = JobStatus.QUEUED
+                job.queue = kind.queue
+                if ctx.user_id == job.ctx_user_id:
+                    job.access_epoch = ctx.access_epoch  # the starter's grant now
+                job.attempts = 0
+                job.progress = job.stage = job.eta_seconds = None
+                job.error_code = job.error_message = None
+                job.result_ref = None
+                job.worker_id = job.heartbeat_at = None
+                job.started_at = job.finished_at = job.next_run_at = None
+                if hidden_holder is None:
+                    if job.idempotency_key != base:
+                        job.depends_on_job_id = None  # the hold an earlier retry set is over
+                    job.idempotency_key = base
+                else:
+                    # Held behind a Job the ctx cannot see: a key of its own
+                    # (the partial unique index holds), released by the
+                    # outbox when the holder ends. Answered like any retry.
+                    job.idempotency_key = _held_key(base, job, ctx)
+                    job.depends_on_job_id = hidden_holder
+                await db.flush()
+        except IntegrityError as exc:
+            if "uq_jobs_idempotency_key_active" not in str(exc.orig):
+                raise
+            # Lost a race on the key: reload the row (the savepoint's rollback
+            # expired it) and run the check again.
+            job = await get_job(db, ctx, job_pk, for_update=True)
+            continue
+        break
+    else:
         raise JobConflict(KEY_IN_USE)
-    try:
-        # A concurrent enqueue may take the key between the check and here:
-        # the partial unique index decides. The savepoint opens BEFORE the
-        # row changes (begin_nested flushes pending changes first, so a
-        # change made earlier would fail outside it and break the whole
-        # transaction); a conflict rolls back only the savepoint, writes
-        # nothing and leaves the session usable.
-        async with db.begin_nested():
-            job.status = JobStatus.QUEUED
-            job.queue = kind.queue
-            if ctx.user_id == job.ctx_user_id:
-                job.access_epoch = ctx.access_epoch  # the starter's grant now
-            job.attempts = 0
-            job.progress = job.stage = job.eta_seconds = None
-            job.error_code = job.error_message = None
-            job.result_ref = None
-            job.worker_id = job.heartbeat_at = None
-            job.started_at = job.finished_at = job.next_run_at = None
-            await db.flush()
-    except IntegrityError as exc:
-        if "uq_jobs_idempotency_key_active" in str(exc.orig):
-            raise JobConflict(KEY_IN_USE) from None
-        raise
+    if hidden_holder is not None:
+        job_id = job.id
+        await db.commit()  # not pushed: queued until the holder ends
+        return job_id
     outbox.record_pending(db.sync_session, job.id, kind.queue, kind.name)
     job_id = job.id
     await db.commit()

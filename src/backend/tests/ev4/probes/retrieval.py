@@ -1,9 +1,8 @@
 """EV-4 probes for Party-only search and retrieval (E0-Access.7).
 
-Journal search, NPC/Quest entry lists, the Chronicler (blocking and
-streaming: sources, candidates, citations and the trace, plus the replay of
-a session holding turns the actor may no longer see, E0-Access.8) and
-reindex. Every probe first indexes the seeded entries the way
+Journal search, NPC/Quest entry lists and reindex, plus the index helpers
+the Chronicler probes (POST /api/chat/ and /stream, in chat.py since
+E0-QA.14) build on. Every probe first indexes the seeded entries the way
 the write paths do (narrative_tsv + embedding over Shorthand + Narrative,
 then `index_party_fields`), with deterministic fake embeddings, so the GM
 and Party columns are both populated and a non-GM search has something to
@@ -13,22 +12,16 @@ Private-to-the-Owner entry whose Narratives contain it.
 """
 from __future__ import annotations
 
-import json
 import uuid
 from contextlib import contextmanager
 
 import sqlalchemy as sa
 
-from tests.ev4.families import (
-    assert_captured_context_clean, assert_counts_and_ranking_unchanged, assert_hidden_equals_missing, assert_no_canary,
-)
+from tests.ev4.families import assert_counts_and_ranking_unchanged, assert_hidden_equals_missing, assert_no_canary
 from tests.ev4.fixtures import mint_canary
-from tests.ev4.probes._support import add_chat_session, assert_same_answer, redacted_messages
 from tests.ev4.registry import ev4_probe
-from tests.ev4.report import record_leak
 
 MISSING_ID = "00000000-0000-4000-8000-000000000000"
-INN_QUESTION = "What happened at the Drowsy Dragon with the innkeeper?"
 
 
 @contextmanager
@@ -115,35 +108,6 @@ async def use_fake_llm(ev4, actor) -> None:
     await ev4.db.commit()
 
 
-def _trace(body: dict) -> list:
-    """What retrieval decided, as the actor sees it: candidates, sources and
-    citations (ids, order, count)."""
-    retrieval = body.get("retrieval") or {}
-    return [
-        [(c["id"], c["vector_distance"], c["lexical_rank"], c["passed_gate"], c["used"])
-         for c in retrieval.get("candidates", [])],
-        [s["id"] for s in body.get("sources", [])],
-        body.get("canon_sources"),
-        retrieval.get("system_prompt"),
-        [(c["ref"]["kind"], c["ref"]["id"], c["ref"].get("field"), c["title"], c["quote"])
-         for c in body.get("citations", [])],
-    ]
-
-
-def _sse_meta(text: str) -> dict:
-    lines = text.splitlines()
-    for i, line in enumerate(lines):
-        if line == "event: meta" and i + 1 < len(lines) and lines[i + 1].startswith("data: "):
-            return json.loads(lines[i + 1][len("data: "):])
-    raise ValueError(f"no meta event in the stream: {text[:200]!r}")
-
-
-def _check_trace_unchanged(actor, url: str, before: list, after: list) -> None:
-    if before != after:
-        record_leak(f"EV-4 leak: a GM-only change moved {actor.name}'s retrieval trace at {url}",
-                    [f"before {before!r:.300}", f"after {after!r:.300}"])
-
-
 # ── Journal search ─────────────────────────────────────────────────────────
 
 @ev4_probe("GET", "/api/journals/")
@@ -193,56 +157,6 @@ async def probe_quest_entries(ev4, actor):
     quest_id = ev4.a.ids["quests"][0]
     await _entity_entries_probe(ev4, actor, f"/api/quests/{quest_id}/entries", "Find the missing caravan",
                                 f"/api/quests/{MISSING_ID}/entries")
-
-
-# ── The Chronicler ─────────────────────────────────────────────────────────
-
-async def _chat_probe(ev4, actor, url: str, trace_of) -> None:
-    a = ev4.a.campaign_id
-    await use_fake_llm(ev4, actor)
-    with fake_embeddings():
-        await index_seeded(ev4)
-        bodies = [{"message": INN_QUESTION, "campaign_id": str(a)}, {"message": INN_QUESTION}]
-        if ev4.b is not None:
-            bodies.append({"message": INN_QUESTION, "campaign_id": str(ev4.b.campaign_id)})
-        for body in bodies:
-            r = await assert_captured_context_clean(actor, lambda: actor.post(url, json=body), label=f"{url} {body}")
-            assert_no_canary(actor, r)
-        if actor.user_id is None:
-            return
-        body = bodies[0]
-        r = await actor.post(url, json=body)
-        assert r.status_code == 200, r.text
-        before = trace_of(r)
-        assert any(row[4] for row in before[0]), before  # non-vacuous: the inn entry is used
-        assert before[4], before  # ... and cited
-        await gm_only_change(ev4, "innkeeper")
-        r = await assert_captured_context_clean(actor, lambda: actor.post(url, json=body), label=f"{url} after")
-        assert_no_canary(actor, r)
-        _check_trace_unchanged(actor, url, before, trace_of(r))
-
-        # A session of the actor's in A holding turns they may no longer see
-        # (a reply citing a GM-only entry, legacy turns): none of it goes back
-        # into the prompt (nor the query rewrite), and the reply is clean.
-        sid = await add_chat_session(ev4, actor.user_id, await redacted_messages(ev4))
-        replay = {**body, "session_id": str(sid)}
-        r = await assert_captured_context_clean(actor, lambda: actor.post(url, json=replay), label=f"{url} replay")
-        assert_no_canary(actor, r)
-        assert r.status_code == 200, r.text
-        # An archived session is never posted to: the one 404, as for a missing one.
-        archived = await add_chat_session(ev4, actor.user_id, await redacted_messages(ev4), archived=True)
-        assert_same_answer(actor, await actor.post(url, json={**body, "session_id": str(archived)}),
-                           await actor.post(url, json={**body, "session_id": MISSING_ID}), f"{url} archived session")
-
-
-@ev4_probe("POST", "/api/chat/")
-async def probe_chat(ev4, actor):
-    await _chat_probe(ev4, actor, "/api/chat/", lambda r: _trace(r.json()))
-
-
-@ev4_probe("POST", "/api/chat/stream")
-async def probe_chat_stream(ev4, actor):
-    await _chat_probe(ev4, actor, "/api/chat/stream", lambda r: _trace(_sse_meta(r.text)))
 
 
 # ── Reindex ────────────────────────────────────────────────────────────────
