@@ -356,16 +356,14 @@ _LEGACY_KINDS = ("npc", "quest")
 _require_entity_cache: dict[tuple[str, str, str | None, bool], Any] = {}
 
 
-async def _entity_campaign(db: AsyncSession, row_id: uuid.UUID, legacy: str | None,
-                           legacy_only: bool = False) -> uuid.UUID | None:
-    """The Campaign of the Entity whose id (unless `legacy_only`) or
-    `legacy_<legacy>_id` is `row_id`; an Entity-id match wins."""
+async def _entity_campaign(db: AsyncSession, row_id: uuid.UUID, legacy: str | None) -> uuid.UUID | None:
+    """The Campaign of the Entity whose id or `legacy_<legacy>_id` is
+    `row_id`; an Entity-id match wins."""
     from app.db.models.entity import Entity  # the access layer may read any table
 
-    if not legacy_only:
-        found = (await db.execute(sa.select(Entity.campaign_id).where(Entity.id == row_id))).scalar_one_or_none()
-        if found is not None:
-            return found
+    found = (await db.execute(sa.select(Entity.campaign_id).where(Entity.id == row_id))).scalar_one_or_none()
+    if found is not None:
+        return found
     if legacy is None:
         return None
     column = Entity.legacy_npc_id if legacy == "npc" else Entity.legacy_quest_id
@@ -374,10 +372,10 @@ async def _entity_campaign(db: AsyncSession, row_id: uuid.UUID, legacy: str | No
 
 async def entity_ctx_for_request(request: Request, db: AsyncSession, user: User | uuid.UUID, row_id: Any,
                                  min_role: str = "player", *, legacy: str | None = None,
-                                 legacy_only: bool = False, preview: bool = True) -> CampaignContext:
+                                 preview: bool = True) -> CampaignContext:
     """The caller's ctx in the Campaign of the Entity `row_id` names (its
-    Entity id, or with `legacy` its `legacy_npc_id`/`legacy_quest_id`; with
-    `legacy_only` only the legacy id), as `require_campaign_for` builds it:
+    Entity id, or with `legacy` its `legacy_npc_id`/`legacy_quest_id`), as
+    `require_campaign_for` builds it:
     a non-UUID, no such Entity and too low a Role are the one `not_found()`;
     the preview header narrows."""
     min_role = check_min_role(min_role)
@@ -386,7 +384,7 @@ async def entity_ctx_for_request(request: Request, db: AsyncSession, user: User 
     parsed = row_id if isinstance(row_id, uuid.UUID) else _parse_uuid(row_id)
     if parsed is None:
         not_found()
-    campaign_id = await _entity_campaign(db, parsed, legacy, legacy_only)
+    campaign_id = await _entity_campaign(db, parsed, legacy)
     if campaign_id is None:
         not_found()
     ctx = await _resolve(db, _user_id(user), campaign_id)

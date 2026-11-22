@@ -244,12 +244,18 @@ async def resync_entity(db: AsyncSession, ctx: CampaignContext, entity_id: uuid.
     for name, legacy, legacy_name, shown in apply:
         try:
             await apply_change(db, ctx, _change(entity.id, name, legacy))
-            if kind == "quest" and name == "status" and legacy == "completed":
-                await apply_change(db, ctx, {"op": "update_field", "entity_id": entity.id,
-                                             "field": "attributes.completed_at", "value": _iso(source.updated_at)})
         except CanonChangeError as exc:
             logger.warning("legacy resync: %s %s field %s not applied (%s)", page, entity.id, name, exc.code)
             kept.append(f"{legacy_name} = {shown}")
+            continue
+        if kind == "quest" and name == "status" and legacy == "completed":
+            completed_at = _iso(source.updated_at)
+            try:
+                await apply_change(db, ctx, {"op": "update_field", "entity_id": entity.id,
+                                             "field": "attributes.completed_at", "value": completed_at})
+            except CanonChangeError as exc:
+                logger.warning("legacy resync: Quest %s completed_at not applied (%s)", entity.id, exc.code)
+                kept.append(f"completed_at = {_quote(completed_at)}")
     if kept:
         note = f"Old {page} page edit not applied (World version kept): " + "; ".join(kept)
         await _note(db, ctx, entity.id, note, await _history(db, ctx, entity.id))

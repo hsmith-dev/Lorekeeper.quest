@@ -55,13 +55,16 @@ def live_entities(ctx: CampaignContext, kind: str) -> sa.Select:
         Entity.type.in_(_types(kind)), Entity.deleted_at.is_(None), Entity.merged_into_id.is_(None))
 
 
-async def legacy_entity(db: AsyncSession, ctx: CampaignContext, row_id: uuid.UUID, kind: str) -> Entity:
+async def legacy_entity(db: AsyncSession, ctx: CampaignContext, row_id: uuid.UUID, kind: str, *,
+                        lock: bool = False) -> Entity:
     """The live NPC/Quest Entity `row_id` names for ctx: its Entity id, or its
-    legacy id (an Entity-id match wins); otherwise the one `not_found()`."""
+    legacy id (an Entity-id match wins); otherwise the one `not_found()`.
+    `lock` takes the row `FOR UPDATE` (a write computing its changes from it)."""
     legacy = Entity.legacy_npc_id if kind == "npc" else Entity.legacy_quest_id
-    rows = list((await db.execute(
-        live_entities(ctx, kind).where(sa.or_(Entity.id == row_id, legacy == row_id))
-        .execution_options(populate_existing=True))).scalars().all())
+    stmt = live_entities(ctx, kind).where(sa.or_(Entity.id == row_id, legacy == row_id))
+    if lock:
+        stmt = stmt.with_for_update()
+    rows = list((await db.execute(stmt.execution_options(populate_existing=True))).scalars().all())
     if not rows:
         not_found()
     return next((e for e in rows if e.id == row_id), rows[0])

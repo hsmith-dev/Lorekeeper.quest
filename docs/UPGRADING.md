@@ -46,7 +46,10 @@ The NPC and Quest pages, and old NPC/Quest links, now read and write your
 World: an NPC is a Character or Faction, a Quest is a Quest. An edit on
 either page shows up in World, and an Entity created in World shows up on
 the old page. Locations and Items appear only in World. Players see only
-what you have published.
+what you have published. An NPC's or Quest's entries list now shows only
+entries with a confirmed Mention (suggested Mentions appear once the
+suggestions backfill has run and you confirm them), and deleting on the old
+pages is a soft delete you can revert from the Entity's history.
 
 If you upgraded to the release with the F3-world copy and kept using the old
 pages, the edits you made there afterwards are copied into World once, in

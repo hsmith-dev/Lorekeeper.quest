@@ -83,6 +83,7 @@ async def probe_update_npc(ev4, actor):
     ids = await _hidden_ids(ev4)
     if is_gm_of_a(ev4, actor):
         r = await actor.put(f"/api/npcs/{ids[0]}", json={"name": "Renamed", "status": "dead"})
+        assert_no_canary(actor, r)
         assert r.status_code == 200 and r.json()["id"] == str(ids[0]), r.text
         assert (r.json()["name"], r.json()["status"]) == ("Renamed", "dead")
         return
@@ -97,7 +98,9 @@ async def probe_update_npc(ev4, actor):
 async def probe_delete_npc(ev4, actor):
     ids = await _hidden_ids(ev4)
     if is_gm_of_a(ev4, actor):
-        assert (await actor.delete(f"/api/npcs/{ids[0]}")).status_code == 204
+        r = await actor.delete(f"/api/npcs/{ids[0]}")
+        assert_no_canary(actor, r)
+        assert r.status_code == 204, r.text
         assert (await actor.get(f"/api/npcs/{ids[0]}")).status_code == 404
         return
     before = await entity_rows(ev4)
@@ -112,6 +115,7 @@ async def probe_create_npc(ev4, actor):
     body = {"name": "Spy", "notes": "secret", "role": "faction", "status": "dead"}
     if is_gm_of_a(ev4, actor):
         r = await actor.post("/api/npcs/", json={**body, "campaign_id": str(a)})
+        assert_no_canary(actor, r)
         assert r.status_code == 201, r.text
         assert (r.json()["role"], r.json()["status"], r.json()["notes"]) == ("faction", "dead", "secret")
         return

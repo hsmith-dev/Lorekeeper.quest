@@ -108,7 +108,8 @@ async def update_npc(
     ctx: CampaignContext = Depends(_npc_gm),
     db: AsyncSession = Depends(get_db),
 ):
-    entity = await legacy.legacy_entity(db, ctx, npc_id, KIND)
+    # Locked: the skip-unchanged writes are computed from this row (held to the commit in _write).
+    entity = await legacy.legacy_entity(db, ctx, npc_id, KIND, lock=True)
     entity_id = entity.id
     fields = body.model_dump(exclude_none=True, mode="json")
 

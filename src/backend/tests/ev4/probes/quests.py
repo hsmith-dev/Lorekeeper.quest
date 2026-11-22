@@ -81,6 +81,7 @@ async def probe_update_quest(ev4, actor):
     ids = await _hidden_ids(ev4)
     if is_gm_of_a(ev4, actor):
         r = await actor.put(f"/api/quests/{ids[0]}", json={"title": "Renamed", "status": "completed"})
+        assert_no_canary(actor, r)
         assert r.status_code == 200 and r.json()["id"] == str(ids[0]), r.text
         assert (r.json()["title"], r.json()["status"]) == ("Renamed", "completed")
         return
@@ -95,7 +96,9 @@ async def probe_update_quest(ev4, actor):
 async def probe_delete_quest(ev4, actor):
     ids = await _hidden_ids(ev4)
     if is_gm_of_a(ev4, actor):
-        assert (await actor.delete(f"/api/quests/{ids[0]}")).status_code == 204
+        r = await actor.delete(f"/api/quests/{ids[0]}")
+        assert_no_canary(actor, r)
+        assert r.status_code == 204, r.text
         assert (await actor.get(f"/api/quests/{ids[0]}")).status_code == 404
         return
     before = await entity_rows(ev4)
@@ -110,6 +113,7 @@ async def probe_create_quest(ev4, actor):
     body = {"title": "Heist", "notes": "secret"}
     if is_gm_of_a(ev4, actor):
         r = await actor.post("/api/quests/", json={**body, "campaign_id": str(a)})
+        assert_no_canary(actor, r)
         assert r.status_code == 201 and r.json()["status"] == "active", r.text
         return
     before = await entity_rows(ev4)

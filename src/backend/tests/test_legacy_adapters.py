@@ -79,7 +79,8 @@ async def test_gm_list_shows_copied_and_new_npcs_in_the_legacy_shape(ev4):
     assert by_name["Barnaby"]["id"] == str(legacy_id) and by_name["Aldric"]["id"] == str(new)
     assert (by_name["Aldric"]["role"], by_name["Aldric"]["status"]) == ("npc", "unknown")  # missing -> unknown
     assert (by_name["Ashen Hand"]["role"], by_name["Ashen Hand"]["status"]) == ("faction", "dead")
-    assert by_name["Barnaby"]["notes"] == ev4.a.canary("NPCNOTES").token
+    seeded_notes = (await ev4.db.get(NpcEntry, legacy_id)).notes  # "<canary> secretly the lich"
+    assert by_name["Barnaby"]["notes"] == seeded_notes and ev4.a.canary("NPCNOTES").token in seeded_notes
     # Either id reaches the copied NPC, and both answer the legacy id.
     for any_id in (legacy_id, lw.legacy_entity_id("npc", legacy_id)):
         r = await gm.get(f"/api/npcs/{any_id}")
@@ -271,3 +272,56 @@ async def test_generate_and_extract_read_entities(ev4, monkeypatch):
     monkeypatch.setattr(npc_routes, "extract_tags", tags)
     r = await gm.post(f"/api/npcs/extract?campaign_id={ev4.a.campaign_id}")
     assert r.status_code == 200 and r.json() == {"suggestions": ["Wren"]}, r.text
+
+
+async def test_quest_generate_reads_the_entity(ev4, monkeypatch):
+    from app.api.routes import quests as quest_routes
+    from tests.ev4.probes.retrieval import use_fake_llm
+
+    gm = await ev4.actor("gm_owner")
+    await use_fake_llm(ev4, gm)
+    legacy_id = await world_quest(ev4)
+    seen = []
+
+    async def describe(title, entries, campaign_name, genre, *, config):
+        seen.append(title)
+        return "A quest."
+
+    monkeypatch.setattr(quest_routes, "generate_quest_description", describe)
+    for any_id in (legacy_id, lw.legacy_entity_id("quest", legacy_id)):
+        r = await gm.post(f"/api/quests/{any_id}/generate")
+        assert r.status_code == 200 and r.json() == {"description": "A quest."}, r.text
+    assert seen == ["Find the missing caravan"] * 2
+
+
+async def test_session_plan_draft_reads_live_entities(ev4, monkeypatch):
+    from app.api.routes import session_plans as plan_routes
+    from tests.ev4.probes.retrieval import use_fake_llm
+
+    gm = await ev4.actor("gm_owner")
+    await use_fake_llm(ev4, gm)
+    await _create(ev4, type="quest", name="Open quest")
+    await _create(ev4, type="quest", name="Done quest", status="completed")
+    gone = await _create(ev4, type="character", name="Gone")
+    absorbed = await _create(ev4, type="character", name="Old Mira")
+    survivor = await _create(ev4, type="character", name="Mira")
+    await _create(ev4, type="location", name="Bree")
+    await _create(ev4, type="faction", name="Ashen Hand")
+    ctx = await _gm(ev4)
+    await apply_change(ev4.db, ctx, {"op": "delete_entity", "entity_id": gone})
+    await apply_change(ev4.db, ctx.as_system("merge"), {"op": "merge", "entity_id": absorbed,
+                                                       "survivor_id": survivor})
+    await ev4.db.commit()
+    seen = {}
+
+    async def plan(**kwargs):
+        seen.update(kwargs)
+        return "A plan."
+
+    monkeypatch.setattr(plan_routes, "generate_session_plan", plan)
+    r = await gm.post("/api/session-plans/generate", json={"campaign_id": str(ev4.a.campaign_id)})
+    assert r.status_code == 200 and r.json() == {"content": "A plan."}, r.text
+    # Live Quests in `active` and live Characters/Factions only; the frozen
+    # legacy rows (the seeded Barnaby and caravan) are not read.
+    assert seen["open_quests"] == ["Open quest"]
+    assert sorted(seen["npcs"]) == ["Ashen Hand", "Mira"]

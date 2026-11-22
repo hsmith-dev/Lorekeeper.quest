@@ -452,6 +452,8 @@ PARTY_READ_ROUTES = {
     "GET /api/entities/", "GET /api/entities/{entity_id}", "GET /api/entities/{entity_id}/history",
     # E0-WorldCore.7.
     "GET /api/entities/mentions", "GET /api/entities/{entity_id}/mentions",
+    # E0-WorldCore.6: the old-link resolver.
+    "GET /api/entities/legacy/{legacy_type}/{legacy_id}",
 }
 
 

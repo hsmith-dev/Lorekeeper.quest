@@ -107,7 +107,8 @@ async def update_quest(
     ctx: CampaignContext = Depends(_quest_gm),
     db: AsyncSession = Depends(get_db),
 ):
-    entity = await legacy.legacy_entity(db, ctx, quest_id, KIND)
+    # Locked: the skip-unchanged writes are computed from this row (held to the commit in _write).
+    entity = await legacy.legacy_entity(db, ctx, quest_id, KIND, lock=True)
     entity_id = entity.id
     fields = body.model_dump(exclude_none=True, mode="json")
 

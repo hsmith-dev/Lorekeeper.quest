@@ -307,6 +307,8 @@ async def test_a_second_run_writes_nothing(db):
 
 async def test_a_crash_mid_campaign_resumes_without_duplicates(db, monkeypatch):
     owner, campaign = await _messy_campaign(db)
+    # Plain ids: the rollback after the crash expires the ORM rows (no lazy loads in async).
+    owner, campaign = SimpleNamespace(id=owner.id), SimpleNamespace(id=campaign.id)
     real = legacy_resync.apply_change
     calls = {"n": 0}
 
