@@ -233,17 +233,12 @@ async def test_player_gm_routes_are_404_before_llm_config_or_meter(client, db, e
 
 
 async def test_co_gm_still_reaches_the_gm_routes(client, ev4, monkeypatch):
-    from app.api.routes import journals as journal_routes
     from app.services import journal_service
     from tests.ev4.probes.retrieval import use_fake_llm
-
-    async def no_dup(*_args):
-        return False
 
     async def noop(*_args):
         return None
 
-    monkeypatch.setattr(journal_routes, "check_hash", no_dup)
     monkeypatch.setattr(journal_service, "store_hash", noop)
     monkeypatch.setattr(journal_service, "extract_tags", AsyncMock(return_value=[]))
     monkeypatch.setattr(journal_service.embedding_service, "embed", AsyncMock(return_value=None))

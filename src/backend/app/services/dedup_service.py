@@ -6,9 +6,9 @@ DEDUP_TTL = 86400  # 24 hours
 
 
 def _key(campaign_id: uuid.UUID | str, user_id: uuid.UUID | str, entry_hash: str) -> str:
-    # Per (Campaign, author), like the DB's uq_journal_entries_campaign_user_entry_hash
-    # (AR-17): the same notes saved by someone else, or in another Campaign,
-    # are not a duplicate, and a 409 never reveals another author's entry.
+    # Per (Campaign, author), like ix_journal_entries_campaign_user_entry_hash
+    # (AR-17). Never decides a 409 (E0-Journal.2): it cannot tell an entry the
+    # writer can see from a hidden one; journal_service.visible_duplicate does.
     return f"dedup:{campaign_id}:{user_id}:{entry_hash}"
 
 

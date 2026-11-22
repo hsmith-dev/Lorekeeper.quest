@@ -29,8 +29,15 @@ never import app.jobs, so the enqueue lives in the hook layer.
 
 `entry_hash = sha256(shorthand.strip().lower())` (utils/hashNotes.ts computes
 the same value for the client's own dedup UX), always computed here; a hash a
-client sends is ignored. A collision with another of the author's entries in
-the Campaign (the Valkey dedup key, else the unique constraint) is a 409.
+client sends is ignored. A collision is a 409 only with another of the
+author's entries in the Campaign *that the writer can see* (`scoped_select`):
+a duplicate the writer cannot see (an entry hidden from its own author, e.g.
+a demoted GM's GM-only entry) is never revealed, and the save goes through
+(privacy first; the hash index is not unique since revision 7d1e2a9c4b6f).
+Concurrent saves of one (Campaign, author, hash) are serialized by a
+transaction advisory lock, so two visible duplicates cannot race in. The
+Valkey key `dedup:{campaign}:{user}:{hash}` is still written and dropped,
+but never decides a 409 (it cannot tell visible from hidden).
 
 The create / update / delete writers commit, emit their hook event (refs
 `{journal_id, kind, previous_entry_hash, entry_hash, changed_fields}`;
@@ -49,7 +56,6 @@ from typing import Any
 from fastapi import HTTPException
 from sqlalchemy import delete, func, or_, select, true, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -63,7 +69,7 @@ from app.domain.enums import EntryKind, TagSourceField, Visibility
 from app.schemas.sources import RecordRef
 from app.services import embedding_service
 from app.services.ai_service import generate_narrative
-from app.services.dedup_service import check_hash, drop_hash, store_hash
+from app.services.dedup_service import drop_hash, store_hash
 from app.services.llm_provider import LLMConfig
 from app.services.nlp_service import ExtractedTag, extract_tags
 from app.services.shorthand_service import get_glossary
@@ -74,7 +80,6 @@ logger = logging.getLogger(__name__)
 # The fallback Job (registered in app/jobs/registry.py; enqueued by app/hooks/journal.py).
 REEMBED_KIND = "journal.reembed"
 DUPLICATE_DETAIL = "Duplicate entry detected"
-_UNIQUE_HASH = "uq_journal_entries_campaign_user_entry_hash"
 _TAG_NAME_MAX = 200
 TEXT_FIELDS = frozenset({"shorthand", "narrative"})
 # What update_journal_entry accepts (`notes` is the API's name for `shorthand`).
@@ -85,6 +90,13 @@ _ENTRY_TAGS = selectinload(JournalEntry.tags).selectinload(Tag.custom_category)
 # `embed=`: True (embedding_service.embed_many), False (never call ml; the
 # vectors stay NULL), or any `async (texts) -> vectors` (the demo seed's).
 EmbedMany = Callable[[list[str]], Awaitable[list[list[float]]]]
+
+
+class EntryTextChanged(Exception):
+    """The entry's stored text changed while its index was being computed
+    (another writer committed in between); nothing was written. The reembed
+    Job retries (and re-reads the text); /reindex skips the row, whose own
+    writer recomputed it."""
 
 
 def compute_entry_hash(shorthand: str) -> str:
@@ -106,22 +118,32 @@ def _visibility_kind(entry: JournalEntry) -> str:
     return "player_journal" if _kind_value(entry) == EntryKind.PLAYER.value else "journal"
 
 
-def _is_duplicate(exc: IntegrityError) -> bool:
-    return _UNIQUE_HASH in str(exc.orig)
-
-
 def _duplicate() -> HTTPException:
     return HTTPException(status_code=409, detail=DUPLICATE_DETAIL)
 
 
-# ── Dedup store (Valkey), best effort ──────────────────────────────────────
+# ── Duplicates: only ones the writer can see ───────────────────────────────
 
-async def _dedup_has(campaign_id: uuid.UUID, user_id: uuid.UUID, entry_hash: str) -> bool:
-    try:
-        return await check_hash(campaign_id, user_id, entry_hash)
-    except Exception as exc:  # noqa: BLE001 -- the unique constraint still catches it
-        logger.warning("dedup check skipped, Valkey failed: %s", type(exc).__name__)
-        return False
+async def _lock_hash(db: AsyncSession, campaign_id: uuid.UUID, user_id: uuid.UUID, entry_hash: str) -> None:
+    """Serialize saves of one (Campaign, author, hash) until the transaction ends."""
+    key = f"journal_hash:{campaign_id}:{user_id}:{entry_hash}"
+    await db.execute(select(func.pg_advisory_xact_lock(func.hashtextextended(key, 0))))
+
+
+async def visible_duplicate(db: AsyncSession, ctx: CampaignContext, user_id: uuid.UUID, entry_hash: str,
+                            *, exclude_id: uuid.UUID | None = None) -> bool:
+    """True when `user_id` already has an entry with `entry_hash` in ctx's
+    Campaign that ctx can see (the only duplicate a 409 may report)."""
+    stmt = (scoped_select(JournalEntry, ctx)
+            .where(JournalEntry.campaign_id == ctx.campaign_id, JournalEntry.user_id == user_id,
+                   JournalEntry.entry_hash == entry_hash)
+            .with_only_columns(JournalEntry.id).limit(1))
+    if exclude_id is not None:
+        stmt = stmt.where(JournalEntry.id != exclude_id)
+    return (await db.execute(stmt)).first() is not None
+
+
+# ── Dedup store (Valkey), best effort ──────────────────────────────────────
 
 
 async def _dedup_store(campaign_id: uuid.UUID, user_id: uuid.UUID, entry_hash: str) -> None:
@@ -299,16 +321,27 @@ async def _recompute_index(db: AsyncSession, entry: JournalEntry, *, embed: bool
     `strict` (reindex, the reembed Job) raises an ml failure before anything
     is written. Otherwise a failure clears both vectors and drops the derived
     tags (manual and legacy links stay). `tags=False` leaves the tag links
-    alone; `embed=False` never calls ml and leaves both vectors NULL."""
+    alone; `embed=False` never calls ml and leaves both vectors NULL.
+
+    Compare-and-set: the tsv UPDATE matches only while the stored Shorthand
+    and Narrative are still the text that was embedded (it takes the row
+    lock). When another writer changed the text meanwhile (a reembed Job
+    racing an edit), nothing is written and EntryTextChanged is raised: the
+    vectors and tags of the old text never land on the new one."""
+    shorthand, narrative = entry.shorthand, entry.narrative  # what _derive reads
     vectors, derived, ok = await _derive(entry, embed=embed, tags=tags, strict=strict)
-    await db.flush()  # the row exists and the stored text is the current one
-    await db.execute(
+    await db.flush()  # a writer's own pending text goes out first
+    matched = (await db.execute(
         update(JournalEntry)
-        .where(JournalEntry.id == entry.id)
+        .where(JournalEntry.id == entry.id, JournalEntry.shorthand == shorthand,
+               JournalEntry.narrative == narrative)
         .values(narrative_tsv=func.to_tsvector("english", JournalEntry.shorthand + " " + JournalEntry.narrative),
                 party_tsv=func.to_tsvector("english", JournalEntry.narrative))
+        .returning(JournalEntry.id)
         .execution_options(synchronize_session=False)
-    )
+    )).first()
+    if matched is None:
+        raise EntryTextChanged(entry.id)
     entry.embedding, entry.party_embedding = vectors
     if derived is not None:
         await _replace_derived_tags(db, entry, derived)
@@ -364,7 +397,7 @@ async def create_journal_entry(
     column's, party).
 
     A duplicate of the author's own entry in the Campaign (same normalized
-    Shorthand) is a 409. Bulk loaders (the demo seed) pass `hooks=False`
+    Shorthand) that ctx can see is a 409. Bulk loaders (the demo seed) pass `hooks=False`
     (no `entry_saved`), `commit=False` (they commit; no dedup key is stored),
     and `tags` / `embed` to keep ml out."""
     reviewed = narrative is not None
@@ -382,14 +415,11 @@ async def create_journal_entry(
         session_date=session_date, **fields,
     )
     can_write(ctx, entry)
-    try:
-        async with db.begin_nested():
-            db.add(entry)
-            await db.flush()
-    except IntegrityError as exc:
-        if _is_duplicate(exc):
-            raise _duplicate() from None
-        raise
+    await _lock_hash(db, entry.campaign_id, entry.user_id, entry.entry_hash)
+    if await visible_duplicate(db, ctx, entry.user_id, entry.entry_hash):
+        raise _duplicate()
+    db.add(entry)
+    await db.flush()
 
     await _recompute_index(db, entry, embed=embed, tags=tags)
     if hooks:
@@ -424,7 +454,8 @@ async def update_journal_entry(db: AsyncSession, ctx: CampaignContext, entry: Jo
 
     A Shorthand or Narrative change recomputes every index column and the
     hash; a hash that collides with another of the author's entries in the
-    Campaign is a 409 with nothing written. A date or Visibility change
+    Campaign that ctx can see is a 409 with nothing written (a hidden one
+    is never revealed: the save goes through). A date or Visibility change
     recomputes nothing; Visibility goes through `set_visibility`. Emits
     `entry_updated` (only when something changed) and commits."""
     changes = _normalize_changes(changes)
@@ -436,24 +467,20 @@ async def update_journal_entry(db: AsyncSession, ctx: CampaignContext, entry: Jo
     previous_hash = entry.entry_hash
     new_hash = compute_entry_hash(changes["shorthand"]) if "shorthand" in changed else previous_hash
     hash_changed = new_hash != previous_hash
-    if hash_changed and await _dedup_has(entry.campaign_id, entry.user_id, new_hash):
-        raise _duplicate()
+    if hash_changed:
+        await _lock_hash(db, entry.campaign_id, entry.user_id, new_hash)
+        if await visible_duplicate(db, ctx, entry.user_id, new_hash, exclude_id=entry.id):
+            raise _duplicate()
 
-    try:
-        async with db.begin_nested():
-            if "shorthand" in changed:
-                entry.shorthand = changes["shorthand"]
-            if "narrative" in changed:
-                entry.narrative = changes["narrative"]
-            if "session_date" in changed:
-                entry.session_date = changes["session_date"]
-            if hash_changed:
-                entry.entry_hash = new_hash
-            await db.flush()
-    except IntegrityError as exc:
-        if _is_duplicate(exc):
-            raise _duplicate() from None
-        raise
+    if "shorthand" in changed:
+        entry.shorthand = changes["shorthand"]
+    if "narrative" in changed:
+        entry.narrative = changes["narrative"]
+    if "session_date" in changed:
+        entry.session_date = changes["session_date"]
+    if hash_changed:
+        entry.entry_hash = new_hash
+    await db.flush()
 
     if "visibility" in changed:
         await set_visibility(db, ctx, RecordRef(kind=_visibility_kind(entry), id=entry.id), changes["visibility"])
@@ -500,7 +527,10 @@ async def reembed_job(job: Any, ctx: CampaignContext, db: AsyncSession) -> None:
     """`journal.reembed` (onsave, cpu_heavy): `reindex_entry(strict=True)` for
     the entry named in the payload. An entry deleted, hidden from the starter
     or edited (another hash) since is a no-op, `done`. ml down raises, so the
-    Job retries. Never commits (the worker does)."""
+    Job retries. A text edit committed while this Job was embedding (same
+    hash, e.g. a Narrative-only edit) raises EntryTextChanged before anything
+    is written, so the Job retries on the new text. Never commits (the
+    worker does)."""
     payload = job.payload or {}
     try:
         journal_id = uuid.UUID(str(payload.get("journal_id")))
@@ -513,6 +543,49 @@ async def reembed_job(job: Any, ctx: CampaignContext, db: AsyncSession) -> None:
         return None
     await reindex_entry(db, entry, strict=True)
     return None
+
+
+# ── The durable sweep (app/jobs/journal.py) ───────────────────────────────
+
+def _unembedded():
+    return or_(JournalEntry.embedding.is_(None), JournalEntry.party_embedding.is_(None))
+
+
+async def ml_available() -> bool:
+    """One tiny embed call: False when the ml sidecar does not answer (the
+    sweep then does nothing and tries again later)."""
+    try:
+        await embedding_service.embed_many(["ping"])
+    except Exception:  # noqa: BLE001 -- any failure means "not now"
+        return False
+    return True
+
+
+async def has_unembedded(db: AsyncSession, ctx: CampaignContext) -> bool:
+    """True when ctx's Campaign has an entry (that ctx can see) with a NULL vector."""
+    stmt = (scoped_select(JournalEntry, ctx)
+            .where(JournalEntry.campaign_id == ctx.campaign_id, _unembedded())
+            .with_only_columns(JournalEntry.id).limit(1))
+    return (await db.execute(stmt)).first() is not None
+
+
+async def next_unembedded(db: AsyncSession, ctx: CampaignContext,
+                          after: uuid.UUID | str | None) -> tuple[JournalEntry, int] | None:
+    """The first entry after `after` (keyset on id) with a NULL vector, and
+    how many such entries remain from it on; None when there is none."""
+    where = [JournalEntry.campaign_id == ctx.campaign_id, _unembedded()]
+    if after is not None:
+        where.append(JournalEntry.id > uuid.UUID(str(after)))
+    entry = (await db.execute(
+        scoped_select(JournalEntry, ctx).where(*where).order_by(JournalEntry.id).limit(1)
+        .execution_options(populate_existing=True)
+    )).scalars().first()
+    if entry is None:
+        return None
+    remaining = (await db.execute(
+        scoped_select(JournalEntry, ctx).where(*where).with_only_columns(func.count(JournalEntry.id))
+    )).scalar_one()
+    return entry, int(remaining)
 
 
 # ── Party fields and the backfill helpers ──────────────────────────────────

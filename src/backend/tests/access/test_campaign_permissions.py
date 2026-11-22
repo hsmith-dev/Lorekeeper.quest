@@ -496,17 +496,12 @@ async def test_owner_management_success_paths(client, db, ev4):
 
 
 async def test_drafts_are_gm_only_and_gms_keep_gm_context(client, db, ev4, monkeypatch):
-    from app.api.routes import journals as journal_routes
     from app.services import journal_service, llm_provider
     from tests.ev4.probes.retrieval import use_fake_llm
-
-    async def no_dup(*_args):
-        return False
 
     async def noop(*_args):
         return None
 
-    monkeypatch.setattr(journal_routes, "check_hash", no_dup)
     monkeypatch.setattr(journal_service, "store_hash", noop)
     monkeypatch.setattr(journal_service, "extract_tags", AsyncMock(return_value=[]))
     monkeypatch.setattr(journal_service.embedding_service, "embed", AsyncMock(return_value=None))

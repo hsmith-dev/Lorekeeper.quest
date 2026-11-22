@@ -37,9 +37,9 @@ from app.access import (
 )
 from app.api.deps import PARTY_READ, get_current_user, get_user_llm_config
 from app.services.journal_service import (
-    compute_entry_hash, create_journal_entry, delete_journal_entry, generate_draft_narrative, reindex_entry,
+    EntryTextChanged, compute_entry_hash, create_journal_entry, delete_journal_entry, generate_draft_narrative,
+    reindex_entry, visible_duplicate,
 )
-from app.services.dedup_service import check_hash
 from app.services.chat_service import autocomplete_notes, generate_session_recap, summarize_session_transcript
 from app.services import embedding_service
 from app.services.llm_provider import LLMConfig
@@ -107,7 +107,9 @@ async def generate_journal(
     ctx = await ctx_for_request(request, db, user, body.campaign_id, "gm")
     # The service adds the entry itself: gate the row it will write.
     can_write(ctx, JournalEntry(campaign_id=body.campaign_id, user_id=user.id, kind=EntryKind.GM))
-    if await check_hash(body.campaign_id, user.id, compute_entry_hash(body.notes)):
+    # Before any LLM call: a duplicate the caller can see is a 409 (one they
+    # cannot see never is; create_journal_entry checks again under a lock).
+    if await visible_duplicate(db, ctx, user.id, compute_entry_hash(body.notes)):
         raise HTTPException(status_code=409, detail="Duplicate entry detected")
 
     # Only resolve an LLM config (and only meter it) when a narrative still
@@ -386,7 +388,11 @@ async def reindex_journal_embeddings(
         for i, entry in enumerate(entries):
             async def _precomputed(_texts, pair=(vectors[i], vectors[n + i])):
                 return list(pair)
-            await reindex_entry(db, entry, strict=True, tags=False, embed=_precomputed)
+            try:
+                async with db.begin_nested():
+                    await reindex_entry(db, entry, strict=True, tags=False, embed=_precomputed)
+            except EntryTextChanged:
+                continue  # edited meanwhile: its own writer recomputed it
     except (ModelServiceError, ValueError) as exc:
         await db.rollback()
         logger.warning("Journal reindex failed, ml sidecar: %s", type(exc).__name__)

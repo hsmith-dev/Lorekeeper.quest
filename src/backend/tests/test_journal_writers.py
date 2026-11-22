@@ -246,7 +246,7 @@ def test_reembed_kind_is_registered():
 
 async def test_duplicate_create_is_409(db, world):
     await _create(db, world)
-    # The DB path (no Valkey check in the service): same normalized Shorthand.
+    # A visible duplicate (the author's own entry): same normalized Shorthand.
     with pytest.raises(HTTPException) as exc:
         await _create(db, world, notes="  MIRA at the mill ", narrative="Other words.")
     assert exc.value.status_code == 409
@@ -358,12 +358,12 @@ async def test_update_collision_is_409_and_writes_nothing(db, world, valkey):
     a = await _create(db, world, notes="alpha notes", narrative="A.")
     b = await _create(db, world, notes="beta notes", narrative="B.")
     a_id, b_id = a.id, b.id
-    # The Valkey key (set by the create) catches it first.
+    # A visible duplicate is a 409, Valkey key or not (the key never decides).
     with pytest.raises(HTTPException) as exc:
         await journal_service.update_journal_entry(db, world.gm, b, {"notes": " Alpha Notes"})
     assert exc.value.status_code == 409
     assert (await _row(db, b_id)).shorthand == "beta notes"
-    # Without the key (expired), the unique constraint does.
+    await db.rollback()
     await valkey.flushall()
     b = await _row(db, b_id)
     with pytest.raises(HTTPException) as exc:
@@ -374,6 +374,74 @@ async def test_update_collision_is_409_and_writes_nothing(db, world, valkey):
     assert (row.shorthand, row.narrative, row.entry_hash) == (
         "beta notes", "B.", journal_service.compute_entry_hash("beta notes"))
     assert (await _row(db, a_id)).shorthand == "alpha notes"
+
+
+# ── Hidden duplicates are never revealed (privacy first) ──────────────────
+
+async def _hidden_from_author(db, world, notes: str) -> JournalEntry:
+    """An entry by the Player that the Player cannot see: a GM-only, GM-kind
+    entry they wrote while they were GM (since demoted)."""
+    entry = JournalEntry(user_id=world.player.id, campaign_id=world.cid, shorthand=notes, narrative="Old GM secret.",
+                         entry_hash=journal_service.compute_entry_hash(notes), kind="gm", visibility="gm")
+    db.add(entry)
+    await db.commit()
+    return entry
+
+
+async def test_create_over_a_hidden_duplicate_saves_and_never_409s(db, world):
+    hidden = await _hidden_from_author(db, world, "the vault code")
+    hidden_id = hidden.id
+    assert not await journal_service.visible_duplicate(db, world.player_ctx, world.player.id, hidden.entry_hash)
+    mine = await journal_service.create_journal_entry(db, world.player_ctx, "The vault code", None,
+                                                      narrative="I found a code.", kind="player")
+    assert mine.entry_hash == (await _row(db, hidden_id)).entry_hash  # a hidden and a visible row share a hash
+    # Now a visible duplicate exists: the next one is a 409.
+    with pytest.raises(HTTPException) as exc:
+        await journal_service.create_journal_entry(db, world.player_ctx, "the vault code ", None,
+                                                   narrative="Again.", kind="player")
+    assert exc.value.status_code == 409
+    await db.rollback()
+
+
+async def test_update_onto_a_hidden_duplicate_saves_and_never_409s(db, world):
+    hidden = await _hidden_from_author(db, world, "the vault code")
+    hidden_id = hidden.id
+    mine = await journal_service.create_journal_entry(db, world.player_ctx, "something else", None,
+                                                      narrative="I found a code.", kind="player")
+    mine = await journal_service.update_journal_entry(db, world.player_ctx, mine, {"notes": "THE VAULT CODE"})
+    assert mine.entry_hash == (await _row(db, hidden_id)).entry_hash
+    # The GM sees both, so for the GM the same edit of another entry is a 409.
+    other = await journal_service.create_journal_entry(db, world.player_ctx, "third note", None,
+                                                       narrative="Third.", kind="player")
+    with pytest.raises(HTTPException) as exc:
+        await journal_service.update_journal_entry(db, world.gm, other, {"notes": "the vault code"})
+    assert exc.value.status_code == 409
+    await db.rollback()
+
+
+# ── The reembed race ───────────────────────────────────────────────────────
+
+async def test_reindex_never_writes_vectors_of_text_changed_meanwhile(db, world, ml_down, monkeypatch):
+    entry = await _create(db, world, notes="race notes", narrative="Old words.")
+    entry_id = entry.id
+    assert (await _row(db, entry_id)).embedding is None
+    job_view = await _row(db, entry_id)  # what a reembed Job loaded
+    # A Narrative-only edit (same hash) commits while the Job is embedding.
+    await db.execute(sa.update(JournalEntry).where(JournalEntry.id == entry_id)
+                     .values(narrative="New words entirely.").execution_options(synchronize_session=False))
+    await db.commit()
+    _ml(monkeypatch, FakeMLClient())
+    with pytest.raises(journal_service.EntryTextChanged):
+        await journal_service.reindex_entry(db, job_view, strict=True)
+    await db.rollback()
+    row = await _row(db, entry_id)
+    assert row.narrative == "New words entirely." and row.embedding is None and row.party_embedding is None
+    # The Job's retry re-reads the row and embeds the new text.
+    job = SimpleNamespace(payload={"journal_id": str(entry_id), "entry_hash": row.entry_hash})
+    await journal_service.reembed_job(job, world.gm, db)
+    await db.commit()
+    row = await _row(db, entry_id)
+    assert _close(list(row.party_embedding), fake_vector("New words entirely."))
 
 
 async def test_update_date_or_visibility_recomputes_nothing(db, world, emitted, monkeypatch):

@@ -62,7 +62,8 @@ older than 60 s with no `next_run_at` (a lost push, a Valkey flush), or a
 dependent whose dependency ended by raw SQL or was deleted. RQ ids map back
 to Job ids (`outbox.job_id_of`). After each pass it runs the data_backfills
 runner (`backfill.run_backfills`), then `files_gc.schedule_daily` (E0-Jobs.8:
-the files.gc Jobs, once per UTC day). Its thread also drains the delayed set
+the files.gc Jobs, once per UTC day) and `journal.schedule_daily` (E0-Journal.2:
+the journal reembed sweep, once per UTC day, skipped while ml is down). Its thread also drains the delayed set
 every second (`Reaper.drain`), pushing deferred Jobs when they are due.
 
 `_perform` swaps the process-wide Valkey client (app.core.valkey_client) for
@@ -865,6 +866,13 @@ class Reaper:
                 await files_gc.schedule_daily(factory, self._redis())
             except Exception:
                 logger.exception("files.gc scheduling failed")
+            try:
+                # The daily journal reembed sweep (E0-Journal.2): once per UTC day.
+                from app.jobs import journal as journal_jobs
+
+                await journal_jobs.schedule_daily(factory, self._redis())
+            except Exception:
+                logger.exception("journal reembed sweep scheduling failed")
             return result
         finally:
             try:

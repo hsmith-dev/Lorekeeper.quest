@@ -1,52 +1,28 @@
 ---
 title: 'E0-Journal.2: Journal writers recompute every index column'
-type: 'feature'
+type: feature
 created: '2026-11-21'
-status: 'done'
-baseline_revision: '90c8ea18b688baa1306717a61e03e6f3b2007475'
+status: done
+baseline_revision: 90c8ea18b688baa1306717a61e03e6f3b2007475
 review_loop_iteration: 0
 followup_review_recommended: true
 context: []
-warnings: ['oversized']
+warnings:
+- oversized
 deferred:
-  - summary: >-
-      No durable sweep enqueues journal.reembed for rows left with NULL vectors when the after-commit hook is lost.
-    evidence: |-
-      Hooks are at most once (app/core/hooks.py); a crash between commit and dispatch leaves NULL vectors until a manual /reindex. Follow-up: a register_backfill cursor over NULL-embedding rows.
-    location: >-
-      src/backend/app/hooks/journal.py
-    severity: medium
-  - summary: >-
-      A reembed Job running while a Narrative-only edit (same entry_hash) commits can write vectors from the old Narrative.
-    evidence: |-
-      reembed_job reads the entry, calls ml, then writes; the key covers only the Shorthand hash, so the edit's own fallback (if any) dedups onto the running Job. Needs a re-check of the text under FOR UPDATE before writing.
-    location: >-
-      src/backend/app/services/journal_service.py:reembed_job
-    severity: medium
-  - summary: >-
-      A detached derived tag reappears on the next text edit or reindex of the entry.
-    evidence: |-
-      detach deletes the link; _replace_derived_tags re-derives it from NER. A suppression record (or detaching as a negative manual row) is a product decision.
-    location: >-
-      src/backend/app/services/journal_service.py:_replace_derived_tags
-    severity: low
-  - summary: >-
-      Pre-existing rows keep their stored entry_hash (seed rows use the old seed hash); no recompute migration.
-    evidence: |-
-      Client hashes already equal sha256(trim.lower); only demo-seed rows differ. A recompute could collide with uq_journal_entries_campaign_user_entry_hash and needs a collision policy.
-    severity: low
-  - summary: >-
-      A GM edit of another author's entry into a collision with that author's hidden entry answers 409 (existence oracle).
-    evidence: |-
-      update_journal_entry checks the author's dedup key and the unique constraint; for E0-Journal.3 / E0-QA.14 to decide.
-    severity: medium
-  - summary: >-
-      The generate route's Valkey check_hash is not best-effort (Valkey down is a 500); unchanged from before.
-    evidence: |-
-      Pre-existing; the service wrappers swallow Valkey errors but the route calls check_hash directly.
-    location: >-
-      src/backend/app/api/routes/journals.py:generate_journal
-    severity: low
+- summary: A detached derived tag reappears on the next text edit or reindex of the entry.
+  evidence: detach deletes the link; _replace_derived_tags re-derives it from NER. A suppression record (or detaching
+    as a negative manual row) is a product decision.
+  location: src/backend/app/services/journal_service.py:_replace_derived_tags
+  severity: low
+- summary: Pre-existing rows keep their stored entry_hash (seed rows use the old seed hash); no recompute migration.
+  evidence: Client hashes already equal sha256(trim.lower); only demo-seed rows differ. A recompute could collide
+    with uq_journal_entries_campaign_user_entry_hash and needs a collision policy.
+  severity: low
+- summary: The generate route's Valkey check_hash is not best-effort (Valkey down is a 500); unchanged from before.
+  evidence: Pre-existing; the service wrappers swallow Valkey errors but the route calls check_hash directly.
+  location: src/backend/app/api/routes/journals.py:generate_journal
+  severity: low
 ---
 
 <intent-contract>
@@ -120,6 +96,39 @@ deferred:
 - Given the full backend suite and gates on CI, when run, then they are green with no new baseline lines.
 
 ## Spec Change Log
+
+### 2026-11-22 — Coordinator follow-up before merge (two deferrals made in-scope)
+- **Trigger:** the coordinator required two deferrals fixed before merge: the reembed fallback must be durable and race-free, and a GM edit's 409 must not reveal a hidden entry.
+- **Amended (outside the intent contract):**
+  - **Durable reembed.** `journal.reembed_sweep` (`app/jobs/journal.py`) is a cursor Job (`run_cursor`, backfill queue, `cpu_heavy`) over entries with a NULL vector. It runs once through the `journal_reembed_v1` data backfill (`register_backfill`) and daily through `schedule_daily` on the reaper pass.
+    - When ml is down it is a no-op: the scheduler probes ml once and re-arms in 10 minutes, a step's failed probe ends the Job `done`, and a row's ml error skips that row.
+  - **Race.** `_recompute_index` is a compare-and-set: the tsv UPDATE matches only the text that was embedded. If the text changed, it writes nothing and raises `EntryTextChanged`. The reembed Job retries on the new text, and `/reindex` and the sweep skip the row.
+  - **409 only for visible duplicates.** `visible_duplicate` (`scoped_select`), under a per-(Campaign, author, hash) advisory lock, replaces both the Valkey check and the unique constraint as the 409 decision.
+    - Migration `7d1e2a9c4b6f` turns `uq_journal_entries_campaign_user_entry_hash` into the plain index `ix_journal_entries_campaign_user_entry_hash` and queues the backfill row.
+    - The constraint was per author, not Campaign-wide. The reachable leak was an author who cannot see one of their own entries (for example a demoted GM's GM-only entry). Another Player's Private entry could never collide.
+- **Known-bad state avoided:**
+  - an entry left unembedded forever after a lost hook;
+  - stale vectors overwriting an edit;
+  - a 409 revealing that a hidden entry exists.
+- **KEEP:**
+  - one recompute path;
+  - the hash rule;
+  - search-only reindex;
+  - one-step saves are GM-only (owner-approved);
+  - the hook-based fast fallback.
+
+## Data safety (migration 7d1e2a9c4b6f and the reembed backfill)
+
+- **Upgrade changes no row.** Dropping the unique constraint and adding a non-unique index on the same three columns loses no data, and queries keep an index.
+- **Behaviour change:** two entries by one author may now share a hash, but only when one of them is hidden from the writer. Every 409 decision happens in `journal_service` under an advisory lock, so two visible duplicates cannot race in. A Valkey key no longer decides a 409.
+- **The backfill writes only through `reindex_entry`.** It fills NULL vectors and that entry's derived tags (manual and legacy links are kept). It never changes text, hash or Visibility.
+  - It writes nothing while ml is down.
+  - The compare-and-set guard means it never overwrites a newer edit.
+  - It is idempotent: a filled row is no longer selected.
+- **Re-running the upgrade is safe:** the backfill row insert is `ON CONFLICT DO NOTHING`.
+- **downgrade()** (development only, NFR-8) restores the unique constraint and removes the backfill row. If rows now share a hash it refuses with a clear error and deletes nothing.
+- **Merge order:** the revision's `down_revision` is `eed202f2eead` (E0-WorldCore.7, main at rebase). A later sibling migration on main needs a rebase, or this `down_revision` re-pointed.
+
 
 ## Review Triage Log
 
@@ -219,3 +228,23 @@ Status: done. Draft PR #80 (branch `story/e0-journal.2-index-recompute`), GitHub
 - A reembed Job can race a Narrative-only edit.
 - One-step saves are now always GM-only.
 
+### Follow-up (2026-11-22): durable reembed, race guard, privacy-first duplicates
+
+- **New files:**
+  - `app/jobs/journal.py`: the sweep kind, the backfill and `schedule_daily`.
+  - `migrations/versions/7d1e2a9c4b6f_journal_hash_visible_dedup_reembed.py`.
+  - `tests/jobs/test_journal_sweep.py`.
+- **Changed:**
+  - `journal_service`: `visible_duplicate`, `_lock_hash`, `EntryTextChanged` with the compare-and-set, and the sweep helpers `ml_available`, `has_unembedded` and `next_unembedded`.
+  - `journals.py`: the route pre-check uses `visible_duplicate`; `/reindex` skips a changed row.
+  - The `JournalEntry` model's index.
+  - `registry.py`: `KIND_MODULES`.
+  - `worker.py`: the reaper calls `schedule_daily`.
+  - `dedup_service` comment.
+  - `test_upgrade_snapshot.py`: the new revision check and its downgrade test.
+- **Tests added:**
+  - Hidden duplicate on create and on update never 409s; a visible one does.
+  - The reindex race writes nothing, and the Job retry embeds the new text.
+  - Sweep: fill, ml-down no-op, per-row skip, daily schedule and its ml-down retry.
+  - EV-4 probe `probe_generate_hidden_duplicate_is_never_a_409` (`tests/ev4/probes/journals.py`, additive).
+- **Tests updated:** three `tests/access` tests had their now-obsolete `check_hash` monkeypatch removed.

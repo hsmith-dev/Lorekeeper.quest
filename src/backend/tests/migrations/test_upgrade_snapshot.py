@@ -39,6 +39,12 @@ index is unique and partial (`WHERE (NOT confirmed)`), and
 test_eed202f2eead_downgrade_drops_its_index proves the downgrade removes only
 the index and the upgrade puts it back.
 
+E0-Journal.2 (7d1e2a9c4b6f) relaxes the per-author entry_hash unique to a
+plain index (a duplicate is a 409 only when the writer can see it) and
+queues the `journal_reembed_v1` backfill: its check proves both, and
+test_7d1e2a9c4b6f_downgrade_restores_the_unique_hash proves the downgrade
+puts the constraint back.
+
 pytest collects tests/migrations/ before tests/test_*.py, so the module
 fixture rebuilds the clean session schema in teardown.
 """
@@ -94,6 +100,9 @@ f3_world = _load(
 WRITE_VISIBILITY = "0f1c3b194a4b"
 SUGGESTED_UNIQUE = "eed202f2eead"
 SUGGESTED_INDEX = "uq_entity_mentions_suggested"
+JOURNAL_VISIBLE_DEDUP = "7d1e2a9c4b6f"
+JOURNAL_HASH_INDEX = "ix_journal_entries_campaign_user_entry_hash"
+JOURNAL_REEMBED_BACKFILL = "journal_reembed_v1"
 
 # Seed ids from scripts/make_snapshot.py.
 SEED_ID = "00000000-0000-4000-8000-000000000{}".format
@@ -325,15 +334,36 @@ async def visibility_server_defaults_follow_ad12(conn: AsyncConnection) -> None:
     }
 
 
-@post_upgrade_check(F1_CORE)
-async def entry_hash_unique_per_campaign_and_author(conn: AsyncConnection) -> None:
-    uniques = dict((await conn.execute(sa.text(
+async def _journal_uniques(conn: AsyncConnection) -> dict[str, str]:
+    return dict((await conn.execute(sa.text(
         "SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint "
         "WHERE conrelid = 'journal_entries'::regclass AND contype = 'u'"
     ))).all())
-    assert uniques == {
-        "uq_journal_entries_campaign_user_entry_hash": "UNIQUE (campaign_id, user_id, entry_hash)",
-    }
+
+
+async def _journal_hash_index(conn: AsyncConnection) -> str | None:
+    return await conn.scalar(sa.text(
+        "SELECT indexdef FROM pg_indexes WHERE tablename = 'journal_entries' AND indexname = :name"),
+        {"name": JOURNAL_HASH_INDEX})
+
+
+@post_upgrade_check(F1_CORE)
+async def entry_hash_no_longer_globally_unique(conn: AsyncConnection) -> None:
+    # F1-core made it unique per (Campaign, author); 7d1e2a9c4b6f relaxed
+    # that to a plain index (checked below), so at head no unique is left.
+    assert "journal_entries_entry_hash_key" not in await _journal_uniques(conn)
+
+
+@post_upgrade_check(JOURNAL_VISIBLE_DEDUP)
+async def entry_hash_indexed_not_unique_and_reembed_queued(conn: AsyncConnection) -> None:
+    assert await _journal_uniques(conn) == {}
+    indexdef = await _journal_hash_index(conn)
+    assert indexdef is not None, "ix_journal_entries_campaign_user_entry_hash is missing"
+    assert not indexdef.startswith("CREATE UNIQUE"), indexdef
+    assert "(campaign_id, user_id, entry_hash)" in indexdef, indexdef
+    rows = (await conn.execute(sa.text(
+        "SELECT name, status, cursor, job_id FROM data_backfills WHERE name = 'journal_reembed_v1'"))).all()
+    assert [tuple(r) for r in rows] == [("journal_reembed_v1", "queued", None, None)]
 
 
 # F2-jobs-files (E0-Jobs.1): four new, empty tables.
@@ -348,8 +378,9 @@ async def _f2_indexes(conn: AsyncConnection) -> dict[str, str]:
 @post_upgrade_check(F2_JOBS_FILES)
 async def f2_tables_exist_empty_with_their_indexes(conn: AsyncConnection) -> None:
     for table in F2_TABLES:
-        # F3-world's backfill row is the one row any of them holds at head.
-        where = f" WHERE name <> '{f3_world.BACKFILL_NAME}'" if table == "data_backfills" else ""
+        # The backfill rows of F3-world and 7d1e2a9c4b6f are the only rows any of them holds at head.
+        where = (f" WHERE name NOT IN ('{f3_world.BACKFILL_NAME}', '{JOURNAL_REEMBED_BACKFILL}')"
+                 if table == "data_backfills" else "")
         assert await conn.scalar(sa.text(f"SELECT count(*) FROM {table}{where}")) == 0, table
     defs = await _f2_indexes(conn)
     assert set(defs) == {
@@ -508,7 +539,9 @@ async def every_campaign_has_the_default_relationship_types(conn: AsyncConnectio
 
 @post_upgrade_check(F3_WORLD)
 async def suggested_mentions_backfill_is_queued(conn: AsyncConnection) -> None:
-    rows = (await conn.execute(sa.text("SELECT name, status, cursor, job_id FROM data_backfills"))).all()
+    rows = (await conn.execute(sa.text(
+        f"SELECT name, status, cursor, job_id FROM data_backfills WHERE name <> '{JOURNAL_REEMBED_BACKFILL}'"
+    ))).all()
     assert [tuple(r) for r in rows] == [("suggested_mentions_v1", "queued", None, None)]
     # Nothing else of the world: no Mentions, aliases, edges or steps yet.
     for table in ("entity_aliases", "entity_mentions", "entity_relationships", "quest_steps"):
@@ -995,3 +1028,24 @@ def test_eed202f2eead_downgrade_drops_its_index(upgraded_snapshot):
     assert index is None
     assert tables_before == tables
     assert "WHERE (NOT confirmed)" in asyncio.run(_with_conn(TEST_DB_URL, _suggested_index))
+
+
+def test_7d1e2a9c4b6f_downgrade_restores_the_unique_hash(upgraded_snapshot):
+    # Dev only (NFR-8): the downgrade puts the unique constraint back (no two
+    # rows share a hash in the snapshot) and removes the backfill row; the
+    # upgrade relaxes it again and re-queues the row.
+    cfg = alembic_config(TEST_DB_URL)
+    command.downgrade(cfg, SUGGESTED_UNIQUE)
+    try:
+        version = asyncio.run(_state(TEST_DB_URL))[0]
+        uniques = asyncio.run(_with_conn(TEST_DB_URL, _journal_uniques))
+        index = asyncio.run(_with_conn(TEST_DB_URL, _journal_hash_index))
+        backfills = asyncio.run(_with_conn(TEST_DB_URL, lambda c: c.scalar(sa.text(
+            f"SELECT count(*) FROM data_backfills WHERE name = '{JOURNAL_REEMBED_BACKFILL}'"))))
+    finally:
+        command.upgrade(cfg, "head")
+    assert version == SUGGESTED_UNIQUE
+    assert uniques == {"uq_journal_entries_campaign_user_entry_hash": "UNIQUE (campaign_id, user_id, entry_hash)"}
+    assert index is None and backfills == 0
+    assert asyncio.run(_with_conn(TEST_DB_URL, _journal_uniques)) == {}
+    assert asyncio.run(_with_conn(TEST_DB_URL, _journal_hash_index)) is not None

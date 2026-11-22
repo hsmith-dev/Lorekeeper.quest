@@ -256,3 +256,39 @@ async def probe_generate_journal(ev4, actor):
         assert_same_answer(actor, r, await actor.post("/api/journals/generate", json=body(MISSING, narrative)),
                            "Campaign (gm only)")
     assert await row_count(ev4, JournalEntry, JournalEntry.campaign_id == a) == before
+
+
+@ev4_probe("POST", "/api/journals/generate", actors=("co_gm",))
+async def probe_generate_hidden_duplicate_is_never_a_409(ev4, actor):
+    """E0-Journal.2 (privacy first): a duplicate hash is a 409 only when the
+    writer can see the colliding entry. Notes that match another member's
+    Private entry save exactly like fresh notes (201, no canary), and only
+    the writer's own visible duplicate is a 409."""
+    import uuid
+    from datetime import date
+
+    from app.db.models.journal import JournalEntry
+    from app.services.journal_service import compute_entry_hash
+    from tests.ev4.fixtures import mint_canary
+
+    a = ev4.a.campaign_id
+    player = await ev4.actor("player")
+    secret_notes = f"the vault code {uuid.uuid4().hex[:8]}"
+    ev4.db.add(JournalEntry(
+        id=uuid.uuid4(), user_id=player.user_id, campaign_id=a, shorthand=secret_notes,
+        narrative=mint_canary("XPRIVATE", a).token, entry_hash=compute_entry_hash(secret_notes),
+        session_date=date(2026, 3, 1), kind="player", visibility="private",
+    ))
+    await ev4.db.commit()
+
+    def body(notes):
+        return {"notes": notes, "campaign_id": str(a), "narrative": "We counted the coins."}
+
+    r_hidden = await actor.post("/api/journals/generate", json=body(secret_notes))
+    r_fresh = await actor.post("/api/journals/generate", json=body(f"fresh notes {uuid.uuid4().hex[:8]}"))
+    assert r_hidden.status_code == r_fresh.status_code == 201, (r_hidden.text, r_fresh.text)
+    assert_no_canary(actor, r_hidden)
+    # The writer's own visible duplicate is still a 409.
+    r_again = await actor.post("/api/journals/generate", json=body(secret_notes))
+    assert r_again.status_code == 409, r_again.text
+    assert r_again.json() == {"detail": "Duplicate entry detected"}
