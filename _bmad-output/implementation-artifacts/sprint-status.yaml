@@ -77,7 +77,7 @@ development_status:
   2-11-ev-4-harness-scaffolding-route-enumeration-actors-and-probe: done
   2-12-demo-seed-and-the-shared-eval-script-scaffold: done
   2-13-ev-4-probes-for-every-existing-route: done
-  2-14-ev-4-is-a-zero-leak-hard-gate-with-chat-and-captured-context: backlog
+  2-14-ev-4-is-a-zero-leak-hard-gate-with-chat-and-captured-context: done
   2-15-ev-5-benchmark-suite-and-the-x86-spike-re-run: done
   epic-2-retrospective: optional
 
