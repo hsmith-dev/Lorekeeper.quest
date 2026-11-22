@@ -111,6 +111,10 @@ class EntityMentionGMResponse(BaseModel):
     span_start: int | None
     span_end: int | None
     created_at: datetime
+    # E0-WorldCore.7: the Mention routes fill these (entry title from resolve_sources).
+    entry_title: str | None = None
+    entity_name: str | None = None
+    entity_type: EntityType | None = None
 
     model_config = _ORM
 
@@ -125,6 +129,10 @@ class EntityMentionPartyResponse(BaseModel):
     span_start: int | None
     span_end: int | None
     created_at: datetime
+    # E0-WorldCore.7: the Mention routes fill these (each as ctx may see it).
+    entry_title: str | None = None
+    entity_name: str | None = None
+    entity_type: EntityType | None = None
 
     model_config = _ORM
 
@@ -638,3 +646,27 @@ class EntityHistoryPartyResponse(BaseModel):
     total: int
     limit: int
     offset: int
+
+
+# ── Mention lists (E0-WorldCore.7) ─────────────────────────────────────────
+
+class EntityMentionListGMResponse(BaseModel):
+    items: list[EntityMentionGMResponse]
+    total: int
+    page: int
+    page_size: int
+
+
+class EntityMentionListPartyResponse(BaseModel):
+    items: list[EntityMentionPartyResponse]
+    total: int
+    page: int
+    page_size: int
+
+
+class EntryMentionsGMResponse(BaseModel):
+    items: list[EntityMentionGMResponse]
+
+
+class EntryMentionsPartyResponse(BaseModel):
+    items: list[EntityMentionPartyResponse]

@@ -9,8 +9,9 @@ and `NAME_PREFIXES` (app/domain/names.py). No other module matches names.
 **Index.** Each call builds its index from ctx-scoped queries (no cache):
 the Entities of `scoped_select(Entity, ctx)` that are not deleted, the
 aliases of `scoped_select(EntityAlias, ctx)` whose Entity's `aliases` field
-ctx may see (`parent_field_audience` + `visible_to`), and the Mention count
-of each Entity over `scoped_select(EntityMention, ctx)`. Alias keys are
+ctx may see (`parent_field_audience` + `visible_to`), and the count of each
+Entity's confirmed Mentions over `scoped_select(EntityMention, ctx)` (a
+suggested Mention never changes a ranking or `mention_count`, E0-WorldCore.7). Alias keys are
 recomputed from `alias` (a stale `normalized_alias` never matters). A merged
 Entity's name and aliases resolve to its survivor, following the chain with
 a cycle guard, only when ctx sees every merged row on the way and a live
@@ -24,7 +25,7 @@ directly preceding `NAME_PREFIXES` tokens ("Brother Aldric"). Overlaps
 resolve longest first (character length, then leftmost); the result is in
 text order. One span naming several Entities picks one: a name beats an
 alias (a merged Entity's name counts as an alias of its survivor), then more
-visible Mentions, then the earliest `created_at`, then the id.
+visible confirmed Mentions, then the earliest `created_at`, then the id.
 
 **candidates.** The surface's key against every visible Entity's key and
 alias keys by `rapidfuzz.fuzz.WRatio` (best per Entity, /100, only > 0),
@@ -163,7 +164,8 @@ async def _index(db: AsyncSession, ctx: CampaignContext, types: Any) -> _Index:
         if owner is not None and _aliases_visible(owner, ctx):
             add(owner, row.alias, True)
 
-    counts = scoped_select(EntityMention, ctx).with_only_columns(
+    # Confirmed Mentions only: the registry formula does not know `confirmed`.
+    counts = scoped_select(EntityMention, ctx).where(EntityMention.confirmed.is_(True)).with_only_columns(
         EntityMention.entity_id, sa.func.count(EntityMention.id)).group_by(EntityMention.entity_id)
     mentions = {eid: int(n) for eid, n in (await db.execute(counts)).all()}
     return _Index(live, keys, mentions)

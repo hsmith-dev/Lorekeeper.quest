@@ -869,6 +869,40 @@ async def test_revert_of_an_update_whose_row_is_gone_is_superseded(db, ev4, gm):
         assert await _code(revert_change(db, gm, upd.id, force=force)) == "superseded"
 
 
+async def test_merge_drops_an_absorbed_suggestion_the_survivor_already_has(db, ev4, gm):
+    # E0-WorldCore.7: uq_entity_mentions_suggested allows one suggestion per
+    # (entry, Entity, source field); the merge keeps the survivor's row.
+    survivor, absorbed = await _create(db, gm, name="Mira"), await _create(db, gm, name="Mira Vale")
+    kept = await apply_change(db, gm, AddMention(entity_id=survivor.id, journal_id=_entry(ev4), quote="Mira",
+                                                 span_start=0, span_end=4))
+    dup = await apply_change(db, gm, AddMention(entity_id=absorbed.id, journal_id=_entry(ev4), quote="Mira Vale",
+                                                span_start=10, span_end=19))
+    other_field = await apply_change(db, gm, AddMention(entity_id=absorbed.id, journal_id=_entry(ev4),
+                                                        source_field="shorthand"))
+    row = await apply_change(db, gm.as_system("merge"), Merge(entity_id=absorbed.id, survivor_id=survivor.id))
+    assert row.op == "merge" and row.new_value["moved"]["mentions"] == 1
+    assert await _get(db, EntityMention, uuid.UUID(dup.new_value["mention_id"])) is None
+    survivor_rows = (await db.execute(sa.select(EntityMention).where(
+        EntityMention.entity_id == survivor.id, EntityMention.journal_id == _entry(ev4),
+        EntityMention.source_field == "narrative").execution_options(populate_existing=True))).scalars().all()
+    assert [m.id for m in survivor_rows] == [uuid.UUID(kept.new_value["mention_id"])]
+    assert survivor_rows[0].quote == "Mira"
+    moved = await _get(db, EntityMention, uuid.UUID(other_field.new_value["mention_id"]))
+    assert moved.entity_id == survivor.id
+
+
+async def test_merge_drops_an_absorbed_suggestion_the_survivor_has_confirmed(db, ev4, gm):
+    survivor, absorbed = await _create(db, gm, name="Mira"), await _create(db, gm, name="Mira Vale")
+    kept = await apply_change(db, gm, AddMention(entity_id=survivor.id, journal_id=_entry(ev4), confirmed=True))
+    dup = await apply_change(db, gm, AddMention(entity_id=absorbed.id, journal_id=_entry(ev4), quote="Mira Vale"))
+    await apply_change(db, gm.as_system("merge"), Merge(entity_id=absorbed.id, survivor_id=survivor.id))
+    assert await _get(db, EntityMention, uuid.UUID(dup.new_value["mention_id"])) is None
+    rows = (await db.execute(sa.select(EntityMention).where(
+        EntityMention.entity_id == survivor.id, EntityMention.journal_id == _entry(ev4))
+        .execution_options(populate_existing=True))).scalars().all()
+    assert [(m.id, m.confirmed) for m in rows] == [(uuid.UUID(kept.new_value["mention_id"]), True)]
+
+
 async def test_state_made_elsewhere_is_invalid_not_a_stray_row(db, ev4, gm):
     a = ev4.a.campaign_id
     entity, other = await _create(db, gm), await _create(db, gm)

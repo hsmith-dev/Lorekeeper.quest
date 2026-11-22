@@ -450,6 +450,8 @@ PARTY_READ_ROUTES = {
     "GET /api/character-sheets/", "GET /api/character-sheets/{sheet_id}",
     # E0-WorldCore.5.
     "GET /api/entities/", "GET /api/entities/{entity_id}", "GET /api/entities/{entity_id}/history",
+    # E0-WorldCore.7.
+    "GET /api/entities/mentions", "GET /api/entities/{entity_id}/mentions",
 }
 
 

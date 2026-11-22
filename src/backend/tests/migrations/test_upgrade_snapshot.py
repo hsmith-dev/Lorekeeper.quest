@@ -33,6 +33,12 @@ NULL with the server default `gm`: its check proves every existing row
 test_0f1c3b194a4b_downgrade_drops_its_column proves the downgrade removes
 only that column and the upgrade puts it back as `gm`.
 
+E0-WorldCore.7 (eed202f2eead) dedupes suggested Mentions and adds the
+partial unique index `uq_entity_mentions_suggested`: its check proves the
+index is unique and partial (`WHERE (NOT confirmed)`), and
+test_eed202f2eead_downgrade_drops_its_index proves the downgrade removes only
+the index and the upgrade puts it back.
+
 pytest collects tests/migrations/ before tests/test_*.py, so the module
 fixture rebuilds the clean session schema in teardown.
 """
@@ -86,6 +92,8 @@ f3_world = _load(
     BACKEND_DIR / "migrations" / "versions" / "03c0b504f1d1_f3_world_entities_legacy_copy.py",
 )
 WRITE_VISIBILITY = "0f1c3b194a4b"
+SUGGESTED_UNIQUE = "eed202f2eead"
+SUGGESTED_INDEX = "uq_entity_mentions_suggested"
 
 # Seed ids from scripts/make_snapshot.py.
 SEED_ID = "00000000-0000-4000-8000-000000000{}".format
@@ -535,6 +543,21 @@ async def every_history_row_is_written_for_the_gm(conn: AsyncConnection) -> None
     assert counts == {"gm": len(expected_seed_entities())}, counts
 
 
+async def _suggested_index(conn: AsyncConnection) -> str | None:
+    return await conn.scalar(sa.text(
+        "SELECT indexdef FROM pg_indexes WHERE tablename = 'entity_mentions' AND indexname = :name"),
+        {"name": SUGGESTED_INDEX})
+
+
+@post_upgrade_check(SUGGESTED_UNIQUE)
+async def suggested_mentions_are_unique_per_entry_entity_and_field(conn: AsyncConnection) -> None:
+    indexdef = await _suggested_index(conn)
+    assert indexdef is not None, "uq_entity_mentions_suggested is missing"
+    assert indexdef.startswith("CREATE UNIQUE INDEX"), indexdef
+    assert "(journal_id, entity_id, source_field)" in indexdef, indexdef
+    assert "WHERE (NOT confirmed)" in indexdef, indexdef
+
+
 # Every F1-core column, by table: (key columns, F1-core columns). The
 # idempotency test compares these values before and after re-applying the
 # data steps.
@@ -955,3 +978,20 @@ def test_0f1c3b194a4b_downgrade_drops_its_column(upgraded_snapshot):
     assert asyncio.run(_with_conn(TEST_DB_URL, _changes_without_write_visibility)) == before
     assert asyncio.run(_with_conn(TEST_DB_URL, lambda c: c.scalar(sa.text(
         "SELECT count(*) FROM entity_changes WHERE write_visibility <> 'gm'")))) == 0
+
+
+def test_eed202f2eead_downgrade_drops_its_index(upgraded_snapshot):
+    # Dev only (NFR-8): the downgrade removes exactly the index; the upgrade puts it back.
+    cfg = alembic_config(TEST_DB_URL)
+    tables = asyncio.run(_with_conn(TEST_DB_URL, _public_tables))
+    command.downgrade(cfg, WRITE_VISIBILITY)
+    try:
+        version = asyncio.run(_state(TEST_DB_URL))[0]
+        index = asyncio.run(_with_conn(TEST_DB_URL, _suggested_index))
+        tables_before = asyncio.run(_with_conn(TEST_DB_URL, _public_tables))
+    finally:
+        command.upgrade(cfg, "head")
+    assert version == WRITE_VISIBILITY
+    assert index is None
+    assert tables_before == tables
+    assert "WHERE (NOT confirmed)" in asyncio.run(_with_conn(TEST_DB_URL, _suggested_index))

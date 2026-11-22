@@ -6,6 +6,9 @@ tests/ev4/test_entity_api_history.py); here the GM (the Owner of the canary
 Campaign A) drives every route: create and the duplicate 409, the list
 filters and pagination, a multi-field PATCH in one transaction, soft delete,
 aliases, Quest steps, history order, revert, and single and bulk Visibility.
+E0-WorldCore.7 adds the Mention routes: the Entity's list (pages, order,
+the `confirmed` filter), an entry's list, confirm and remove, and what a
+Player gets from them.
 """
 from __future__ import annotations
 
@@ -365,14 +368,236 @@ async def test_mention_count_counts_confirmed_mentions_the_viewer_sees(ev4, db):
     listed = await _ok(await player.get(f"{BASE}/?campaign_id={ev4.a.campaign_id}"))
     assert [i["mention_count"] for i in listed["items"] if i["id"] == str(mira)] == [1]
 
-# ── Wiring: 13 routes, each in nginx's /api/entities/ location (zone api) ───
+
+# ── Mentions (E0-WorldCore.7) ──────────────────────────────────────────────
+
+async def _gm_ctx(ev4, db):
+    return await ctx_for(db, ev4.a.owner_id, ev4.a.campaign_id)
+
+
+async def _journal(db, ev4, narrative: str = "An entry.", *, session_date=None, visibility: str = "party",
+                   kind: str = "gm") -> uuid.UUID:
+    from app.db.models.journal import JournalEntry
+
+    entry = JournalEntry(id=uuid.uuid4(), user_id=ev4.a.owner_id, campaign_id=ev4.a.campaign_id, shorthand="s",
+                         narrative=narrative, entry_hash=uuid.uuid4().hex, session_date=session_date, kind=kind,
+                         visibility=visibility)
+    db.add(entry)
+    await db.flush()
+    return entry.id
+
+
+async def _new_entity(db, ctx, name: str, *, party: bool = False) -> uuid.UUID:
+    from app.access import set_visibility
+    from app.schemas.sources import RecordRef
+
+    entity_id = (await apply_change(db, ctx, {"op": "create_entity", "type": "character", "kind": "npc",
+                                              "name": name})).entity_id
+    if party:
+        await set_visibility(db, ctx, RecordRef(kind="entity", id=entity_id), "party")
+    return entity_id
+
+
+async def _add_mention(db, ctx, entity_id, journal_id, **kw) -> uuid.UUID:
+    row = await apply_change(db, ctx, {"op": "add_mention", "entity_id": entity_id, "journal_id": journal_id, **kw})
+    return uuid.UUID(row.new_value["mention_id"])
+
+
+async def _mention_history(db, entity_id, op: str) -> int:
+    return (await db.execute(sa.select(sa.func.count()).select_from(EntityChange).where(
+        EntityChange.entity_id == uuid.UUID(str(entity_id)), EntityChange.op == op))).scalar_one()
+
+
+async def test_entity_mentions_page_newest_session_first(ev4, db):
+    from datetime import date, timedelta
+
+    gm = await ev4.actor("gm_owner")
+    ctx = await _gm_ctx(ev4, db)
+    mira = await _new_entity(db, ctx, "Mira")
+    ids = []
+    for i in range(25):
+        entry = await _journal(db, ev4, f"Mira, day {i}.", session_date=date(2026, 1, 1) + timedelta(days=i))
+        ids.append(await _add_mention(db, ctx, mira, entry, confirmed=i % 2 == 0, quote=f"Mira, day {i}.",
+                                      span_start=0, span_end=4))
+    await db.commit()
+    first = await _ok(await gm.get(f"{BASE}/{mira}/mentions?page=1"))
+    second = await _ok(await gm.get(f"{BASE}/{mira}/mentions?page=2"))
+    assert (first["total"], first["page"], first["page_size"], len(first["items"])) == (25, 1, 20, 20)
+    assert (second["total"], second["page"], len(second["items"])) == (25, 2, 5)
+    newest_first = [str(i) for i in reversed(ids)]
+    assert [i["id"] for i in first["items"] + second["items"]] == newest_first
+    item = first["items"][0]
+    assert (item["quote"], item["journal_id"], item["confirmed"], item["origin"]) == (
+        "Mira, day 24.", item["journal_id"], True, "manual")
+    assert item["entry_title"] == "Journal entry · 2026-01-25"
+    assert (item["entity_name"], item["entity_type"]) == ("Mira", "character")
+    assert (await gm.get(f"{BASE}/{mira}/mentions?page=0")).status_code == 422
+    suggested = await _ok(await gm.get(f"{BASE}/{mira}/mentions?confirmed=false"))
+    confirmed = await _ok(await gm.get(f"{BASE}/{mira}/mentions?confirmed=true"))
+    assert (suggested["total"], confirmed["total"]) == (12, 13)
+    assert all(not i["confirmed"] for i in suggested["items"]) and all(i["confirmed"] for i in confirmed["items"])
+
+
+async def test_entry_mentions_order_and_deleted_entities(ev4, db):
+    gm = await ev4.actor("gm_owner")
+    ctx = await _gm_ctx(ev4, db)
+    bree, mira, ada = [await _new_entity(db, ctx, n) for n in ("Bree", "Mira", "Ada")]
+    gone = await _new_entity(db, ctx, "Gone")
+    entry = await _journal(db, ev4, "Mira saw Bree.")
+    late = await _add_mention(db, ctx, bree, entry, span_start=9, span_end=13)
+    early = await _add_mention(db, ctx, mira, entry, span_start=0, span_end=4)
+    unspanned = await _add_mention(db, ctx, ada, entry, confirmed=True)
+    await _add_mention(db, ctx, gone, entry, span_start=1, span_end=2)
+    await apply_change(db, ctx, {"op": "delete_entity", "entity_id": gone})
+    await db.commit()
+    body = await _ok(await gm.get(f"{BASE}/mentions?journal_id={entry}"))
+    assert [i["id"] for i in body["items"]] == [str(early), str(late), str(unspanned)]
+    assert [(i["entity_name"], i["entity_type"]) for i in body["items"]] == [
+        ("Mira", "character"), ("Bree", "character"), ("Ada", "character")]
+    assert {i["entry_title"] for i in body["items"]} == {"Journal entry"}
+    assert (await gm.get(f"{BASE}/mentions?journal_id={MISSING}")).status_code == 404
+    assert (await gm.get(f"{BASE}/mentions")).status_code == 422
+
+
+async def test_confirm_mention(ev4, db):
+    from app.db.models.entity import EntityMention
+
+    gm = await ev4.actor("gm_owner")
+    ctx = await _gm_ctx(ev4, db)
+    mira, bree = await _new_entity(db, ctx, "Mira"), await _new_entity(db, ctx, "Bree")
+    entry = await _journal(db, ev4, "Mira and Bree.")
+    mention = await _add_mention(db, ctx, mira, entry, quote="Mira and Bree.", origin="migration")
+    bree_mention = await _add_mention(db, ctx, bree, entry)
+    await db.commit()
+    before = (await _ok(await gm.get(f"{BASE}/{mira}")))["mention_count"]
+    # Another Entity's Mention is the 404.
+    assert (await gm.post(f"{BASE}/{mira}/mentions/{bree_mention}/confirm")).status_code == 404
+    body = await _ok(await gm.post(f"{BASE}/{mira}/mentions/{mention}/confirm"))
+    assert (body["id"], body["confirmed"], body["origin"], body["entity_name"]) == (
+        str(mention), True, "migration", "Mira")
+    assert await _mention_history(db, mira, "confirm_mention") == 1
+    assert (await _ok(await gm.get(f"{BASE}/{mira}")))["mention_count"] == before + 1
+    # Again: the earlier change (no new row).
+    await _ok(await gm.post(f"{BASE}/{mira}/mentions/{mention}/confirm"))
+    assert await _mention_history(db, mira, "confirm_mention") == 1
+    # Confirmed by something other than a change (a migration row): 422 invalid.
+    stray = EntityMention(campaign_id=ev4.a.campaign_id, journal_id=entry, entity_id=bree, source_field="narrative",
+                          origin="migration", confirmed=True)
+    db.add(stray)
+    await db.commit()
+    r = await gm.post(f"{BASE}/{bree}/mentions/{stray.id}/confirm")
+    assert r.status_code == 422 and r.json()["code"] == "invalid", r.text
+    # A deleted Entity's Mention is 409.
+    await apply_change(db, ctx, {"op": "delete_entity", "entity_id": bree})
+    await db.commit()
+    r = await gm.post(f"{BASE}/{bree}/mentions/{bree_mention}/confirm")
+    assert r.status_code == 409 and r.json()["code"] == "deleted", r.text
+
+
+async def test_remove_mention(ev4, db):
+    from app.db.models.entity import EntityMention
+
+    gm = await ev4.actor("gm_owner")
+    ctx = await _gm_ctx(ev4, db)
+    mira, bree = await _new_entity(db, ctx, "Mira"), await _new_entity(db, ctx, "Bree")
+    entry = await _journal(db, ev4, "Mira and Bree.")
+    mention = await _add_mention(db, ctx, mira, entry)
+    bree_mention = await _add_mention(db, ctx, bree, entry)
+    await db.commit()
+    assert (await gm.delete(f"{BASE}/{mira}/mentions/{bree_mention}")).status_code == 404
+    await _ok(await gm.delete(f"{BASE}/{mira}/mentions/{mention}"), 204)
+    gone = (await db.execute(sa.select(EntityMention).where(EntityMention.id == mention))).scalar_one_or_none()
+    assert gone is None
+    assert await _mention_history(db, mira, "remove_mention") == 1
+    assert (await gm.delete(f"{BASE}/{mira}/mentions/{mention}")).status_code == 404
+    listed = await _ok(await gm.get(f"{BASE}/{mira}/mentions"))
+    assert listed["items"] == [] and listed["total"] == 0
+
+
+async def test_remove_lowers_mention_count_and_confirm_updates_the_list(ev4, db):
+    gm = await ev4.actor("gm_owner")
+    ctx = await _gm_ctx(ev4, db)
+    mira = await _new_entity(db, ctx, "Mira")
+    entry = await _journal(db, ev4, "Mira ran.")
+    mention = await _add_mention(db, ctx, mira, entry)
+    await db.commit()
+    await _ok(await gm.post(f"{BASE}/{mira}/mentions/{mention}/confirm"))
+    listed = await _ok(await gm.get(f"{BASE}/{mira}/mentions?confirmed=true"))
+    assert [i["id"] for i in listed["items"]] == [str(mention)]
+    assert (await _ok(await gm.get(f"{BASE}/{mira}")))["mention_count"] == 1
+    await _ok(await gm.delete(f"{BASE}/{mira}/mentions/{mention}"), 204)
+    assert (await _ok(await gm.get(f"{BASE}/{mira}")))["mention_count"] == 0
+
+
+async def test_player_entry_titles_and_entryless_mentions(ev4, db):
+    from datetime import date
+
+    from app.db.models.journal import JournalEntry
+
+    gm = await ev4.actor("gm_owner")
+    player = await ev4.actor("player")
+    ctx = await _gm_ctx(ev4, db)
+    mira = await _new_entity(db, ctx, "Mira", party=True)
+    mine = await _journal(db, ev4, "Mira at camp.", session_date=date(2026, 2, 2), kind="player")
+    gm_entry = await _journal(db, ev4, "Mira at sea.", session_date=date(2026, 2, 1))
+    on_player = await _add_mention(db, ctx, mira, mine, confirmed=True)
+    on_gm = await _add_mention(db, ctx, mira, gm_entry, confirmed=True)
+    doomed_entry = await _journal(db, ev4, "Mira, gone.", session_date=date(2026, 2, 3))
+    orphan = await _add_mention(db, ctx, mira, doomed_entry, confirmed=True)
+    await db.commit()
+    # The entry goes away under the Mention (journal_id SET NULL).
+    await db.execute(sa.delete(JournalEntry).where(JournalEntry.id == doomed_entry))
+    await db.commit()
+    body = await _ok(await gm.get(f"{BASE}/{mira}/mentions"))
+    assert [i["id"] for i in body["items"]] == [str(on_player), str(on_gm), str(orphan)] and body["total"] == 3
+    titles = {i["id"]: i["entry_title"] for i in body["items"]}
+    assert titles[str(on_player)] == "Player journal · 2026-02-02"
+    assert titles[str(on_gm)] == "Journal entry · 2026-02-01"
+    assert titles[str(orphan)] is None and body["items"][2]["journal_id"] is None
+    seen = await _ok(await player.get(f"{BASE}/{mira}/mentions"))
+    assert str(orphan) not in {i["id"] for i in seen["items"]}
+
+
+async def test_a_player_sees_confirmed_allowed_mentions_only(ev4, db):
+    gm_ctx = await _gm_ctx(ev4, db)
+    player = await ev4.actor("player")
+    mira = await _new_entity(db, gm_ctx, "Mira", party=True)
+    secret = await _new_entity(db, gm_ctx, "Secret")
+    party_entry = await _journal(db, ev4, "Mira sailed.")
+    other_entry = await _journal(db, ev4, "Mira again.")
+    hidden_entry = await _journal(db, ev4, "Mira in the vault.", visibility="gm")
+    shown = await _add_mention(db, gm_ctx, mira, party_entry, confirmed=True, quote="Mira sailed.")
+    await _add_mention(db, gm_ctx, mira, other_entry)  # suggested
+    await _add_mention(db, gm_ctx, mira, other_entry, confirmed=True, source_field="shorthand")
+    await _add_mention(db, gm_ctx, mira, hidden_entry, confirmed=True)
+    await _add_mention(db, gm_ctx, secret, party_entry, confirmed=True)
+    await db.commit()
+    body = await _ok(await player.get(f"{BASE}/{mira}/mentions"))
+    assert [i["id"] for i in body["items"]] == [str(shown)] and body["total"] == 1
+    assert "origin" not in body["items"][0] and "source_field" not in body["items"][0]
+    assert await _ok(await player.get(f"{BASE}/{mira}/mentions?confirmed=false")) == {
+        "items": [], "total": 0, "page": 1, "page_size": 20}
+    entry_list = await _ok(await player.get(f"{BASE}/mentions?journal_id={party_entry}"))
+    assert [i["id"] for i in entry_list["items"]] == [str(shown)]
+    assert (await _ok(await player.get(f"{BASE}/mentions?journal_id={other_entry}")))["items"] == []
+    assert (await player.get(f"{BASE}/mentions?journal_id={hidden_entry}")).status_code == 404
+    assert (await player.get(f"{BASE}/{secret}/mentions")).status_code == 404
+    assert (await _ok(await player.get(f"{BASE}/{mira}")))["mention_count"] == 1
+    # Writes: the uniform 404, nothing written.
+    for method, url in (("POST", f"{BASE}/{mira}/mentions/{shown}/confirm"),
+                        ("DELETE", f"{BASE}/{mira}/mentions/{shown}")):
+        assert (await player.request(method, url)).status_code == 404
+    assert await _mention_history(db, mira, "remove_mention") == 0
+
+
+# ── Wiring: 17 routes, each in nginx's /api/entities/ location (zone api) ───
 
 def test_every_entity_route_is_in_the_api_zone():
     from app.main import app
     from tests.ev4.routes import api_routes, resolve_route
 
     routes = [r for r in api_routes(app) if r.path.startswith("/api/entities")]
-    assert len(routes) == 13, sorted(f"{r.method} {r.path}" for r in routes)
+    assert len(routes) == 17, sorted(f"{r.method} {r.path}" for r in routes)
     for route in routes:
         loc = resolve_route(route)
         assert loc is not None and (loc.modifier, loc.uri) == ("", "/api/entities/"), (route, loc)

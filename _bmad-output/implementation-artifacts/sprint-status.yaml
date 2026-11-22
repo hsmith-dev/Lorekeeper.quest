@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 10-31-2026 23:30
-last_updated: 11-21-2026 11:50
+last_updated: 11-21-2026 23:51
 project: Lorekeeper.quest
 project_key: NOKEY
 tracking_system: file-system
@@ -159,7 +159,7 @@ development_status:
   9-4-name-matching-with-normalize_name-and-match_names: done
   9-5-entity-api-with-gm-and-party-projections: done
   9-6-legacy-npc-and-quest-adapters-and-old-link-resolver: backlog
-  9-7-suggested-mentions-backfill-and-mention-confirm-remove: backlog
+  9-7-suggested-mentions-backfill-and-mention-confirm-remove: done
   9-8-journal-delete-detaches-the-entry-from-the-world: backlog
   9-9-merge-two-entities: backlog
   9-10-world-hub-entity-page-and-panel-with-bulk-publish: backlog
